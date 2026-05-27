@@ -184,5 +184,22 @@ def test_ledger_load_rejects_path_traversal_id(tmp_path):
     for bad in ["../../etc/passwd", "..\\..\\secrets", "run/../../x", ""]:
         with pytest.raises(ValueError):
             EvidenceLedger.load(bad, tmp_path)
+        with pytest.raises(ValueError):
+            EvidenceLedger(bad, tmp_path)
     # Generated-style ids still load (empty ledger, no file yet).
     assert len(EvidenceLedger.load("run_abc123", tmp_path)) == 0
+
+
+def test_assistant_config_ignored_for_git_and_docker():
+    gitignore = open(".gitignore", encoding="utf-8").read().splitlines()
+    dockerignore = open(".dockerignore", encoding="utf-8").read().splitlines()
+
+    for ignored in [
+        ".qwen/",
+        ".playwright-mcp/",
+        ".playwright/",
+        "playwright-report/",
+        "test-results/",
+    ]:
+        assert ignored in gitignore
+        assert ignored in dockerignore

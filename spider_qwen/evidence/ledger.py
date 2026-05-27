@@ -19,11 +19,19 @@ from .models import EvidenceItem, EvidenceRef, SourceTool, sha256_hex
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+def _validate_run_id(run_id: str) -> str:
+    if not _SAFE_ID_RE.match(run_id or ""):
+        raise ValueError(
+            f"Invalid run_id '{run_id}': only letters, digits, '_' and '-' are allowed."
+        )
+    return run_id
+
+
 class EvidenceLedger:
     """In-memory ledger for one run, optionally persisted to a JSON file."""
 
     def __init__(self, run_id: str, state_dir: str | Path | None = None) -> None:
-        self.run_id = run_id
+        self.run_id = _validate_run_id(run_id)
         self._items: dict[str, EvidenceItem] = {}
         self._state_dir = Path(state_dir) if state_dir else None
 
@@ -91,10 +99,6 @@ class EvidenceLedger:
 
     @classmethod
     def load(cls, run_id: str, state_dir: str | Path) -> "EvidenceLedger":
-        if not _SAFE_ID_RE.match(run_id or ""):
-            raise ValueError(
-                f"Invalid run_id '{run_id}': only letters, digits, '_' and '-' are allowed."
-            )
         ledger = cls(run_id, state_dir)
         target = ledger.path()
         if target and target.exists():

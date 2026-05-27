@@ -28,6 +28,9 @@ ENV/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+test-results/
+playwright-report/
+.playwright/
 .coverage
 htmlcov/
 
@@ -36,5 +39,7 @@ tests/
 CLAUDE.md
 AGENTS.md
 .claude/
+.qwen/
+.playwright-mcp/
 .cursor/
 .aider*

@@ -32,6 +32,9 @@ htmlcov/
 .tox/
 .mypy_cache/
 .ruff_cache/
+test-results/
+playwright-report/
+.playwright/
 
 # Runtime state written by the agent (evidence ledgers, memory, traces).
 # Contains fetched page text and contact PII -- never commit.
@@ -45,6 +48,8 @@ reports/
 CLAUDE.md
 AGENTS.md
 .claude/
+.qwen/
+.playwright-mcp/
 .cursor/
 .aider*
 .github/copilot-instructions.md

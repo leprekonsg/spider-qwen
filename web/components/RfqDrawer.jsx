@@ -6,11 +6,14 @@
 // send" CTA. No network on send — drafts are never auto-submitted (v1 boundary).
 
 function RfqDrawer({ vendor, draft, onClose }) {
-  if (!vendor) return null;
+  // Hooks must run unconditionally and in a stable order, so they precede the
+  // early returns below.
   const [inputs, setInputs] = React.useState({});   // operator-provided values for un-evidenced fields
   const [sent, setSent] = React.useState(false);
+  const vid = vendor && vendor.id;
+  React.useEffect(() => { setInputs({}); setSent(false); }, [vid]);
 
-  React.useEffect(() => { setInputs({}); setSent(false); }, [vendor && vendor.id]);
+  if (!vendor) return null;
 
   if (!draft) {
     return (
