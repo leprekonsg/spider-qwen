@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "method": "Small rate-limited live validation set. Run manually with live providers; demo still uses offline fixtures.",
+  "cases": [
+    { "case_id": "live_sg_cleaning_001", "query": "office cleaning Singapore quotation", "expected_mode": "service_quote_required" },
+    { "case_id": "live_sg_pest_002", "query": "pest control Singapore RFQ", "expected_mode": "service_quote_required" },
+    { "case_id": "live_my_fire_003", "query": "fire alarm maintenance Malaysia quotation", "expected_mode": "service_quote_required" },
+    { "case_id": "live_sg_chairs_004", "query": "ergonomic office chairs Singapore public pricing", "expected_mode": "product_exact_price" },
+    { "case_id": "live_sg_paper_005", "query": "bulk printer paper Singapore price per unit", "expected_mode": "product_exact_price" },
+    { "case_id": "live_my_keyboards_006", "query": "mechanical keyboard supplier Malaysia unit price", "expected_mode": "product_exact_price" },
+    { "case_id": "live_sg_contact_007", "query": "find contact email for cleaning supplier Singapore", "expected_mode": "contact_enrichment_only" },
+    { "case_id": "live_my_contact_008", "query": "contact details for maintenance vendor Malaysia", "expected_mode": "contact_enrichment_only" },
+    { "case_id": "live_id_contact_009", "query": "find contact email for security vendor Indonesia", "expected_mode": "contact_enrichment_only" },
+    { "case_id": "live_sg_reval_010", "query": "revalidate quote channel for cleaning vendor Singapore", "expected_mode": "revalidation" },
+    { "case_id": "live_my_reval_011", "query": "refresh fire alarm vendor Malaysia contact evidence", "expected_mode": "revalidation" },
+    { "case_id": "live_th_reval_012", "query": "verify again audit firm Thailand contact evidence", "expected_mode": "revalidation" }
+  ]
+}

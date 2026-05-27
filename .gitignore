@@ -1,0 +1,62 @@
+# Secrets - NEVER commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+test-results/
+playwright-report/
+.playwright/
+
+# Runtime state written by the agent (evidence ledgers, memory, traces).
+# Contains fetched page text and contact PII -- never commit.
+.spider_qwen/
+.spider_qwen_demo/
+runs/
+*.ledger.json
+reports/
+
+# Agent / AI assistant config (local tooling, not part of the project)
+CLAUDE.md
+AGENTS.md
+.claude/
+.qwen/
+.playwright-mcp/
+.cursor/
+.aider*
+.github/copilot-instructions.md
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
