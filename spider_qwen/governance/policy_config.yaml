@@ -1,0 +1,60 @@
+schema_version: "1.0"
+
+geo:
+  default_region: "SEA"
+  fallback_region: "global"
+  boost_countries:
+    - Singapore
+    - Malaysia
+    - Indonesia
+    - Thailand
+    - Vietnam
+    - Philippines
+    - Brunei
+    - Cambodia
+    - Laos
+    - Myanmar
+
+budgets:
+  product_exact_price:
+    max_search_calls: 4
+    max_fetch_urls: 20
+    max_candidates_to_extract: 10
+    max_validated_candidates: 5
+    max_runtime_seconds: 180
+    min_validated_candidates: 5
+    evidence_completeness_threshold: 0.75
+  service_quote_required:
+    max_search_calls: 5
+    max_fetch_urls: 25
+    max_candidates_to_extract: 10
+    max_validated_candidates: 5
+    max_runtime_seconds: 180
+    min_validated_candidates: 3
+    evidence_completeness_threshold: 0.65
+  contact_enrichment_only:
+    max_search_calls: 3
+    max_fetch_urls: 15
+    max_candidates_to_extract: 10
+    max_validated_candidates: 5
+    max_runtime_seconds: 120
+    min_validated_candidates: 1
+    evidence_completeness_threshold: 0.70
+
+privacy:
+  review_gate_enabled:
+    business_contact: false
+    named_person_high_sensitivity: false
+  high_sensitivity_fields:
+    - named_person_email
+    - named_person_phone
+    - direct_mobile
+
+rfq:
+  allow_vendor_submission: false
+  default_tone: "SEA-neutral professional English; short and direct"
+  minimum_checklist_completeness: 0.65
+
+memory:
+  semantic_promotion_requires_evidence: true
+  allow_disputed_facts_in_rfq: false

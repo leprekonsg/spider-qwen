@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "cases": [
+    {
+      "case_id": "svc_sg_cleaning_001",
+      "query": "office cleaning Singapore",
+      "expected_mode": "service_quote_required",
+      "expected_pricing_status": ["QUOTE_REQUIRED", "CONTACT_FOR_PRICING"],
+      "must_find": { "quote_channel": true, "rfq_draft_status": "complete" }
+    },
+    {
+      "case_id": "svc_my_firealarm_002",
+      "query": "fire alarm maintenance Malaysia quotation",
+      "expected_mode": "service_quote_required",
+      "expected_pricing_status": ["QUOTE_REQUIRED", "CONTACT_FOR_PRICING"],
+      "must_find": { "quote_channel": true, "rfq_draft_status": "complete" }
+    },
+    {
+      "case_id": "svc_sg_pest_003",
+      "query": "pest control contract Singapore RFQ",
+      "expected_mode": "service_quote_required",
+      "expected_pricing_status": ["QUOTE_REQUIRED", "CONTACT_FOR_PRICING"],
+      "must_find": { "quote_channel": true, "rfq_draft_status": "complete" }
+    },
+    {
+      "case_id": "prod_sg_chairs_001",
+      "query": "500 ergonomic office chairs Singapore with public pricing",
+      "expected_mode": "product_exact_price",
+      "expected_pricing_status": ["EXACT_PRICE", "PRICE_RANGE", "STARTING_FROM", "RATE_CARD_FOUND"],
+      "must_find": { "quote_channel": false }
+    },
+    {
+      "case_id": "prod_sg_paper_002",
+      "query": "bulk printer paper supplier Singapore price per unit",
+      "expected_mode": "product_exact_price",
+      "expected_pricing_status": ["EXACT_PRICE", "PRICE_RANGE", "STARTING_FROM", "RATE_CARD_FOUND"],
+      "must_find": { "quote_channel": false }
+    },
+    {
+      "case_id": "contact_sg_enrich_001",
+      "query": "find contact email for Example Cleaning Pte Ltd Singapore",
+      "expected_mode": "contact_enrichment_only",
+      "expected_pricing_status": [],
+      "must_find": { "contact": true }
+    }
+  ]
+}

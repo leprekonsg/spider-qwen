@@ -1,0 +1,39 @@
+# Tool Usage
+
+Start with the lightest tool and escalate only when needed:
+`search → fetch → agent → browser`. **v1 uses only search + fetch.**
+
+## TinyFish (primary)
+
+`tools/tinyfish_client.py` (httpx, async).
+
+- **Search** — `GET https://api.search.tinyfish.ai` · params `query, location, language, page` → ranked URL results.
+- **Fetch** — `POST https://api.fetch.tinyfish.ai` · body `urls (≤10), format, links, image_links` → clean per-URL content + links + per-URL errors.
+- Auth: `X-API-Key` header. Retries on 429/5xx with backoff.
+
+`search_service.py` / `fetch_service.py` wrap the client, record every result to
+the evidence ledger, and enforce the budget.
+
+## Provider abstraction
+
+`SearchProvider` / `FetchProvider` protocols (`tools/provider_types.py`):
+
+| Search | Fetch |
+|---|---|
+| `TinyFishSearchProvider` | `TinyFishFetchProvider` |
+| `QwenMcpSearchProvider` (inject MCP backend) | `QwenWebExtractorFetchProvider` |
+| `MockSearchProvider` | `MockFetchProvider` |
+
+Select via `SPIDER_QWEN_SEARCH_PROVIDER` / `SPIDER_QWEN_FETCH_PROVIDER`.
+
+## Qwen WebExtractor (single-page fallback)
+
+`tools/qwen_web_extractor.py` — Alibaba Model Studio responses API with the
+`web_extractor` tool (`Authorization: Bearer $DASHSCOPE_API_KEY`, OpenAI-compatible
+SDK). Use only when TinyFish Fetch is unavailable, for single-URL Qwen-native
+extraction, or for benchmark comparison. Requires the `qwen` extra.
+
+## Not in v1
+
+TinyFish Agent / Browser, and Qwen code interpreter. `ToolRegistry` allowlist is
+`{search, fetch, qwen_web_extractor}`; everything else raises.
