@@ -1,7 +1,7 @@
-"""Web tool layer: TinyFish Search/Fetch (primary) + Qwen WebExtractor (fallback).
+"""Tool layer: TinyFish Search/Fetch plus optional Qwen providers.
 
-v1 uses only search + fetch. No TinyFish Agent or Browser. Providers are
-swappable through the SearchProvider / FetchProvider protocols.
+No TinyFish Agent, Browser, code interpreter, or submit/send tools. Providers
+are swappable through the SearchProvider / FetchProvider protocols.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from .provider_types import (
 )
 from .search_service import SearchService, build_search_provider
 from .fetch_service import FetchService, build_fetch_provider
+from .qwen_json_extractor import QwenJsonExtractor, MockQwenJsonExtractor
 
 __all__ = [
     "SearchResult",
@@ -30,4 +31,6 @@ __all__ = [
     "FetchService",
     "build_search_provider",
     "build_fetch_provider",
+    "QwenJsonExtractor",
+    "MockQwenJsonExtractor",
 ]

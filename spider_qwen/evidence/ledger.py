@@ -7,11 +7,16 @@ Downstream outputs carry EvidenceRef pointers (ledger_id) back into the ledger.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from .dedupe import dedupe_items
 from .models import EvidenceItem, EvidenceRef, SourceTool, sha256_hex
+
+# run_ids are generated as "run_" + hex; reject anything else so a caller-supplied
+# id can never traverse out of the state dir (e.g. "../../etc/passwd").
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class EvidenceLedger:
@@ -43,6 +48,7 @@ class EvidenceLedger:
             title=title,
             snippet=snippet,
             snippet_hash=sha256_hex(snippet),
+            text=text,
             text_hash=sha256_hex(text) if text else None,
             language=language,
             confidence=confidence,
@@ -85,6 +91,10 @@ class EvidenceLedger:
 
     @classmethod
     def load(cls, run_id: str, state_dir: str | Path) -> "EvidenceLedger":
+        if not _SAFE_ID_RE.match(run_id or ""):
+            raise ValueError(
+                f"Invalid run_id '{run_id}': only letters, digits, '_' and '-' are allowed."
+            )
         ledger = cls(run_id, state_dir)
         target = ledger.path()
         if target and target.exists():

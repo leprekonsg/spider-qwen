@@ -33,8 +33,10 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# Runtime state written by the agent (evidence ledgers, memory, traces)
+# Runtime state written by the agent (evidence ledgers, memory, traces).
+# Contains fetched page text and contact PII -- never commit.
 .spider_qwen/
+.spider_qwen_demo/
 runs/
 *.ledger.json
 reports/

@@ -65,6 +65,14 @@ def run_gold_set(path: str | Path, offline: bool = True) -> dict[str, Any]:
     classification_correct = sum(
         1 for c in cases if classifier.classify(c["query"]).mode.value == c["expected_mode"]
     )
+    per_mode: dict[str, dict[str, Any]] = {}
+    for mode in sorted({c["expected_mode"] for c in cases}):
+        mode_cases = [c for c in cases if c["expected_mode"] == mode]
+        correct = sum(1 for c in mode_cases if classifier.classify(c["query"]).mode.value == mode)
+        per_mode[mode] = {
+            "cases": len(mode_cases),
+            "mode_classification_accuracy": round(correct / (len(mode_cases) or 1), 3),
+        }
 
     summary = {
         "cases": len(rows),
@@ -82,6 +90,8 @@ def run_gold_set(path: str | Path, offline: bool = True) -> dict[str, Any]:
         ),
         "runtime_seconds": round(elapsed, 3),
         "offline": offline,
+        "per_mode": per_mode,
+        "method": data.get("method", "offline deterministic gold set" if offline else "live providers"),
         "details": rows,
     }
     return summary

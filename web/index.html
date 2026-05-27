@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Spider-Qwen · Workspace</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<link rel="stylesheet" href="tokens.css"/>
+<link rel="stylesheet" href="styles.css"/>
+<link rel="icon" type="image/png" href="assets/logo-darkmode.png"/>
+</head>
+<body data-density="comfortable">
+
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<!-- API client + result->view-model mapper (plain JS, no JSX) -->
+<script src="api.js"></script>
+
+<!-- tweaks panel starter -->
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+
+<!-- component library (order matters: primitives, then composites) -->
+<script type="text/babel" src="components/Icon.jsx"></script>
+<script type="text/babel" src="components/Sidebar.jsx"></script>
+<script type="text/babel" src="components/CommandBar.jsx"></script>
+<script type="text/babel" src="components/Pipeline.jsx"></script>
+<script type="text/babel" src="components/HeroIdle.jsx"></script>
+<script type="text/babel" src="components/HuntInProgress.jsx"></script>
+<script type="text/babel" src="components/Shortlist.jsx"></script>
+<script type="text/babel" src="components/VendorDetail.jsx"></script>
+<script type="text/babel" src="components/RfqDrawer.jsx"></script>
+<script type="text/babel" src="components/Signals.jsx"></script>
+
+<script type="text/babel">
+  const { useState, useEffect, useRef } = React;
+
+  const { useTweaks, TweaksPanel, TweakSection, TweakRadio, TweakToggle, TweakButton } = window;
+
+  // -------------------- TWEAKABLE DEFAULTS --------------------
+  const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+    "density":      "comfortable",
+    "agentTheatre": "moderate",
+    "signalFeed":   "rail",
+    "showRailIdle": true
+  }/*EDITMODE-END*/;
+
+  const SEA = ["Singapore","Malaysia","Indonesia","Thailand","Vietnam","Philippines","Brunei","Cambodia","Laos","Myanmar"];
+  function detectGeo(q) {
+    const hit = SEA.find(c => (q || "").toLowerCase().includes(c.toLowerCase()));
+    return hit ? `${hit} · SEA-first` : "SEA-first · global fallback";
+  }
+
+  function App() {
+    const t = useTweaks(TWEAK_DEFAULTS);
+    const setTweak = t.setTweak;
+    useEffect(() => { document.body.setAttribute("data-density", t.density); }, [t.density]);
+
+    const [screen, setScreen]   = useState("idle");   // idle | hunting | results
+    const [nav, setNav]         = useState("hunt");
+    const [tab, setTab]         = useState("suppliers");
+    const [query, setQuery]     = useState("Find office cleaning vendors in Singapore and prepare RFQ drafts");
+    const [focusId, setFocusId] = useState(null);
+    const [detailVendor, setDetailVendor] = useState(null);
+    const [draftVendor, setDraftVendor]   = useState(null);
+    const [toast, setToast]               = useState(null);
+    const [error, setError]               = useState(null);
+    const [recent, setRecent]             = useState(() => window.SQDATA.recentRuns());
+
+    const [view, setView]       = useState(null);     // mapped result
+    const [running, setRunning] = useState(false);
+    const [stream, setStream]   = useState([]);
+    const [evidence, setEvidence] = useState([]);
+    const [activePhase, setActivePhase] = useState("classify");
+    const [progress, setProgress] = useState(0);
+
+    const timeoutsRef  = useRef([]);
+    const intervalsRef = useRef([]);
+    const resultRef    = useRef(null);   // mapped view-model while a run is in flight
+    const classifyRef  = useRef(null);
+
+    function clearAllTimers() {
+      timeoutsRef.current.forEach(clearTimeout);
+      intervalsRef.current.forEach(clearInterval);
+      timeoutsRef.current = [];
+      intervalsRef.current = [];
+    }
+    useEffect(() => () => clearAllTimers(), []);
+
+    // -------- Start a hunt: drive the theatre, fire the real /run + /classify --
+    function startHunt() {
+      const q = query.trim();
+      if (!q) return;
+      clearAllTimers();
+      setError(null);
+      resultRef.current = null;
+      classifyRef.current = null;
+      setScreen("hunting");
+      setRunning(true);
+      setNav("hunt");
+      setStream([]);
+      setEvidence([]);
+      setProgress(0);
+      setActivePhase("classify");
+      setFocusId(null);
+
+      const speed = t.agentTheatre === "minimal" ? 0.55
+                  : t.agentTheatre === "heavy"   ? 1.7
+                  : 1.0;
+      const D = 2600 * speed;                       // theatre window
+      const phases = window.SQDATA.PHASE_ORDER;
+      const step = D / phases.length;
+      const push = (id) => timeoutsRef.current.push(id);
+
+      // Fire the real backend. classify is a cheap deterministic call for the
+      // Insights signal panel; run is the full pipeline.
+      window.SQAPI.classify(q).then(c => { classifyRef.current = c; }).catch(() => {});
+      window.SQAPI.run(q)
+        .then(r => { resultRef.current = window.SQMAP.mapResult(r); })
+        .catch(err => failRun(err));
+
+      // Reveal reasoning lines on a cadence; text is the real per-phase summary
+      // once the result lands, otherwise a generic process line.
+      phases.forEach((p, i) => {
+        push(setTimeout(() => {
+          setActivePhase(p);
+          setStream(prev => [...prev, { phase: p, text: window.SQMAP.reasoningLine(p, resultRef.current && resultRef.current.result) }]);
+        }, step * (i + 1)));
+      });
+
+      // Progress bar across the window.
+      const startedAt = Date.now();
+      const intId = setInterval(() => {
+        const p = Math.min(1, (Date.now() - startedAt) / D);
+        setProgress(p);
+        if (p >= 1) clearInterval(intId);
+      }, 60);
+      intervalsRef.current.push(intId);
+
+      // Stream evidence cards in as soon as the ledger is available.
+      let shown = 0;
+      const evId = setInterval(() => {
+        const led = resultRef.current && resultRef.current.ledger;
+        if (!led) return;
+        if (shown >= led.length) { clearInterval(evId); return; }
+        setEvidence(prev => [led[shown], ...prev]);
+        shown += 1;
+      }, 240 * speed);
+      intervalsRef.current.push(evId);
+
+      // Finalise once the window elapsed AND the result is ready.
+      const finalize = (waited) => {
+        if (error) return;
+        if (resultRef.current) return commitResult(resultRef.current);
+        if (waited > 12000) return;                 // hard ceiling; failRun handles errors
+        push(setTimeout(() => finalize(waited + 200), 200));
+      };
+      push(setTimeout(() => finalize(0), D + 300));
+    }
+
+    function commitResult(v) {
+      clearAllTimers();
+      if (classifyRef.current) v.classify = classifyRef.current;
+      setView(v);
+      setRunning(false);
+      setProgress(1);
+      setActivePhase("persist");
+      setScreen("results");
+      setTab("suppliers");
+      setFocusId(v.vendors[0] ? v.vendors[0].id : null);
+      const list = window.SQDATA.pushRecentRun(v.result);
+      setRecent(list);
+      // Delayed signal intercept, mirroring the design.
+      const riskSig = v.signals.find(s => s.kind === "risk") || v.signals[0];
+      if (riskSig) {
+        const id = setTimeout(() => setToast(riskSig), 6000);
+        timeoutsRef.current.push(id);
+      }
+    }
+
+    function failRun(err) {
+      clearAllTimers();
+      setError(String(err && err.message || err));
+      setRunning(false);
+      setProgress(0);
+      setScreen("idle");
+    }
+
+    function haltHunt() {
+      clearAllTimers();
+      setRunning(false);
+      if (resultRef.current) return commitResult(resultRef.current);
+      setScreen("idle");
+      setProgress(0);
+    }
+
+    function backToIdle() {
+      clearAllTimers();
+      setScreen("idle");
+      setRunning(false);
+      setProgress(0);
+      setStream([]);
+      setEvidence([]);
+      setFocusId(null);
+      setError(null);
+    }
+
+    function handleNav(k) {
+      setNav(k);
+      if (k === "shortlist") { setScreen(view ? "results" : "idle"); setTab("suppliers"); if (view && !focusId) setFocusId(view.vendors[0] && view.vendors[0].id); }
+      else if (k === "insights")  { if (view) { setScreen("results"); setTab("insights"); } }
+      else if (k === "contracts") { if (view) { setScreen("results"); setTab("contracts"); } }
+      else if (k === "signals")   { if (view) { setScreen("results"); setTab("risks"); } }
+      else if (k === "rfq" || k === "ledger") { if (view) setScreen("results"); }
+    }
+
+    const showRail = (screen !== "hunting") && t.signalFeed === "rail" && (screen !== "idle" || t.showRailIdle);
+    const railSignals = view ? view.signals : [];
+    const railLedger  = view ? view.ledger : [];
+
+    return (
+      <React.Fragment>
+        <TweaksPanel>
+          <TweakSection label="Layout">
+            <TweakRadio label="Density" value={t.density}
+              options={[{ value: "comfortable", label: "Editorial" }, { value: "dense", label: "Ops cockpit" }]}
+              onChange={v => setTweak("density", v)} />
+            <TweakRadio label="Signal feed" value={t.signalFeed}
+              options={[{ value: "rail", label: "Side rail" }, { value: "toast", label: "Toast only" }]}
+              onChange={v => setTweak("signalFeed", v)} />
+          </TweakSection>
+          <TweakSection label="Agent theatre">
+            <TweakRadio label="Run speed" value={t.agentTheatre}
+              options={[{ value: "minimal", label: "Fast" }, { value: "moderate", label: "Mid" }, { value: "heavy", label: "Cinematic" }]}
+              onChange={v => setTweak("agentTheatre", v)} />
+            <TweakToggle label="Show rail on idle" value={t.showRailIdle} onChange={v => setTweak("showRailIdle", v)} />
+          </TweakSection>
+          <TweakSection label="Demo">
+            <TweakButton label="Replay hunt"              onClick={startHunt}/>
+            <TweakButton label="Reset to idle"            onClick={backToIdle}/>
+            <TweakButton label="Trigger signal intercept" onClick={() => setToast((view && view.signals[0]) || { id: "s", kind: "info", ovl: "No run yet", title: "Run a hunt first", meta: "" })}/>
+          </TweakSection>
+        </TweaksPanel>
+
+        <Sidebar active={nav} onNav={handleNav} onNewRun={backToIdle} runState={running ? "running" : "idle"} />
+
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+          {screen !== "idle" && (
+            <>
+              <CommandBar query={query} setQuery={setQuery} mode="auto" onRun={startHunt} running={running} onPause={haltHunt} />
+              <Pipeline activePhase={activePhase} progress={progress} running={running} />
+            </>
+          )}
+
+          {error && (
+            <div style={{
+              margin: "0", padding: "10px 28px", background: "rgba(182,92,74,0.10)",
+              borderBottom: "1px solid rgba(182,92,74,0.45)", color: "#D67F6B",
+              fontFamily: "var(--sq-font-mono)", fontSize: 12, display: "flex", alignItems: "center", gap: 10,
+            }}>
+              <SQIcon name="info" size={14}/> Run failed — {error}. Is the API running? (uvicorn spider_qwen.api.server:app)
+            </div>
+          )}
+
+          <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
+            <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              {screen === "idle" && (
+                <HeroIdle query={query} setQuery={setQuery} onRun={startHunt} recent={recent}
+                  onPickRecent={(r) => setQuery(r.q)} />
+              )}
+              {screen === "hunting" && (
+                <HuntInProgress stream={stream} evidence={evidence}
+                  candidates={Math.min(5, Math.floor(progress * 6))} query={query}
+                  activePhase={activePhase} progress={progress} />
+              )}
+              {screen === "results" && view && (
+                <ResultsPane view={view} tab={tab} setTab={setTab} focusId={focusId} setFocusId={setFocusId}
+                  setDetailVendor={setDetailVendor} setDraftVendor={setDraftVendor} query={query} />
+              )}
+            </main>
+
+            {showRail && <SignalsRail feed="rail" signals={railSignals} ledger={railLedger} />}
+          </div>
+        </div>
+
+        <VendorDetail vendor={detailVendor} onClose={() => setDetailVendor(null)}
+          onDraft={(v) => { setDetailVendor(null); setDraftVendor(v); }} />
+
+        <RfqDrawer vendor={draftVendor}
+          draft={draftVendor && view ? view.rfqByVendor[draftVendor.name] : null}
+          onClose={() => setDraftVendor(null)} />
+
+        <SignalToast signal={toast} onDismiss={() => setToast(null)} onOpen={() => setToast(null)} />
+      </React.Fragment>
+    );
+  }
+
+  // ---- Results pane ----------------------------------------------------------
+  function ResultsPane({ view, tab, setTab, focusId, setFocusId, setDetailVendor, setDraftVendor, query }) {
+    const m = view.metrics || {};
+    const meta = {
+      retained: `${m.validated_candidates_total ?? view.vendors.length} / ${m.candidates_considered ?? view.vendors.length}`,
+      quoteRate: (m.quote_channel_found_rate ?? 0).toFixed(2),
+      fetches: `${m.fetch_urls_total ?? 0}`,
+      ledger: `${view.ledger.length}`,
+    };
+    const completeness = (m.quote_channel_found_rate ?? 0).toFixed(2);
+    return (
+      <section className="sq-section" style={{ flex: 1, minWidth: 0, padding: "26px 32px 32px", overflow: "auto", position: "relative" }}>
+        <window.WebMotif opacity={0.4}/>
+        <div style={{ position: "relative" }}>
+          <div className="sq-tabs" style={{ marginBottom: 22 }}>
+            {[
+              { k: "suppliers", label: "Suppliers", icon: "suppliers" },
+              { k: "insights",  label: "Insights",  icon: "insights"  },
+              { k: "contracts", label: "Contracts", icon: "contracts" },
+              { k: "risks",     label: "Risks",     icon: "risks"     },
+            ].map(x => (
+              <button key={x.k} className="sq-tab" data-active={tab === x.k} onClick={() => setTab(x.k)}>
+                <SQIcon name={x.icon} size={13}/> {x.label}
+              </button>
+            ))}
+            <span style={{
+              marginLeft: "auto", display: "flex", alignItems: "center", gap: 10,
+              fontFamily: "var(--sq-font-mono)", fontSize: 11, color: "var(--sq-slate-taupe)",
+              letterSpacing: "0.06em", paddingBottom: 10,
+            }}>
+              <span>{detectGeo(query)}</span>
+              <span className="sq-mono-chip" style={{ color: "var(--sq-smoke)" }}>stop · {view.result.stop_reason}</span>
+            </span>
+          </div>
+
+          {tab === "suppliers" && (
+            <window.Shortlist vendors={view.vendors} meta={meta} title={query}
+              focusId={focusId} onFocus={setFocusId} onDetail={setDetailVendor} onDraft={setDraftVendor} />
+          )}
+          {tab === "insights" && <InsightsTab view={view} query={query}/>}
+          {tab === "contracts" && <PlaceholderTab title="Active contracts" body="Renewal radar, evergreen clauses, expiry windows — drilling in soon."/>}
+          {tab === "risks" && <RisksTab view={view}/>}
+        </div>
+      </section>
+    );
+  }
+
+  // ---- Insights tab — real classification + budget burn-down -----------------
+  function InsightsTab({ view, query }) {
+    const cls = view.classification || {};
+    const sig = (view.classify && view.classify.signals) || {};
+    const ps = view.pricingSummary || {};
+    const modes = ["service_quote_required", "product_exact_price", "contact_enrichment_only", "revalidation"];
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <div className="sq-card" style={{ padding: 20 }}>
+          <div className="sq-overline" style={{ marginBottom: 10 }}>Query summary</div>
+          <h3 style={{ margin: 0, fontFamily: "var(--sq-font-serif)", fontWeight: 500, fontSize: 22, color: "var(--sq-bone)" }}>
+            {query}
+          </h3>
+          <p style={{ color: "var(--sq-fg-muted)", marginTop: 10, fontSize: 13.5, lineHeight: 1.55 }}>
+            {cls.rationale || "Deterministic classification."} Mode auto-classified as <code>{view.result.mode}</code> at {(cls.confidence || 0).toFixed(2)} confidence.
+          </p>
+          <div style={{ display: "flex", gap: 24, marginTop: 18, fontFamily: "var(--sq-font-mono)", fontSize: 11, color: "var(--sq-slate-taupe)" }}>
+            <Stat k="mode" v={view.result.mode.replace("_required","").replace("_only","")}/>
+            <Stat k="confidence" v={(cls.confidence || 0).toFixed(2)}/>
+            <Stat k="geo" v={detectGeo(query).split(" · ")[0]}/>
+            <Stat k="stop" v={view.result.stop_reason}/>
+          </div>
+        </div>
+
+        <div className="sq-card" style={{ padding: 20 }}>
+          <div className="sq-overline" style={{ marginBottom: 10 }}>Budget burn-down</div>
+          <BudgetBars view={view}/>
+        </div>
+
+        <div className="sq-card" style={{ padding: 20, gridColumn: "1 / -1" }}>
+          <div className="sq-overline" style={{ marginBottom: 14 }}>Mode classification trace</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+            {modes.map(k => {
+              const picked = k === view.result.mode;
+              const v = picked ? (cls.confidence || 0) : 0;
+              return (
+                <div key={k} style={{
+                  padding: "12px 14px",
+                  border: `1px solid ${picked ? "var(--sq-bone)" : "var(--sq-border)"}`,
+                  background: picked ? "rgba(242,229,230,0.04)" : "transparent",
+                }}>
+                  <div style={{ fontFamily: "var(--sq-font-mono)", fontSize: 11, color: picked ? "var(--sq-bone)" : "var(--sq-smoke)" }}>{k}</div>
+                  <div style={{ fontFamily: "var(--sq-font-serif)", fontSize: 24, color: picked ? "var(--sq-bone)" : "var(--sq-slate-taupe)", marginTop: 6 }}>
+                    {picked ? v.toFixed(2) : "—"}
+                  </div>
+                  <div style={{ position: "relative", height: 2, background: "var(--sq-border)", marginTop: 8 }}>
+                    <span style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${v * 100}%`, background: picked ? "var(--sq-bone)" : "var(--sq-slate-taupe)" }}/>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {Object.values(sig).some(a => Array.isArray(a) && a.length) && (
+            <div style={{ marginTop: 16, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <span style={{ fontFamily: "var(--sq-font-mono)", fontSize: 11, color: "var(--sq-slate-taupe)" }}>matched signals ·</span>
+              {Object.entries(sig).flatMap(([cat, terms]) => (terms || []).map(term => (
+                <span key={cat + term} className="sq-mono-chip" style={{ color: "var(--sq-smoke)" }}>{cat.replace(/_/g," ")}: {term}</span>
+              )))}
+            </div>
+          )}
+          {Object.keys(ps).length > 0 && (
+            <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <span style={{ fontFamily: "var(--sq-font-mono)", fontSize: 11, color: "var(--sq-slate-taupe)" }}>pricing ·</span>
+              {Object.entries(ps).map(([k, n]) => (
+                <span key={k} className="sq-mono-chip" style={{ color: "var(--sq-smoke)" }}>{k} × {n}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function Stat({ k, v }) {
+    return <div><div style={{ color: "var(--sq-slate-taupe)" }}>{k}</div><div style={{ color: "var(--sq-bone)", marginTop: 4 }}>{v}</div></div>;
+  }
+
+  function BudgetBars({ view }) {
+    const b = view.budget || {};
+    const m = view.metrics || {};
+    const items = [
+      { k: "search",   used: b.search_calls ?? 0,          cap: b.max_search_calls ?? b.search_calls ?? 1 },
+      { k: "fetch",    used: b.fetch_urls ?? 0,            cap: b.max_fetch_urls ?? b.fetch_urls ?? 1 },
+      { k: "extract",  used: b.candidates_extracted ?? 0,  cap: b.max_candidates_to_extract ?? b.candidates_extracted ?? 1 },
+      { k: "validate", used: m.validated_candidates_total ?? 0, cap: b.max_validated_candidates ?? m.validated_candidates_total ?? 1 },
+      { k: "draft",    used: m.rfq_drafts_total ?? 0,      cap: Math.max(m.rfq_drafts_total ?? 0, m.validated_candidates_total ?? 1) },
+    ];
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+        {items.map(b2 => {
+          const full = b2.cap > 0 && b2.used >= b2.cap;
+          return (
+            <div key={b2.k} style={{ display: "grid", gridTemplateColumns: "70px 1fr 50px", alignItems: "center", gap: 12, fontFamily: "var(--sq-font-mono)", fontSize: 11 }}>
+              <span style={{ color: "var(--sq-slate-taupe)" }}>{b2.k}</span>
+              <div style={{ position: "relative", height: 4, background: "var(--sq-border)" }}>
+                <span style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${b2.cap ? Math.min(100, (b2.used / b2.cap) * 100) : 0}%`, background: full ? "#A6BB87" : "var(--sq-bone)" }}/>
+              </div>
+              <span style={{ color: "var(--sq-bone)", textAlign: "right" }}>{b2.used} / {b2.cap}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function RisksTab({ view }) {
+    const risks = view.signals.filter(s => s.kind === "risk" || s.kind === "warn");
+    if (!risks.length) return <PlaceholderTab title="Risk signals" body="No risk or conflict signals surfaced for this run. Conflicting pricing and pending reviews appear here."/>;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, maxWidth: 720 }}>
+        {risks.map(s => <window.SignalCard key={s.id} signal={s}/>)}
+      </div>
+    );
+  }
+
+  function PlaceholderTab({ title, body }) {
+    return (
+      <div style={{ padding: "60px 0", color: "var(--sq-smoke)", fontFamily: "var(--sq-font-sans)", textAlign: "center" }}>
+        <div className="sq-overline" style={{ marginBottom: 12 }}>{title}</div>
+        <div style={{ fontFamily: "var(--sq-font-serif)", fontSize: 26, color: "var(--sq-bone)", marginBottom: 14, fontStyle: "italic" }}>Coming next.</div>
+        <p style={{ maxWidth: 460, margin: "0 auto", fontSize: 13.5, color: "var(--sq-fg-muted)", lineHeight: 1.55 }}>{body}</p>
+      </div>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+
+</body>
+</html>

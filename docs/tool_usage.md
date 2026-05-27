@@ -1,7 +1,8 @@
 # Tool Usage
 
 Start with the lightest tool and escalate only when needed:
-`search → fetch → agent → browser`. **v1 uses only search + fetch.**
+`search → fetch → deterministic extraction → optional Qwen JSON`. Browser,
+submission, code interpreter, and non-Qwen LLMs are out of scope.
 
 ## TinyFish (primary)
 
@@ -33,7 +34,26 @@ Select via `SPIDER_QWEN_SEARCH_PROVIDER` / `SPIDER_QWEN_FETCH_PROVIDER`.
 SDK). Use only when TinyFish Fetch is unavailable, for single-URL Qwen-native
 extraction, or for benchmark comparison. Requires the `qwen` extra.
 
-## Not in v1
+## Qwen JSON extractor
 
-TinyFish Agent / Browser, and Qwen code interpreter. `ToolRegistry` allowlist is
-`{search, fetch, qwen_web_extractor}`; everything else raises.
+`tools/qwen_json_extractor.py` takes already-fetched page text and asks Qwen for
+schema-constrained procurement JSON. It is opt-in via
+`QWEN_STRUCTURED_EXTRACTION_ENABLED=1` or `--qwen-json`; `--offline --qwen-json`
+uses `MockQwenJsonExtractor`.
+
+## Qwen router
+
+`modes/qwen_router.py` is called only when deterministic classification
+confidence is below `QWEN_ROUTER_CONFIDENCE_THRESHOLD` and
+`QWEN_ROUTER_FALLBACK_ENABLED=1`.
+
+## MCP memory seam
+
+`memory/mcp.py` exposes `semantic_memory.recall` and
+`semantic_memory.revalidate` through an MCP-shaped adapter. Controller recall
+uses this seam before ranking.
+
+## Not in scope
+
+TinyFish Agent / Browser, Qwen code interpreter, form submission, and email
+sending. `ToolRegistry` allowlist remains narrow.

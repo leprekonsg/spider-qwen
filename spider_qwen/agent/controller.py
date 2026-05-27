@@ -22,16 +22,20 @@ from .planner import Planner
 from .policy import Policy, load_policy
 from ..api.schema import Classification, RunResult
 from ..evidence.ledger import EvidenceLedger
+from ..evidence.graph import render_supplier_graph
+from ..evidence.models import EvidenceRef, sha256_hex
 from ..extraction.contact import ContactExtractor
 from ..extraction.dedupe import dedupe_candidates
-from ..extraction.pricing import PricingExtractor
-from ..extraction.quote_channel import QuoteChannelExtractor
+from ..extraction.pricing import PricingExtractor, PricingResult
+from ..extraction.quote_channel import QuoteChannelExtractor, QuoteChannelMatch
 from ..extraction.service_match import ServiceMatchExtractor
 from ..extraction.vendor_metadata import VendorMetadataExtractor
 from ..governance.audit import AuditLog
+from ..governance.review_events import ReviewStore
 from ..memory.episodic import EpisodicMemory, EpisodicRecord
+from ..memory.mcp import SemanticMemoryMcpAdapter
 from ..memory.promotion import should_promote_contact
-from ..memory.semantic import SemanticFact, SemanticMemory
+from ..memory.semantic import MemoryRecall, SemanticFact, SemanticMemory
 from ..memory.working import WorkingMemory
 from ..modes.classifier import ModeClassifier
 from ..modes.contracts import (
@@ -43,6 +47,7 @@ from ..modes.contracts import (
     QuoteChannel,
     ServiceCandidate,
 )
+from ..modes.qwen_router import QwenModeRouter, QwenModeRouterError
 from ..modes.router import ModeRouter, RoutePlan
 from ..observability.metrics import Metrics
 from ..observability.tracing import Tracer
@@ -52,10 +57,13 @@ from ..ranking.product_ranker import ProductRanker
 from ..ranking.service_ranker import ServiceRanker
 from ..rfq.generator import RFQGenerator
 from ..tools.fetch_service import FetchService, build_fetch_provider
+from ..tools.qwen_json_extractor import QwenJsonExtractor, QwenPageExtraction
 from ..tools.search_service import SearchService, build_search_provider
 
 _MOQ_RE = re.compile(r"(?:MOQ|minimum order(?: quantity)?)\D{0,15}([\d,]+)", re.IGNORECASE)
-_EVIDENCE_SOURCE_TOOLS = {"tinyfish_search", "tinyfish_fetch", "qwen_web_extractor", "mcp_search", "mock"}
+_EVIDENCE_SOURCE_TOOLS = {
+    "tinyfish_search", "tinyfish_fetch", "qwen_web_extractor", "mcp_search", "semantic_memory", "mock"
+}
 _PRICED_STATUSES = {
     PricingStatus.EXACT_PRICE,
     PricingStatus.PRICE_RANGE,
@@ -81,15 +89,29 @@ class Controller:
         *,
         search_provider: object | None = None,
         fetch_provider: object | None = None,
+        qwen_json_extractor: object | None = None,
+        qwen_router: object | None = None,
+        memory_mcp: SemanticMemoryMcpAdapter | None = None,
         state_dir: str | Path | None = None,
         persist: bool = True,
+        require_review: bool | None = None,
     ) -> None:
         self.policy = policy or load_policy()
         self.search_provider = search_provider or build_search_provider()
         self.fetch_provider = fetch_provider or build_fetch_provider()
         self.state_dir = Path(state_dir) if state_dir else None
         self.persist = persist and self.state_dir is not None
+        self.require_review = self.policy.hitl_require_review() if require_review is None else require_review
         self.classifier = ModeClassifier()
+        self.qwen_router = qwen_router
+        if self.qwen_router is None and self.policy.qwen_router_fallback_enabled():
+            self.qwen_router = QwenModeRouter(model=self.policy.qwen_router_model())
+        self.qwen_json_extractor = qwen_json_extractor
+        if self.qwen_json_extractor is None and self.policy.qwen_structured_extraction_enabled():
+            self.qwen_json_extractor = QwenJsonExtractor(model=self.policy.qwen_json_extractor_model())
+        self.memory_mcp = memory_mcp
+        if self.memory_mcp is None and self.state_dir is not None:
+            self.memory_mcp = SemanticMemoryMcpAdapter(self.state_dir)
         self.router = ModeRouter()
         self.planner = Planner()
         self.geo = GeoStrategy(self.policy.boost_countries, self.policy.default_region)
@@ -102,8 +124,26 @@ class Controller:
         }
         self._rankers = {"product": ProductRanker(), "service": ServiceRanker(), "contact": ContactRanker()}
 
+    def _classify(self, query: str, forced_mode: str | None = None):
+        result = self.classifier.classify(query, forced_mode=forced_mode)
+        if forced_mode and forced_mode != "auto":
+            return result
+        if result.confidence >= self.policy.qwen_router_confidence_threshold():
+            return result
+        if self.qwen_router is None or not getattr(self.qwen_router, "is_available", True):
+            result.rationale = f"{result.rationale}; qwen router fallback unavailable"
+            return result
+        try:
+            routed = self.qwen_router.classify(query)
+        except QwenModeRouterError as exc:
+            result.rationale = f"{result.rationale}; qwen router fallback failed: {exc}"
+            return result
+        routed.signals = {**result.signals, **routed.signals}
+        routed.rationale = f"{routed.rationale}; deterministic precheck was {result.mode.value} at {result.confidence:.2f}"
+        return routed
+
     async def run(self, query: str, mode: str = "auto", target_country: str | None = None) -> RunResult:
-        classification = self.classifier.classify(query, forced_mode=mode)
+        classification = self._classify(query, forced_mode=mode)
         chosen = classification.mode
         route = self.router.route(chosen)
         budget = self.policy.budget_for(chosen, route.budget_key)
@@ -114,6 +154,7 @@ class Controller:
         working = WorkingMemory(run_id=run_id, query=query, mode=chosen.value)
         tracer = Tracer(run_id, chosen.value, self.state_dir)
         audit = AuditLog(run_id, self.state_dir)
+        review_store = ReviewStore(self.state_dir) if self.persist and self.policy.hitl_enabled() else None
         metrics = Metrics()
         ctx = ExecutionContext(
             run_id=run_id, query=query, mode=chosen, ledger=ledger,
@@ -122,6 +163,15 @@ class Controller:
 
         search = SearchService(self.search_provider, ledger, tracker, tracer)
         fetch = FetchService(self.fetch_provider, ledger, tracker, tracer)
+        memory_recalls = self._recall_memory(query, ctx, audit)
+
+        if review_store and mode == "auto" and classification.confidence < self.policy.qwen_router_confidence_threshold():
+            review_store.create(
+                run_id=run_id,
+                reason="low-confidence classification",
+                proposed_action=f"use mode {chosen.value}",
+                detail=classification.model_dump(mode="json"),
+            )
 
         if target_country is None:
             target_country = self._detect_target_country(query)
@@ -131,6 +181,7 @@ class Controller:
             ctx, route, query, search, fetch, region="SEA", target_country=target_country,
             reserve_search_calls=1 if budget.max_search_calls > 1 else 0,
         )
+        candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
         ranker = self._rankers[route.ranker]
         ranked = ranker.rank(candidates)
         validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
@@ -147,6 +198,7 @@ class Controller:
                 ctx, route, query, search, fetch, region="global", target_country=target_country
             )
             candidates = dedupe_candidates(candidates + more)
+            candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
             ranked = ranker.rank(candidates)
             validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
 
@@ -155,7 +207,7 @@ class Controller:
 
         rfq_drafts: list[dict] = []
         if route.produces_rfq:
-            rfq_drafts = self._build_rfqs(query, validated, target_country, metrics, audit)
+            rfq_drafts = self._build_rfqs(query, validated, target_country, metrics, audit, run_id, review_store)
 
         metrics.search_calls_total = tracker.search_calls
         metrics.fetch_urls_total = tracker.fetch_urls
@@ -182,11 +234,13 @@ class Controller:
             metrics={
                 **metrics.model_dump(),
                 "quote_channel_found_rate": metrics.quote_channel_found_rate,
+                "memory_recalls": len(memory_recalls),
+                "pending_reviews": len(review_store.list(status="pending")) if review_store else 0,
             },
             budget=tracker.snapshot(),
         )
 
-        self._persist_run(ctx, audit, result, validated)
+        self._persist_run(ctx, audit, result, validated, review_store)
         return result
 
     # --- pipeline phases --------------------------------------------------
@@ -237,6 +291,61 @@ class Controller:
             candidates.append(self._build_candidate(ctx, route, query, page, target_country))
         return candidates
 
+    def _recall_memory(self, query: str, ctx: ExecutionContext, audit: AuditLog) -> list[MemoryRecall]:
+        if self.memory_mcp is None:
+            return []
+        try:
+            if hasattr(self.memory_mcp, "memory"):
+                self.memory_mcp.memory.maintain()
+            recalls = self.memory_mcp.recall(query=query, top_k=5, context_budget_chars=1200)
+        except Exception as exc:
+            ctx.tracer.record(step="memory_recall", tool="semantic_memory", status="error", error=str(exc))
+            return []
+        if recalls:
+            audit.record("semantic_memory_recalled", count=len(recalls))
+            ctx.tracer.record(
+                step="memory_recall",
+                tool="semantic_memory",
+                status="success",
+                input_count=1,
+                output_count=len(recalls),
+            )
+        return recalls
+
+    def _apply_memory_recalls(self, ctx: ExecutionContext, candidates: list, recalls: list[MemoryRecall]) -> list:
+        if not recalls:
+            return candidates
+        quote_recalls = [r for r in recalls if r.fact.status == "active" and r.fact.field == "quote_channel"]
+        if not quote_recalls:
+            return candidates
+        for cand in candidates:
+            if not isinstance(cand, ServiceCandidate) or cand.quote_channel is not None:
+                continue
+            for recall in quote_recalls:
+                if not _same_vendor(cand.vendor_name, recall.fact.entity_name):
+                    continue
+                ref = ctx.ledger.record(
+                    source_tool="semantic_memory",
+                    url=cand.website or "semantic-memory",
+                    snippet=recall.fact.value,
+                    confidence=recall.decayed_confidence,
+                    metadata={
+                        "fact_id": recall.fact.fact_id,
+                        "field": recall.fact.field,
+                        "source_evidence_refs": [r.model_dump(mode="json") for r in recall.fact.evidence_refs],
+                        "recall_score": recall.score,
+                    },
+                )
+                cand.quote_channel = QuoteChannel(
+                    type=_quote_type_from_memory(recall.fact.value),
+                    value=recall.fact.value,
+                    evidence_ref=ref,
+                )
+                cand.evidence_refs = _merge_refs(cand.evidence_refs, [ref])
+                cand.evidence_completeness = max(cand.evidence_completeness, 0.75)
+                break
+        return candidates
+
     def _build_candidate(self, ctx: ExecutionContext, route: RoutePlan, query: str, page, target_country: str | None):
         meta = self._extractors["vendor_metadata"].extract(
             page_url=page.url, final_url=page.final_url, title=page.title, text=page.text
@@ -245,15 +354,36 @@ class Controller:
         refs = [ref] if ref else []
         geo_score = self.geo.score(meta.country, target_country, page.text)
         page_url = page.final_url or page.url
+        qwen = self._extract_qwen_json(ctx, query, page_url, page.text)
 
         if route.ranker == "product":
-            return self._product_candidate(ctx, query, page, meta, refs, geo_score, page_url)
+            return self._product_candidate(ctx, query, page, meta, refs, geo_score, page_url, qwen)
         if route.ranker == "service":
-            return self._service_candidate(ctx, query, page, meta, refs, geo_score, page_url, target_country)
-        return self._contact_candidate(ctx, page, meta, refs, geo_score)
+            return self._service_candidate(ctx, query, page, meta, refs, geo_score, page_url, target_country, qwen)
+        return self._contact_candidate(ctx, page, meta, refs, geo_score, qwen)
 
-    def _product_candidate(self, ctx, query, page, meta, refs, geo_score, page_url):
+    def _extract_qwen_json(self, ctx: ExecutionContext, query: str, page_url: str, text: str) -> QwenPageExtraction | None:
+        if self.qwen_json_extractor is None:
+            return None
+        try:
+            result = self.qwen_json_extractor.extract(text=text, page_url=page_url, query=query)
+        except Exception as exc:
+            # Any extractor/provider failure degrades to the deterministic path.
+            ctx.tracer.record(step="qwen_json_extract", tool="qwen_json_extractor", status="error", error=str(exc))
+            return None
+        ctx.tracer.record(step="qwen_json_extract", tool="qwen_json_extractor", status="success", input_count=1, output_count=1)
+        return result
+
+    def _product_candidate(self, ctx, query, page, meta, refs, geo_score, page_url, qwen: QwenPageExtraction | None):
         pricing = self._extractors["pricing"].extract(page.text)
+        if qwen and qwen.pricing.status != PricingStatus.NOT_FOUND:
+            pricing = PricingResult(
+                status=qwen.pricing.status,
+                price=qwen.pricing.price,
+                currency=qwen.pricing.currency,
+                unit=qwen.pricing.unit,
+                matched_text=qwen.pricing.matched_text,
+            )
         pricing_ref = self._record_extraction_ref(
             ctx, page, "pricing", pricing.matched_text
         ) if pricing.matched_text else None
@@ -281,12 +411,17 @@ class Controller:
         cand.evidence_completeness = round(sum(backed) / len(backed), 3)
         return cand
 
-    def _service_candidate(self, ctx, query, page, meta, refs, geo_score, page_url, target_country):
+    def _service_candidate(self, ctx, query, page, meta, refs, geo_score, page_url, target_country, qwen: QwenPageExtraction | None):
         sm = self._extractors["service_match"].extract(query, page.text)
         service_ref = self._record_extraction_ref(
             ctx, page, "service_match", "", fallback_terms=sm.matched_terms
         ) if sm.matched else None
         qc_matches = self._extractors["quote_channel"].extract(page.text, page.links, page_url)
+        if qwen:
+            qc_matches.extend(
+                QuoteChannelMatch(type=q.type, value=q.value, matched_text=q.matched_text or q.value)
+                for q in qwen.quote_channels
+            )
         best = self._extractors["quote_channel"].best(qc_matches)
         quote_channel = None
         quote_ref = None
@@ -316,8 +451,20 @@ class Controller:
         cand.evidence_completeness = round(sum(backed) / len(backed), 3)
         return cand
 
-    def _contact_candidate(self, ctx, page, meta, refs, geo_score):
+    def _contact_candidate(self, ctx, page, meta, refs, geo_score, qwen: QwenPageExtraction | None):
         matches = self._extractors["contact"].extract(page.text, page.links)
+        if qwen:
+            from ..extraction.contact import ContactMatch
+
+            matches.extend(
+                ContactMatch(
+                    type=c.type,
+                    value=c.value,
+                    confidence=c.confidence,
+                    privacy_class=c.privacy_class,
+                )
+                for c in qwen.contacts
+            )
         ref = refs[0] if refs else None
         site_domain = _registrable(meta.website)
         contacts = []
@@ -381,7 +528,16 @@ class Controller:
             return StopReason.MAX_RUNTIME_REACHED
         return StopReason.INSUFFICIENT_EVIDENCE
 
-    def _build_rfqs(self, query, validated, target_country, metrics: Metrics, audit: AuditLog) -> list[dict]:
+    def _build_rfqs(
+        self,
+        query,
+        validated,
+        target_country,
+        metrics: Metrics,
+        audit: AuditLog,
+        run_id: str,
+        review_store: ReviewStore | None,
+    ) -> list[dict]:
         generator = RFQGenerator(
             tone=self.policy.rfq_tone,
             minimum_completeness=self.policy.minimum_checklist_completeness,
@@ -395,7 +551,37 @@ class Controller:
             if draft.status == "incomplete":
                 metrics.rfq_incomplete_total += 1
             audit.record("rfq_draft_generated", vendor=cand.vendor_name, status=draft.status)
-            drafts.append(draft.model_dump(mode="json"))
+            draft_dict = draft.model_dump(mode="json")
+            if review_store and self.require_review:
+                # Blocking checkpoint: withhold the polished RFQ until a human
+                # approves. The full draft is carried in the review event detail
+                # and released by `review approve <event_id>`.
+                event = review_store.create(
+                    run_id=run_id,
+                    reason="rfq finalization",
+                    proposed_action=f"review RFQ draft for {cand.vendor_name}",
+                    detail={"vendor": cand.vendor_name, "status": draft.status, "rfq_draft": draft_dict},
+                )
+                metrics.held_for_review += 1
+                drafts.append(
+                    {
+                        "schema_version": draft.schema_version,
+                        "status": "pending_review",
+                        "vendor": draft_dict.get("vendor"),
+                        "quote_channel": draft_dict.get("quote_channel"),
+                        "review_event_id": event.event_id,
+                    }
+                )
+            else:
+                # Advisory (non-blocking) review event when HITL is enabled.
+                if review_store:
+                    review_store.create(
+                        run_id=run_id,
+                        reason="rfq finalization",
+                        proposed_action=f"review RFQ draft for {cand.vendor_name}",
+                        detail={"vendor": cand.vendor_name, "status": draft.status},
+                    )
+                drafts.append(draft_dict)
         return drafts
 
     # --- helpers ----------------------------------------------------------
@@ -418,14 +604,28 @@ class Controller:
     ):
         if page.evidence_ref is None:
             return None
-        snippet = _snippet_for_match(page.text, matched_text, fallback_terms)
-        if not snippet:
-            snippet = matched_text.strip()
+        snippet, start_char, end_char, span = _span_for_match(page.text, matched_text, fallback_terms)
         if not snippet:
             return None
         source_tool = getattr(page, "source_tool", "tinyfish_fetch")
         if source_tool not in _EVIDENCE_SOURCE_TOOLS:
             source_tool = "tinyfish_fetch"
+        claim_id = f"claim_{sha256_hex(f'{page.evidence_ref.ledger_id}:{extraction}:{start_char}:{end_char}:{span}')[:12]}"
+        metadata = {
+            "extraction": extraction,
+            "field": extraction,
+            "matched_text": matched_text,
+            "claim_id": claim_id,
+            "parent_ledger_id": page.evidence_ref.ledger_id,
+        }
+        if start_char >= 0 and end_char >= start_char:
+            metadata.update(
+                {
+                    "start_char": start_char,
+                    "end_char": end_char,
+                    "span_hash": sha256_hex(span),
+                }
+            )
         return ctx.ledger.record(
             source_tool=source_tool,
             url=page.url,
@@ -434,11 +634,7 @@ class Controller:
             snippet=snippet,
             language=page.language,
             confidence=0.75,
-            metadata={
-                "extraction": extraction,
-                "matched_text": matched_text,
-                "parent_ledger_id": page.evidence_ref.ledger_id,
-            },
+            metadata=metadata,
         )
 
     def _detect_target_country(self, query: str) -> str | None:
@@ -448,7 +644,14 @@ class Controller:
                 return country
         return None
 
-    def _persist_run(self, ctx: ExecutionContext, audit: AuditLog, result: RunResult, validated) -> None:
+    def _persist_run(
+        self,
+        ctx: ExecutionContext,
+        audit: AuditLog,
+        result: RunResult,
+        validated,
+        review_store: ReviewStore | None = None,
+    ) -> None:
         outcome = "success" if result.stop_reason == StopReason.MIN_VALIDATED_CANDIDATES_MET.value else (
             "incomplete" if validated else "failed"
         )
@@ -466,12 +669,20 @@ class Controller:
             )
         )
         if self.persist:
-            self._persist_semantic(validated)
+            self._persist_semantic(validated, result.run_id, review_store)
             ctx.ledger.persist()
+            self._persist_supplier_graph(ctx.ledger)
             ctx.tracer.persist() if ctx.tracer else None
             audit.persist()
 
-    def _persist_semantic(self, validated) -> None:
+    def _persist_supplier_graph(self, ledger: EvidenceLedger) -> None:
+        if self.state_dir is None:
+            return
+        target = self.state_dir / "graphs" / f"{ledger.run_id}.mmd"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(render_supplier_graph(ledger), encoding="utf-8")
+
+    def _persist_semantic(self, validated, run_id: str, review_store: ReviewStore | None) -> None:
         if self.state_dir is None:
             return
         memory = SemanticMemory(
@@ -491,7 +702,7 @@ class Controller:
                         domain_match=domain_match,
                     ):
                         continue
-                    memory.upsert(
+                    stored = memory.upsert(
                         SemanticFact(
                             entity_type="vendor",
                             entity_name=cand.vendor_name,
@@ -502,8 +713,9 @@ class Controller:
                             evidence_refs=[contact.evidence_ref],
                         )
                     )
+                    self._maybe_review_disputed_fact(run_id, review_store, stored)
             if isinstance(cand, ServiceCandidate) and cand.quote_channel is not None:
-                memory.upsert(
+                stored = memory.upsert(
                     SemanticFact(
                         entity_type="vendor",
                         entity_name=cand.vendor_name,
@@ -513,6 +725,21 @@ class Controller:
                         evidence_refs=[cand.quote_channel.evidence_ref],
                     )
                 )
+                self._maybe_review_disputed_fact(run_id, review_store, stored)
+
+    def _maybe_review_disputed_fact(
+        self,
+        run_id: str,
+        review_store: ReviewStore | None,
+        fact: SemanticFact,
+    ) -> None:
+        if review_store and fact.status == "disputed":
+            review_store.create(
+                run_id=run_id,
+                reason="disputed fact promotion",
+                proposed_action=f"review semantic fact {fact.fact_id}",
+                detail=fact.model_dump(mode="json"),
+            )
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -537,19 +764,48 @@ def _merge_refs(*groups) -> list:
     return out
 
 
-def _snippet_for_match(text: str, matched_text: str, fallback_terms: list[str] | None = None) -> str:
+def _span_for_match(text: str, matched_text: str, fallback_terms: list[str] | None = None) -> tuple[str, int, int, str]:
     body = text or ""
     target = (matched_text or "").strip()
     lower = body.lower()
     needle = target.lower()
     if needle and needle in lower:
-        start = max(0, lower.index(needle) - 180)
-        end = min(len(body), lower.index(needle) + len(target) + 180)
-        return body[start:end].strip()
+        span_start = lower.index(needle)
+        span_end = span_start + len(target)
+        snippet_start = max(0, span_start - 180)
+        snippet_end = min(len(body), span_end + 180)
+        return body[snippet_start:snippet_end].strip(), span_start, span_end, body[span_start:span_end]
     for term in fallback_terms or []:
         needle = term.lower()
         if needle and needle in lower:
-            start = max(0, lower.index(needle) - 180)
-            end = min(len(body), lower.index(needle) + len(term) + 180)
-            return body[start:end].strip()
-    return target
+            span_start = lower.index(needle)
+            span_end = span_start + len(term)
+            snippet_start = max(0, span_start - 180)
+            snippet_end = min(len(body), span_end + 180)
+            return body[snippet_start:snippet_end].strip(), span_start, span_end, body[span_start:span_end]
+    return target, -1, -1, target
+
+
+def _same_vendor(a: str, b: str) -> bool:
+    left = _normal_vendor(a)
+    right = _normal_vendor(b)
+    return bool(left and right and (left in right or right in left))
+
+
+def _normal_vendor(name: str) -> str:
+    stop = {"pte", "ltd", "sdn", "bhd", "llc", "inc", "co", "company", "team"}
+    return " ".join(t for t in re.sub(r"[^a-z0-9 ]", " ", (name or "").lower()).split() if t not in stop)
+
+
+def _quote_type_from_memory(value: str):
+    if "@" in value:
+        from ..modes.contracts import QuoteChannelType
+
+        return QuoteChannelType.CONTACT_EMAIL
+    if re.search(r"\d{7,}", re.sub(r"\D", "", value or "")):
+        from ..modes.contracts import QuoteChannelType
+
+        return QuoteChannelType.PHONE
+    from ..modes.contracts import QuoteChannelType
+
+    return QuoteChannelType.CONTACT_PAGE

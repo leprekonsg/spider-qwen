@@ -1,0 +1,40 @@
+# Keep secrets, local state, and VCS metadata out of the image layers.
+# (README.md, LICENSE, pyproject.toml and spider_qwen/ are required by the build.)
+.git
+.gitignore
+.dockerignore
+
+# Secrets - never bake into an image
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Local runtime state (contains fetched page text + contact PII)
+.spider_qwen/
+.spider_qwen_demo/
+runs/
+reports/
+*.ledger.json
+
+# Python / tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tests and assistant config are not needed at runtime
+tests/
+CLAUDE.md
+AGENTS.md
+.claude/
+.cursor/
+.aider*

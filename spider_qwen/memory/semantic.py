@@ -37,6 +37,13 @@ class SemanticFact(BaseModel):
         return f"{self.entity_type}:{self.entity_name.lower()}:{self.field}"
 
 
+class MemoryRecall(BaseModel):
+    fact: SemanticFact
+    decayed_confidence: float
+    score: float
+    reason: str = ""
+
+
 class SemanticMemory:
     def __init__(self, state_dir: str | Path | None = None, require_evidence: bool = True) -> None:
         self._state_dir = Path(state_dir) if state_dir else None
@@ -90,6 +97,60 @@ class SemanticMemory:
     def active(self) -> list[SemanticFact]:
         return [f for f in self._facts.values() if f.status == "active"]
 
+    def maintain(self, *, stale_days: float | None = None) -> int:
+        """Apply staleness policy and persist changed facts."""
+        from .decay import DEFAULT_STALE_DAYS, is_stale
+
+        threshold = DEFAULT_STALE_DAYS if stale_days is None else stale_days
+        changed = 0
+        for fact in self._facts.values():
+            if fact.status == "active" and is_stale(fact, stale_days=threshold):
+                fact.status = "stale"
+                changed += 1
+        if changed:
+            self._persist()
+        return changed
+
+    def recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        context_budget_chars: int = 1200,
+    ) -> list[MemoryRecall]:
+        """Return active facts that fit a simple limited-context budget."""
+        from .decay import apply_decay
+
+        query_terms = _terms(query)
+        recalls: list[MemoryRecall] = []
+        for fact in self.active():
+            decayed = apply_decay(fact)
+            haystack = _terms(f"{fact.entity_name} {fact.field} {fact.value}")
+            overlap = len(query_terms & haystack)
+            if overlap <= 0:
+                continue
+            score = round(decayed * (1.0 + min(overlap, 4) * 0.1), 4)
+            recalls.append(
+                MemoryRecall(
+                    fact=fact,
+                    decayed_confidence=round(decayed, 4),
+                    score=score,
+                    reason=f"{overlap} query term(s) matched",
+                )
+            )
+        recalls.sort(key=lambda r: r.score, reverse=True)
+        out: list[MemoryRecall] = []
+        used = 0
+        for recall in recalls[:top_k]:
+            size = len(recall.fact.entity_name) + len(recall.fact.field) + len(recall.fact.value) + 16
+            if out and used + size > context_budget_chars:
+                break
+            if size > context_budget_chars:
+                continue
+            used += size
+            out.append(recall)
+        return out
+
     def _by_key(self, key: str) -> SemanticFact | None:
         for fact in self._facts.values():
             if fact.key() == key:
@@ -110,3 +171,7 @@ class SemanticMemory:
             json.dumps([f.model_dump() for f in self._facts.values()], indent=2),
             encoding="utf-8",
         )
+
+
+def _terms(text: str) -> set[str]:
+    return {t for t in "".join(c.lower() if c.isalnum() else " " for c in text).split() if len(t) > 2}

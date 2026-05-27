@@ -15,6 +15,24 @@ class Revalidator:
     def __init__(self, memory: SemanticMemory) -> None:
         self.memory = memory
 
+    def revalidate(
+        self,
+        *,
+        fact_id: str,
+        observed_value: str | None,
+        evidence_refs: list[EvidenceRef],
+        new_confidence: float,
+    ) -> SemanticFact | None:
+        fact = self.memory.get(fact_id)
+        if fact is None:
+            return None
+        return self.refresh(
+            fact,
+            new_value=observed_value,
+            new_confidence=new_confidence,
+            new_refs=evidence_refs,
+        )
+
     def refresh(
         self,
         fact: SemanticFact,

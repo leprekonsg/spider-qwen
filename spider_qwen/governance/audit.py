@@ -14,6 +14,10 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class PolicyViolation(Exception):
+    pass
+
+
 class AuditEvent(BaseModel):
     run_id: str
     action: str
@@ -32,7 +36,7 @@ class AuditLog:
 
     def record(self, action: str, **detail: Any) -> AuditEvent:
         if action in self.FORBIDDEN:
-            raise ValueError(f"Action '{action}' is forbidden in v1 (RFQ draft only)")
+            raise PolicyViolation(f"Action '{action}' is forbidden (RFQ draft only)")
         event = AuditEvent(run_id=self.run_id, action=action, detail=detail)
         self.events.append(event)
         return event

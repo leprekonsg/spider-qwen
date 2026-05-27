@@ -7,6 +7,7 @@ stays disabled by default in v1.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,27 @@ class Policy:
     def review_gate_enabled(self, privacy_class: str) -> bool:
         return bool(self.data.get("privacy", {}).get("review_gate_enabled", {}).get(privacy_class, False))
 
+    def qwen_router_model(self) -> str:
+        return os.getenv("QWEN_ROUTER_MODEL") or str(self.data.get("qwen", {}).get("router_model", "qwen3-max-2026-01-23"))
+
+    def qwen_json_extractor_model(self) -> str:
+        return os.getenv("QWEN_JSON_EXTRACTOR_MODEL") or str(self.data.get("qwen", {}).get("json_extractor_model", "qwen-flash"))
+
+    def qwen_structured_extraction_enabled(self) -> bool:
+        return _env_bool("QWEN_STRUCTURED_EXTRACTION_ENABLED", self.data.get("qwen", {}).get("structured_extraction_enabled", False))
+
+    def qwen_router_fallback_enabled(self) -> bool:
+        return _env_bool("QWEN_ROUTER_FALLBACK_ENABLED", self.data.get("qwen", {}).get("router_fallback_enabled", False))
+
+    def qwen_router_confidence_threshold(self) -> float:
+        return float(os.getenv("QWEN_ROUTER_CONFIDENCE_THRESHOLD") or self.data.get("qwen", {}).get("router_confidence_threshold", 0.65))
+
+    def hitl_enabled(self) -> bool:
+        return bool(self.data.get("hitl", {}).get("enabled", False))
+
+    def hitl_require_review(self) -> bool:
+        return bool(self.data.get("hitl", {}).get("require_review", False))
+
     def high_sensitivity_fields(self) -> list[str]:
         return list(self.data.get("privacy", {}).get("high_sensitivity_fields", []))
 
@@ -81,3 +103,10 @@ def load_policy(path: str | Path | None = None) -> Policy:
     target = Path(path) if path else _DEFAULT_PATH
     data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
     return Policy(data)
+
+
+def _env_bool(name: str, default: Any) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return value.lower() in {"1", "true", "yes", "on"}

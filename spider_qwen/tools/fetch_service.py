@@ -70,7 +70,23 @@ class MockFetchProvider:
                 if host.startswith("www."):
                     host = host[4:]
                 email = f"sales@{host}"
-                if _looks_like_product_topic(topic):
+                lower_topic = topic.lower()
+                if "missing price" in lower_topic or "price missing" in lower_topic:
+                    text = (
+                        f"We supply {topic} in Singapore. Product catalogue available on request. "
+                        f"For enquiries email {email} or call +65 6123 4567."
+                    )
+                elif "conflicting price" in lower_topic or "conflicting prices" in lower_topic:
+                    text = (
+                        f"We supply {topic} in Singapore. Price is S$10 per unit. "
+                        f"Elsewhere this page lists S$200 per unit. Email {email}."
+                    )
+                elif "rate card" in lower_topic:
+                    text = (
+                        f"We supply {topic} in Singapore. Download our rate card for public pricing. "
+                        f"Email {email} for volume terms."
+                    )
+                elif _looks_like_product_topic(topic):
                     text = (
                         f"We supply {topic} in Singapore. Public pricing starts at S$129 per unit. "
                         f"MOQ 50 units. For volume orders email {email} or call +65 6123 4567."
@@ -155,7 +171,8 @@ def _looks_like_product_topic(topic: str) -> bool:
     product_terms = (
         "chair", "chairs", "paper", "keyboard", "keyboards", "monitor", "monitors",
         "laptop", "laptops", "desk", "desks", "printer", "printers", "cartridge",
-        "units", "pcs", "pieces",
+        "units", "pcs", "pieces", "supplies", "uniform", "uniforms", "cable", "cables",
+        "sensor", "sensors", "toner", "table", "tables", "ppe", "kits",
     )
     return any(term in text for term in product_terms)
 

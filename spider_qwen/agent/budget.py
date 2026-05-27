@@ -117,4 +117,9 @@ class BudgetTracker:
             "candidates_extracted": self.candidates_extracted,
             "elapsed_seconds": round(self.elapsed_seconds(), 3),
             "stop_reason": self.stop_reason.value if self.stop_reason else None,
+            # Caps so callers (e.g. the web UI budget burn-down) can show used/cap.
+            "max_search_calls": self.budget.max_search_calls,
+            "max_fetch_urls": self.budget.max_fetch_urls,
+            "max_candidates_to_extract": self.budget.max_candidates_to_extract,
+            "max_validated_candidates": self.budget.max_validated_candidates,
         }

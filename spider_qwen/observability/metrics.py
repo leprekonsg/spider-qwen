@@ -11,6 +11,7 @@ class Metrics(BaseModel):
     validated_candidates_total: int = 0
     rfq_drafts_total: int = 0
     rfq_incomplete_total: int = 0
+    held_for_review: int = 0
     quote_channel_found: int = 0
     candidates_considered: int = 0
     contact_precision_estimate: float = 0.0

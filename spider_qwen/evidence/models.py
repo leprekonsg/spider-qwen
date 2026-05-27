@@ -21,6 +21,7 @@ SourceTool = Literal[
     "tinyfish_fetch",
     "qwen_web_extractor",
     "mcp_search",
+    "semantic_memory",
     "mock",
 ]
 
@@ -59,6 +60,7 @@ class EvidenceItem(BaseModel):
     retrieved_at: str = Field(default_factory=utc_now_iso)
     snippet: str = ""
     snippet_hash: str = ""
+    text: str | None = None
     text_hash: str | None = None
     language: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

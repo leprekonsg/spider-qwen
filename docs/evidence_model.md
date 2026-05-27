@@ -11,9 +11,30 @@ All important outputs are evidence-backed. (`evidence/`)
 ## EvidenceItem (full ledger record)
 
 `schema_version, ledger_id, source_tool, url, final_url, title, retrieved_at,
-snippet, snippet_hash, text_hash, language, metadata, confidence`.
+snippet, snippet_hash, text, text_hash, language, metadata, confidence`.
 
-`source_tool ∈ {tinyfish_search, tinyfish_fetch, qwen_web_extractor, mcp_search, mock}`.
+`source_tool ∈ {tinyfish_search, tinyfish_fetch, qwen_web_extractor, mcp_search,
+semantic_memory, mock}`.
+
+## Claim/span metadata
+
+Extraction evidence keeps `EvidenceRef` backward compatible and stores claim
+details in `EvidenceItem.metadata`:
+
+```json
+{
+  "claim_id": "claim_...",
+  "field": "quote_channel",
+  "parent_ledger_id": "ev_...",
+  "start_char": 120,
+  "end_char": 141,
+  "span_hash": "<sha256>"
+}
+```
+
+`spider-qwen evidence verify <run_id>` reloads the ledger, slices the parent page
+text, and checks the span hash plus snippet hash. Link-only evidence remains
+ledger-backed but may not have character offsets.
 
 ## Rules (enforced)
 
@@ -34,4 +55,4 @@ snippet, snippet_hash, text_hash, language, metadata, confidence`.
 
 `EvidenceLedger.persist()` writes `<state_dir>/evidence/<run_id>.ledger.json`.
 `EvidenceLedger.load(run_id, state_dir)` rehydrates it; the CLI exposes it via
-`spider-qwen evidence show <run_id>`.
+`spider-qwen evidence show <run_id>`, `evidence verify`, and `evidence graph`.

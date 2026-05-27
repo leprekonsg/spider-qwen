@@ -90,7 +90,11 @@ def test_cli_run_product_no_rfq(capsys, monkeypatch, tmp_path):
 
 def test_benchmark_service_harness():
     summary = run_gold_set(GOLD_SET, offline=True)
-    assert summary["cases"] == 6
+    assert summary["cases"] == 80
+    assert summary["per_mode"]["service_quote_required"]["cases"] == 20
+    assert summary["per_mode"]["product_exact_price"]["cases"] == 20
+    assert summary["per_mode"]["contact_enrichment_only"]["cases"] == 20
+    assert summary["per_mode"]["revalidation"]["cases"] == 20
     assert summary["mode_classification_accuracy"] >= 0.8
     assert summary["quote_channel_precision"] >= 0.9
     assert summary["rfq_draft_completeness"] >= 0.9
@@ -99,7 +103,126 @@ def test_benchmark_service_harness():
 
 def test_benchmark_product_harness():
     summary = run_product_gold_set(GOLD_SET, offline=True)
-    assert summary["cases"] == 2
-    assert summary["mode_classification_accuracy"] == 1.0
-    assert summary["pricing_status_accuracy"] == 1.0
-    assert all(row["validated"] > 0 for row in summary["details"])
+    assert summary["cases"] == 20
+    assert summary["mode_classification_accuracy"] >= 0.9
+    assert summary["pricing_status_accuracy"] >= 0.8
+    assert any(row["validated"] == 0 for row in summary["details"])  # missing/conflicting price hard-stops
+    assert sum(1 for row in summary["details"] if row["validated"] > 0) >= 15
+
+
+def test_cli_run_contact_enrichment(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    result = _run_cli(
+        capsys,
+        ["run", "find contact email for Example Cleaning Pte Ltd Singapore",
+         "--mode", "contact_enrichment_only", "--offline"],
+    )
+    assert result["mode"] == "contact_enrichment_only"
+    assert result["rfq_drafts"] == []
+    assert result["validated_candidates"]
+    assert all(c["contacts"] for c in result["validated_candidates"])
+    assert all(c["evidence_refs"] for c in result["validated_candidates"])
+
+
+def test_cli_evidence_verify_and_graph(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    run = _run_cli(capsys, ["run", "office cleaning Singapore", "--offline"])
+
+    # Span-level evidence is independently re-derivable from the parent page text.
+    # `evidence verify` exits 0 only when there are no issues (asserted by _run_cli).
+    verify = _run_cli(capsys, ["evidence", "verify", run["run_id"]])
+    assert verify["issues"] == []
+    assert verify["checked_claims"] >= 1
+    assert verify["valid_claims"] == verify["checked_claims"]
+
+    # Supplier graph renders as Mermaid.
+    rc = main(["evidence", "graph", run["run_id"]])
+    graph_out = capsys.readouterr().out
+    assert rc == 0
+    assert graph_out.startswith("graph LR")
+
+
+def test_cli_require_review_holds_and_releases_rfq(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    result = _run_cli(capsys, ["run", "office cleaning Singapore", "--offline", "--require-review"])
+
+    # With --require-review the polished RFQ is withheld behind a pending gate.
+    assert result["rfq_drafts"], "expected held RFQ stubs"
+    for stub in result["rfq_drafts"]:
+        assert stub["status"] == "pending_review"
+        assert "review_event_id" in stub
+        assert "rfq_email_template" not in stub  # polished content withheld until approval
+    assert result["metrics"]["held_for_review"] == len(result["rfq_drafts"])
+    assert result["metrics"]["pending_reviews"] >= len(result["rfq_drafts"])
+
+    pending = _run_cli(capsys, ["review", "list", "--status", "pending"])
+    rfq_events = [e for e in pending if e["reason"] == "rfq finalization"]
+    assert rfq_events
+    event_id = rfq_events[0]["event_id"]
+    assert rfq_events[0]["detail"]["rfq_draft"]["rfq_email_template"]
+
+    # Approval releases the full polished draft carried in the event detail.
+    approved = _run_cli(capsys, ["review", "approve", event_id])
+    assert approved["status"] == "approved"
+    assert approved["detail"]["rfq_draft"]["rfq_email_template"]
+
+
+def test_cli_memory_show_and_cross_run_recall(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    query = "example vendor cleaning Singapore quote"
+
+    first = _run_cli(capsys, ["run", query, "--offline"])
+    assert first["metrics"]["memory_recalls"] == 0  # nothing learned yet
+
+    rows = _run_cli(capsys, ["memory", "show"])
+    assert rows, "first run should persist evidence-backed semantic facts"
+    assert all("decayed_confidence" in r and "is_stale" in r for r in rows)
+    assert any(r["field"] == "quote_channel" for r in rows)
+    assert all(r["evidence_refs"] for r in rows)
+
+    # Second run recalls what the first learned (cross-run memory effect).
+    second = _run_cli(capsys, ["run", query, "--offline"])
+    assert second["metrics"]["memory_recalls"] >= 1
+
+
+def test_cli_run_with_mock_qwen_json(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    result = _run_cli(capsys, ["run", "office cleaning Singapore", "--offline", "--qwen-json"])
+    assert result["mode"] == "service_quote_required"
+    assert result["validated_candidates"]
+    assert result["rfq_drafts"]
+
+    # Qwen-enriched extraction still produces verifiable span evidence.
+    verify = _run_cli(capsys, ["evidence", "verify", result["run_id"]])
+    assert verify["issues"] == []
+    assert verify["checked_claims"] >= 1
+
+
+def test_cli_evidence_rejects_path_traversal_id(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    rc = main(["evidence", "show", "../../etc/passwd"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "invalid run_id" in err.lower()
+
+
+def test_server_run_is_offline_only_by_default(tmp_path, monkeypatch):
+    import pytest
+
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from spider_qwen.api.server import create_app
+
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("SPIDER_QWEN_ALLOW_LIVE", raising=False)
+    client = TestClient(create_app())
+
+    # A client cannot switch on live web access.
+    forced_live = client.post("/run", json={"query": "office cleaning Singapore", "offline": False})
+    assert forced_live.status_code == 403
+
+    # Offline runs work normally.
+    offline = client.post("/run", json={"query": "office cleaning Singapore", "offline": True})
+    assert offline.status_code == 200
+    assert offline.json()["mode"] == "service_quote_required"

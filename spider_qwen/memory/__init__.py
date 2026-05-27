@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .working import WorkingMemory
 from .episodic import EpisodicMemory, EpisodicRecord
-from .semantic import SemanticFact, SemanticMemory
+from .semantic import MemoryRecall, SemanticFact, SemanticMemory
 from .decay import apply_decay, is_stale
 from .promotion import should_promote_contact
 from .revalidation import Revalidator
@@ -18,6 +18,7 @@ __all__ = [
     "EpisodicMemory",
     "EpisodicRecord",
     "SemanticFact",
+    "MemoryRecall",
     "SemanticMemory",
     "apply_decay",
     "is_stale",

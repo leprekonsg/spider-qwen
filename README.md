@@ -7,25 +7,57 @@
   </picture>
 </p>
 
-Deterministic, evidence-first **procurement research agent**. Give it a query
-like *"Find office cleaning vendors in Singapore and prepare RFQ drafts"* and it
-returns an evidence-backed vendor shortlist plus ready-to-review RFQ drafts —
-without ever submitting or sending anything.
+**Spider-Qwen: procurement intelligence that hunts, maps, verifies, and recommends.**
 
-- **Controller:** Qwen (planner/controller in spirit; v1 execution is deterministic and policy-bound)
-- **Web layer:** [TinyFish](https://docs.tinyfish.ai) Search + Fetch (primary), Qwen WebExtractor (single-page fallback)
-- **Guarantee:** every vendor / contact / price / RFQ output references a ledger entry. No evidence, no output.
+Spider-Qwen is an agentic procurement scout built to map the supplier web,
+detect commercial signals, and turn messy external information into sourcing
+decisions. Give it a query like *"Find office cleaning vendors in Singapore and
+prepare RFQ drafts"* and it returns an evidence-backed vendor shortlist plus
+ready-to-review RFQ drafts — without ever submitting or sending anything.
 
-> v1 scope: `search → fetch → extract → rank → RFQ draft → persist evidence`.
+It behaves like a digital sourcing analyst: it receives a buyer's request,
+searches public sources through approved providers, verifies vendor evidence,
+compares options, prepares recommendations, and leaves findings for human review.
+
+- **Qwen-native layer:** optional Qwen JSON extraction (DashScope `json_object` mode), low-confidence tool-call routing, domain skill prompts, and an in-process MCP-compatible memory seam.
+- **Web layer:** [TinyFish](https://docs.tinyfish.ai) Search + Fetch (primary), Qwen WebExtractor (single-page fallback), deterministic mocks for demos.
+- **Guarantee:** every vendor / contact / price / RFQ output references ledger evidence; extracted claims carry span metadata when available.
+
+> Current scope: `search → fetch → extract → rank → RFQ draft → persist evidence + memory`.
 > **No** portal submission, browser automation, or code interpreter.
+
+## Brand concept
+
+Procurement is network work: suppliers, sub-suppliers, contracts, risks,
+categories, lead times, market prices, compliance documents, and hidden
+dependencies. The spider metaphor fits because the agent does not merely search;
+it connects signals across the web and identifies where procurement should act.
+
+- **Spider web:** supplier networks, market signals, RFQ trails, contract relationships.
+- **Sharp gothic forms:** precision, authority, controlled aggression.
+- **Monochrome palette:** serious enterprise intelligence, not playful SaaS.
+- **Predatory tone:** actively hunts opportunities and risks instead of passively waiting.
+- **Qwen reference:** the reasoning engine behind the agentic search layer.
 
 ## Why "evidence-first"
 
 Procurement decisions need provenance. Every search result, fetched page, and
-extracted fact is written to an append-only **evidence ledger** with a SHA-256
-snippet hash and timestamp. Downstream outputs carry lightweight `EvidenceRef`
-pointers (`ledger_id`) back into that ledger — never bare URLs. A ranked
-candidate with no evidence is dropped, not scored.
+extracted fact is written to an append-only **evidence ledger** with SHA-256
+hashes and timestamps. Downstream outputs carry lightweight `EvidenceRef`
+pointers (`ledger_id`) back into that ledger — never bare URLs. Claim evidence
+stores `claim_id`, `parent_ledger_id`, `start_char`, `end_char`, and `span_hash`
+when the fact maps to fetched page text, and `spider-qwen evidence verify`
+rechecks those spans. A ranked candidate with no evidence is dropped, not scored.
+
+## Hackathon track strategy
+
+Default submission strategy is **one project, strongest eligible track**. The
+current rule read is that each Devpost submission identifies one track, while
+multiple submissions must be unique and substantially different. Spider-Qwen is
+therefore packaged as a Track 4 procurement autopilot unless organizer guidance
+explicitly permits one project to be judged across multiple tracks. The
+MemoryAgent loop is still implemented and documented as a supporting
+differentiator.
 
 ## Install
 
@@ -50,6 +82,10 @@ spider-qwen classify "office cleaning Singapore"
 spider-qwen run "office cleaning Singapore" --offline
 spider-qwen run "500 ergonomic chairs Singapore" --mode product_exact_price --offline
 spider-qwen evidence show <run_id>
+spider-qwen evidence verify <run_id>
+spider-qwen evidence graph <run_id>
+spider-qwen memory show
+spider-qwen review list
 spider-qwen benchmark --gold-set spider_qwen/benchmarks/gold_set.json
 ```
 
@@ -77,24 +113,27 @@ Example output (trimmed):
 
 ## Architecture
 
-```
-User Query / Email
-        ↓
-Mode Classifier           deterministic, keyword/intent scored
-        ↓
-Budgeted Controller       fixed per-mode plan; obeys budgets + policy
-        ↓
-Search Service  →  Fetch Service          TinyFish (provider-abstracted)
-        ↓
-Extraction Modules        pricing · quote_channel · contact · service_match · vendor
-        ↓
-Evidence Ledger           every source recorded; deduped
-        ↓
-Ranking                   SEA-first geo boost + per-mode weights
-        ↓
-RFQ Draft / Supplier Result
-        ↓
-Working + Episodic + Semantic Memory
+```mermaid
+flowchart TD
+  Q["User query / email"] --> C["Mode classifier"]
+  C -->|high confidence| B["Budgeted controller"]
+  C -->|low confidence, optional| QR["Qwen tool-call router"]
+  QR --> B
+  B --> S["Search provider"]
+  B --> F["Fetch provider"]
+  S --> L["Evidence ledger"]
+  F --> L
+  F --> X["Deterministic extractors"]
+  F -->|optional| QJ["Qwen JSON extractor"]
+  QJ --> X
+  X --> CL["Claim/span evidence"]
+  CL --> L
+  B --> M["Semantic memory MCP seam"]
+  M --> B
+  X --> R["Mode-specific rankers"]
+  R --> RFQ["RFQ draft / supplier result"]
+  RFQ --> H["Pending human review"]
+  RFQ --> A["Audit log"]
 ```
 
 ## Procurement modes
@@ -121,10 +160,29 @@ Selected via env or injection; both abstracted behind protocols.
 |---|---|---|
 | `SPIDER_QWEN_SEARCH_PROVIDER` | `tinyfish` · `qwen_mcp` · `mock` | `tinyfish` |
 | `SPIDER_QWEN_FETCH_PROVIDER` | `tinyfish` · `qwen_web_extractor` · `mock` | `tinyfish` |
+| `QWEN_ROUTER_MODEL` | verified DashScope model id | `qwen3-max-2026-01-23` |
+| `QWEN_JSON_EXTRACTOR_MODEL` | verified DashScope model id | `qwen-flash` |
+| `QWEN_STRUCTURED_EXTRACTION_ENABLED` | `0` · `1` | `0` |
+| `QWEN_ROUTER_FALLBACK_ENABLED` | `0` · `1` | `0` |
 
-Qwen Code has no built-in web search (it is MCP-based), so search is a provider
-interface, not a hard-coded service. `QwenMcpSearchProvider` is the seam: inject
-an MCP/responses backend, or fall back to TinyFish.
+Qwen-assisted paths are optional and mocked in offline mode. Regex extractors
+remain the deterministic default. Qwen JSON extraction runs over already-fetched
+text and falls back cleanly on provider or schema errors.
+
+## Benchmarks
+
+Current offline gold set: `80` deterministic cases, `20` per mode.
+
+| Metric | Offline result |
+|---|---:|
+| Mode classification accuracy | `0.95` |
+| Quote-channel precision | `1.00` |
+| RFQ draft completeness | `1.00` |
+| Evidence coverage | `1.00` |
+
+These are fixture-backed regression numbers, not live-web claims. A separate
+`spider_qwen/benchmarks/live_validation_set.json` contains a small rate-limited
+live validation set for reporting deployed-path behavior.
 
 ## RFQ drafts — and what spider-qwen never does
 
@@ -135,15 +193,28 @@ RFQ drafts contain exactly: `rfq_email_template`, `required_inputs_checklist`,
 - Checklist completeness below threshold (default `0.65`) → status `incomplete`.
 
 The agent **never** submits forms, sends email, drives a browser, or runs a code
-interpreter. The audit log refuses to record any such action.
+interpreter. The audit log refuses to record any such action:
+
+```python
+AuditLog("run_demo").record("rfq_sent")  # raises PolicyViolation
+```
 
 ## Configuration & governance
 
 `spider_qwen/governance/policy_config.yaml` controls budgets (per mode), geo
 defaults, privacy tags, RFQ behavior, and memory rules. Budgets enforce the stop
 tuple `(max_tool_calls, min_validated_candidates, evidence_completeness_threshold)`.
-Named-person contacts are tagged high-sensitivity; review gates are configurable
-and disabled by default in v1.
+Named-person contacts are tagged high-sensitivity and gated by default; generic
+business contacts remain ungated. Human review events are persisted for
+low-confidence classification, RFQ finalization, and disputed fact promotion.
+
+## Memory loop
+
+Semantic memory stores evidence-backed vendor facts, applies confidence decay,
+marks stale facts, excludes disputed facts from RFQ enrichment, and recalls
+active facts within a bounded context budget. Recalled quote channels are
+re-recorded into the current run ledger as `semantic_memory` evidence so later
+runs can change behavior without losing provenance.
 
 ## Project layout
 
@@ -151,11 +222,11 @@ and disabled by default in v1.
 spider_qwen/
   agent/         controller, budget, planner, policy, tool_registry, execution_context
   modes/         classifier, contracts (enums + candidate schemas), router
-  tools/         tinyfish_client, search_service, fetch_service, qwen_web_extractor, provider_types
+  tools/         tinyfish_client, search_service, fetch_service, qwen_web_extractor, qwen_json_extractor, provider_types
   extraction/    pricing, quote_channel, contact, vendor_metadata, service_match, dedupe
   ranking/       product/service/contact rankers, geo_strategy
-  evidence/      models, ledger, dedupe, bundles
-  memory/        working, episodic, semantic, decay, promotion, revalidation
+  evidence/      models, ledger, dedupe, bundles, verifier, graph
+  memory/        working, episodic, semantic, decay, promotion, revalidation, mcp
   rfq/           schema, checklist, generator
   governance/    policy_config.yaml, privacy, review, audit
   observability/ metrics, tracing
@@ -171,15 +242,37 @@ tests/           unit + end-to-end suite
 python -m pytest -q
 ```
 
-Covers modes, pricing ontology, quote-channel detection, evidence ledger,
-rankers, RFQ hard-stops, budget tracker, and **end-to-end** runs through the CLI
-(persisted evidence ledger, traces, audit log, and the benchmark harness).
+Covers modes, pricing ontology, quote-channel detection, span verification,
+Qwen provider request shapes, MCP memory recall, HITL review events, evidence
+ledger, rankers, RFQ hard-stops, budget tracker, and **end-to-end** CLI runs.
 
-## Roadmap (5 phases)
+## Offline API deployment
 
-0. Foundation · 1. Product + contact parity · 2. Service quote + RFQ · 3. Memory
-MVP + revalidation · 4. Governance hardening + advanced workflows (browser/agent
-and code interpreter remain out of v1).
+The FastAPI server defaults `/run` to `offline: true`, so demos do not need live
+scraping keys.
+
+```bash
+pip install -e ".[server]"
+uvicorn spider_qwen.api.server:app --host 0.0.0.0 --port 8000
+```
+
+The included `Dockerfile` serves the same offline-safe API path.
+
+## Docs
+
+- `docs/architecture.md`
+- `docs/engineering.md`
+- `docs/evidence_model.md`
+- `docs/memory_design.md`
+- `docs/ranking.md`
+- `docs/benchmarking.md`
+
+## Known limits
+
+- Live providers can underperform on bot-walled sites; judging demo should use `--offline`.
+- Claim spans exist when the claim is present in fetched text; link-only evidence remains ledger-backed without text offsets.
+- Qwen model IDs should be re-verified before live demos.
+- Browser automation, form submission, code interpreter, and non-Qwen LLMs are intentionally out of scope.
 
 ## License
 

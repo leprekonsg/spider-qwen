@@ -1,0 +1,235 @@
+/* ============================================================
+   SPIDER-QWEN — COLORS & TYPE
+   Procurement intelligence with bite.
+   PREDATORY · PRECISE · EDITORIAL
+   ============================================================ */
+
+/* ------- Fonts (Google Fonts — substitutes for the custom blackletter logotype)
+   NOTE: The Spider-Qwen logo is a custom blackletter wordmark, used as a
+   raster asset (assets/spider-qwen-logo-*.png). For body display headlines
+   we use Pirata One as a gothic-blackletter substitute; for sculptural
+   editorial text we use Bodoni Moda; for UI we use Manrope.
+   Mono uses JetBrains Mono — fits the CLI/agent surface vocabulary.   */
+
+@import url('https://fonts.googleapis.com/css2?family=Pirata+One&family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;0,6..96,500;0,6..96,600;0,6..96,700;0,6..96,800;1,6..96,400&family=Manrope:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+:root {
+  /* ----- PRIMARY PALETTE ----- */
+  --sq-obsidian:      #0A0A0A;  /* primary background, predatory black */
+  --sq-bone:          #F2E5E6;  /* primary text on dark, cream-bone */
+  --sq-graphite:      #2B2B2B;  /* surfaces, panels on dark */
+  --sq-ash:           #5C5A56;  /* muted text, borders (corrected from brand sheet) */
+
+  /* ----- SECONDARY PALETTE ----- */
+  --sq-iron:          #505A56;  /* secondary surfaces */
+  --sq-smoke:         #C8C3BA;  /* warm neutral, secondary text */
+  --sq-slate-taupe:   #726C64;  /* secondary, mid-tone */
+  --sq-fog:           #EBE2D8;  /* soft highlight / light cream surface */
+
+  /* ----- ACCENTS ----- */
+  --sq-silver-chrome: #B8B7B0;  /* metallic accent */
+  --sq-deep-shadow:   #151915;  /* rich black, near-surface depth */
+
+  /* ----- SEMANTIC (functional) ----- */
+  --sq-signal-risk:   #B65C4A;  /* desaturated rust — risk / alert */
+  --sq-signal-good:   #7A8C5E;  /* desaturated moss — verified / preferred */
+  --sq-signal-info:   #8A8472;  /* slate-mustard — neutral signals */
+  --sq-signal-warn:   #C99155;  /* burnt amber — warnings */
+
+  /* ----- FOREGROUND / BACKGROUND SCALES (dark theme is the canonical mode) ----- */
+  --sq-bg:            var(--sq-obsidian);
+  --sq-bg-elevated:   var(--sq-deep-shadow);
+  --sq-bg-panel:      var(--sq-graphite);
+  --sq-bg-input:      #0F0F0F;
+  --sq-border:        #2A2A2A;
+  --sq-border-strong: #3A3A37;
+
+  --sq-fg:            var(--sq-bone);
+  --sq-fg-muted:      var(--sq-smoke);
+  --sq-fg-dim:        var(--sq-slate-taupe);
+  --sq-fg-faint:      #4A4844;
+
+  /* Inverse / light surface (used for billboards, business cards) */
+  --sq-bg-inv:        var(--sq-fog);
+  --sq-fg-inv:        var(--sq-obsidian);
+
+  /* ----- TYPE FAMILIES ----- */
+  --sq-font-display:  'Pirata One', 'UnifrakturMaguntia', 'Cinzel', serif; /* blackletter substitute */
+  --sq-font-serif:    'Bodoni Moda', 'Didot', 'Playfair Display', serif;    /* sculptural editorial */
+  --sq-font-sans:     'Manrope', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --sq-font-mono:     'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* ----- TYPE SCALE (per brand sheet: H1 72/80 · H2 48/56 · H3 32/40 · SUB 20/28 · BODY 16/24 · CAP 12/16) ----- */
+  --sq-fs-display:    96px;
+  --sq-fs-h1:         72px;
+  --sq-fs-h2:         48px;
+  --sq-fs-h3:         32px;
+  --sq-fs-sub:        20px;
+  --sq-fs-body:       16px;
+  --sq-fs-small:      14px;
+  --sq-fs-caption:    12px;
+  --sq-fs-micro:      10px;
+
+  --sq-lh-display:    1.0;
+  --sq-lh-h1:         1.11;
+  --sq-lh-h2:         1.17;
+  --sq-lh-h3:         1.25;
+  --sq-lh-sub:        1.4;
+  --sq-lh-body:       1.5;
+  --sq-lh-caption:    1.33;
+
+  /* ----- SPACING (8pt) ----- */
+  --sq-sp-1: 4px;   --sq-sp-2: 8px;   --sq-sp-3: 12px;
+  --sq-sp-4: 16px;  --sq-sp-5: 24px;  --sq-sp-6: 32px;
+  --sq-sp-7: 48px;  --sq-sp-8: 64px;  --sq-sp-9: 80px;
+  --sq-sp-10: 96px; --sq-sp-11: 128px;
+
+  /* ----- RADII ----- */
+  --sq-r-1: 2px;    --sq-r-2: 4px;    --sq-r-3: 8px;    --sq-r-4: 16px;
+  --sq-r-pill: 999px;
+
+  /* ----- SHADOWS / GLOW ----- */
+  --sq-shadow-1: 0 1px 0 rgba(255,255,255,0.04) inset, 0 1px 2px rgba(0,0,0,0.6);
+  --sq-shadow-2: 0 1px 0 rgba(255,255,255,0.04) inset, 0 8px 24px rgba(0,0,0,0.55);
+  --sq-shadow-3: 0 1px 0 rgba(255,255,255,0.05) inset, 0 24px 60px rgba(0,0,0,0.7);
+  --sq-glow-bone:  0 0 0 1px rgba(242,229,230,0.12), 0 0 24px rgba(242,229,230,0.06);
+  --sq-glow-risk:  0 0 0 1px rgba(182,92,74,0.30), 0 0 18px rgba(182,92,74,0.18);
+
+  /* ----- MOTION ----- */
+  --sq-ease-sharp:   cubic-bezier(0.2, 0, 0, 1);     /* default — predatory, decisive */
+  --sq-ease-spider:  cubic-bezier(0.65, 0, 0.35, 1); /* slightly suspended */
+  --sq-dur-fast:     120ms;
+  --sq-dur-base:     200ms;
+  --sq-dur-slow:     360ms;
+}
+
+/* ============================================================
+   SEMANTIC ELEMENT STYLES
+   ============================================================ */
+
+html, body {
+  background: var(--sq-bg);
+  color: var(--sq-fg);
+  font-family: var(--sq-font-sans);
+  font-size: var(--sq-fs-body);
+  line-height: var(--sq-lh-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: var(--sq-bone); color: var(--sq-obsidian); }
+
+.sq-display, h1.sq-display {
+  font-family: var(--sq-font-display);
+  font-weight: 400;
+  font-size: var(--sq-fs-display);
+  line-height: var(--sq-lh-display);
+  letter-spacing: 0.01em;
+  color: var(--sq-bone);
+}
+
+h1, .sq-h1 {
+  font-family: var(--sq-font-serif);
+  font-weight: 500;
+  font-size: var(--sq-fs-h1);
+  line-height: var(--sq-lh-h1);
+  letter-spacing: -0.015em;
+  color: var(--sq-bone);
+  text-wrap: balance;
+}
+
+h2, .sq-h2 {
+  font-family: var(--sq-font-serif);
+  font-weight: 500;
+  font-size: var(--sq-fs-h2);
+  line-height: var(--sq-lh-h2);
+  letter-spacing: -0.012em;
+  color: var(--sq-bone);
+  text-wrap: balance;
+}
+
+h3, .sq-h3 {
+  font-family: var(--sq-font-serif);
+  font-weight: 500;
+  font-size: var(--sq-fs-h3);
+  line-height: var(--sq-lh-h3);
+  letter-spacing: -0.008em;
+  color: var(--sq-bone);
+}
+
+.sq-sub {
+  font-family: var(--sq-font-sans);
+  font-weight: 400;
+  font-size: var(--sq-fs-sub);
+  line-height: var(--sq-lh-sub);
+  color: var(--sq-smoke);
+  letter-spacing: 0;
+}
+
+p, .sq-body {
+  font-family: var(--sq-font-sans);
+  font-weight: 400;
+  font-size: var(--sq-fs-body);
+  line-height: var(--sq-lh-body);
+  color: var(--sq-bone);
+}
+
+.sq-small {
+  font-size: var(--sq-fs-small);
+  line-height: 1.45;
+  color: var(--sq-smoke);
+}
+
+.sq-caption, caption {
+  font-family: var(--sq-font-sans);
+  font-size: var(--sq-fs-caption);
+  line-height: var(--sq-lh-caption);
+  color: var(--sq-slate-taupe);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sq-overline {
+  font-family: var(--sq-font-sans);
+  font-size: var(--sq-fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--sq-slate-taupe);
+}
+
+code, kbd, samp, pre, .sq-mono {
+  font-family: var(--sq-font-mono);
+  font-size: 0.92em;
+  color: var(--sq-fog);
+}
+
+/* Editorial tagline — sculptural italic serif */
+.sq-tagline {
+  font-family: var(--sq-font-serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 22px;
+  line-height: 1.35;
+  color: var(--sq-smoke);
+  letter-spacing: 0.005em;
+}
+
+/* Divider — hairline rule used between editorial sections */
+.sq-rule {
+  height: 1px;
+  background: var(--sq-border);
+  border: 0;
+  margin: var(--sq-sp-5) 0;
+}
+
+/* Tracker marks: editorial slash separators between keywords */
+.sq-trio {
+  font-family: var(--sq-font-sans);
+  font-size: var(--sq-fs-caption);
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--sq-smoke);
+}
+.sq-trio > span + span::before { content: " / "; color: var(--sq-slate-taupe); }
