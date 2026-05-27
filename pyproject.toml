@@ -21,8 +21,10 @@ dependencies = [
 [project.optional-dependencies]
 # Qwen WebExtractor / Model Studio responses API (single-page fallback provider)
 qwen = ["openai>=1.40"]
-# Optional HTTP API server
-server = ["fastapi>=0.110", "uvicorn>=0.29"]
+# Optional HTTP API server.
+# starlette>=1.0.1 is required: it fixes the BadHost Host-header auth bypass
+# (CVE-2026-48710) and supersedes the earlier multipart / FileResponse DoS fixes.
+server = ["fastapi>=0.115", "uvicorn>=0.29", "starlette>=1.0.1"]
 dev = ["pytest>=8.0", "pygments>=2.7"]
 
 [project.scripts]
