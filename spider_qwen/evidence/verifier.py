@@ -82,6 +82,9 @@ def _issue(ledger_id: str, reason: str) -> EvidenceVerificationIssue:
 # Which extraction ledger row backs each claim field (metadata["field"] tag).
 _FIELD_TAG = {"price": "pricing", "service_match": "service_match", "quote_channel": "quote_channel"}
 
+# Vendor-scoped claims that require subject+value co-occurrence (not value-only).
+_RELATION_FIELDS = frozenset({"price", "moq", "quote_channel"})
+
 
 class ClaimVerification(BaseModel):
     claim_id: str
@@ -108,8 +111,10 @@ class VerificationSpine:
 
     A claim is grounded against its source *page* text (``parent_ledger_id``),
     never the extraction snippet, so a fabricated value whose snippet is
-    self-referential is still caught. A candidate is ``verified`` only when every
-    critical claim holds; the controller blocks the rest from output.
+    self-referential is still caught. Vendor-scoped critical claims require the
+    value and vendor to co-occur in the same sentence on that page (and in SAFE
+    corpus spans); a competitor's price on the same page does not count. A
+    candidate is ``verified`` only when every critical claim holds.
     """
 
     def __init__(self, ledger: EvidenceLedger, *, minicheck: MiniCheck | None = None,
@@ -131,8 +136,10 @@ class VerificationSpine:
     def _verify_claim(self, candidate: Any, claim: AtomicClaim) -> ClaimVerification:
         ref = self._ref_for_claim(candidate, claim)
         premise = self._premise_from_ref(ref)
-        result = self.minicheck.check(claim=claim.predicate, value=claim.object_value,
-                                      evidence_span=premise, field=claim.field)
+        result = self.minicheck.check(
+            claim=claim.predicate, value=claim.object_value, evidence_span=premise,
+            field=claim.field, subject=self._minicheck_subject(claim),
+        )
         stage = "minicheck"
         if not result.supported:
             corpus = self._corpus(exclude=premise)
@@ -148,6 +155,14 @@ class VerificationSpine:
         )
         self._write_back(ref, verification)
         return verification
+
+    @staticmethod
+    def _minicheck_subject(claim: AtomicClaim) -> str:
+        if claim.field == "vendor_name":
+            return ""
+        if claim.field in _RELATION_FIELDS or claim.field.startswith("contact_"):
+            return claim.subject
+        return ""
 
     def _ref_for_claim(self, candidate: Any, claim: AtomicClaim):
         if claim.evidence_ref is not None:
@@ -186,7 +201,14 @@ class VerificationSpine:
         return ""  # no genuine page text -> ungrounded; never fall back to the snippet
 
     def _corpus(self, *, exclude: str) -> list[str]:
-        return [item.text for item in self.ledger.items() if item.text and item.text != exclude]
+        spans: list[str] = []
+        for item in self.ledger.items():
+            if not item.text:
+                continue
+            span = _join(item.title, item.text)
+            if span and span != exclude:
+                spans.append(span)
+        return spans
 
     def _write_back(self, ref, verification: ClaimVerification) -> None:
         item = self.ledger.get(getattr(ref, "ledger_id", "")) if ref is not None else None

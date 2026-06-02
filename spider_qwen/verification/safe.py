@@ -3,8 +3,9 @@
 A claim the MiniCheck gatekeeper could not ground in its own cited span gets a
 second chance against a wider corpus: the rest of the run's fetched evidence,
 plus (optionally) fresh search results -- TinyFish in place of SAFE's Google. The
-claim is upheld only if some independent source grounds it; a fabricated value
-present nowhere stays unsupported.
+claim is upheld only if some independent source grounds the full vendor-scoped
+predicate (subject and value in the same span); a coincidental price on another
+vendor's page does not count.
 """
 
 from __future__ import annotations
@@ -32,8 +33,10 @@ class SafeReverifier:
         best = MiniCheckResult(supported=False, score=0.0, method="safe_no_grounding",
                                rationale="no independent source grounds the claim")
         for span in spans:
-            result = self.minicheck.check(claim=claim.predicate, value=claim.object_value,
-                                          evidence_span=span, field=claim.field)
+            result = self.minicheck.check(
+                claim=claim.predicate, value=claim.object_value, evidence_span=span,
+                field=claim.field, subject=claim.subject,
+            )
             if result.score > best.score:
                 best = result.model_copy(update={"method": "safe_" + result.method})
                 if best.supported and best.score >= 1.0:

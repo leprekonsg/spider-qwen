@@ -116,6 +116,67 @@ def test_safe_unsupported_when_no_source_grounds_it():
     assert not res.supported
 
 
+def test_minicheck_rejects_same_page_cross_vendor_price_collision():
+    mc = MiniCheck()
+    page = (
+        "Shadow Supply offers ergonomic chairs in Singapore. "
+        "Public pricing S$129 per unit. "
+        "Acme Chairs also lists S$999 per unit for similar stock."
+    )
+    assert mc.check(
+        claim="Shadow lists 129", value="129", evidence_span=page, subject="Shadow Supply",
+    ).supported
+    assert not mc.check(
+        claim="Shadow lists 999", value="999", evidence_span=page, subject="Shadow Supply",
+    ).supported
+
+
+def test_spine_blocks_same_page_cross_vendor_price_collision():
+    ledger = EvidenceLedger("run_test", None)
+    page_text = (
+        "Shadow Supply offers chairs in Singapore. Public pricing S$129 per unit. "
+        "Acme Chairs also lists S$999 per unit."
+    )
+    page_ref = ledger.record(
+        source_tool="tinyfish_fetch", url="https://shadow-supply.sg",
+        snippet=page_text[:120], text=page_text, metadata={},
+    )
+    claim_ref = ledger.record(
+        source_tool="tinyfish_fetch", url="https://shadow-supply.sg",
+        snippet="S$999 per unit", text=None,
+        metadata={"field": "pricing", "claim_id": "claim_shadow_999",
+                  "parent_ledger_id": page_ref.ledger_id},
+    )
+    cand = SimpleNamespace(
+        vendor_name="Shadow Supply", price=999.0, currency="SGD", unit="unit",
+        moq=None, pricing_status=PricingStatus.EXACT_PRICE,
+        evidence_refs=[page_ref, claim_ref],
+    )
+    cv = VerificationSpine(ledger).verify_candidate(cand)
+    assert cv.verified is False
+    price = next(c for c in cv.claims if c.field == "price")
+    assert price.verified is False
+
+
+def test_safe_rejects_cross_vendor_value_collision():
+    mc = MiniCheck()
+    claim = decompose(SimpleNamespace(vendor_name="Shadow Supply", price=999.0,
+                                      pricing_status=PricingStatus.EXACT_PRICE,
+                                      evidence_refs=[]))[1]
+    res = SafeReverifier(mc).reverify(
+        claim, corpus=["Acme Chairs supplies chairs. Public pricing S$999 per unit."],
+    )
+    assert not res.supported
+
+
+def test_minicheck_requires_subject_in_span_when_provided():
+    mc = MiniCheck()
+    span = "Acme Chairs supplies chairs. Public pricing S$999 per unit."
+    assert mc.check(claim="price 999", value="999", evidence_span=span).supported
+    assert not mc.check(claim="Shadow lists price 999", value="999", evidence_span=span,
+                        subject="Shadow Supply").supported
+
+
 def test_safe_search_fn_seam_supplies_grounding():
     mc = MiniCheck()
     claim = decompose(SimpleNamespace(vendor_name="Acme", price=129.0,
@@ -162,6 +223,35 @@ def test_spine_verifies_grounded_candidate_and_writes_back():
     assert item.metadata.get("verifier_score") == 1.0
 
 
+def test_spine_blocks_cross_vendor_safe_collision():
+    ledger = EvidenceLedger("run_test", None)
+    acme_page = ledger.record(
+        source_tool="tinyfish_fetch", url="https://acme-chairs.sg",
+        snippet="Acme pricing", text="Acme Chairs. Public pricing S$999 per unit.",
+        metadata={},
+    )
+    shadow_page = ledger.record(
+        source_tool="tinyfish_fetch", url="https://shadow-supply.sg",
+        snippet="Shadow pricing", text="Shadow Supply offers chairs. Public pricing S$129 per unit.",
+        metadata={},
+    )
+    claim_ref = ledger.record(
+        source_tool="tinyfish_fetch", url="https://shadow-supply.sg",
+        snippet="S$999 per unit", text=None,
+        metadata={"field": "pricing", "claim_id": "claim_shadow_price",
+                  "parent_ledger_id": shadow_page.ledger_id},
+    )
+    cand = SimpleNamespace(
+        vendor_name="Shadow Supply", price=999.0, currency="SGD", unit="unit",
+        moq=None, pricing_status=PricingStatus.EXACT_PRICE,
+        evidence_refs=[shadow_page, acme_page, claim_ref],
+    )
+    cv = VerificationSpine(ledger).verify_candidate(cand)
+    assert cv.verified is False
+    price = next(c for c in cv.claims if c.field == "price")
+    assert price.verified is False and "safe" in price.stage
+
+
 def test_spine_blocks_injected_unsupported_claim():
     # Fabricated price: the matched_text is its own snippet (offsets absent), but
     # the real page text never mentions 999 -> MiniCheck and SAFE both fail.
@@ -202,11 +292,12 @@ def test_spine_accepts_candidate_with_failed_noncritical_claim():
     # candidate whose critical price claim is grounded.
     ledger = EvidenceLedger("run_test", None)
     page_ref, claim_ref = _record_page_and_claim(
-        ledger, page_text="Pricing S$129 per unit. Ergonomic chairs in stock.",
+        ledger, page_text="GhostVendor supplies chairs. Pricing S$129 per unit. Ergonomic chairs in stock.",
         claim_value="S$129", grounded=True,
     )
-    cand = SimpleNamespace(vendor_name="GhostVendor", price=129.0, currency="SGD", unit="unit",
-                           moq=None, pricing_status=PricingStatus.EXACT_PRICE,
+    # Legal name on the candidate is stricter than the short name on the page.
+    cand = SimpleNamespace(vendor_name="GhostVendor Pte Ltd", price=129.0, currency="SGD",
+                           unit="unit", moq=None, pricing_status=PricingStatus.EXACT_PRICE,
                            evidence_refs=[page_ref, claim_ref])
     cv = VerificationSpine(ledger).verify_candidate(cand)
     vendor = next(c for c in cv.claims if c.field == "vendor_name")
@@ -323,6 +414,35 @@ def test_controller_blocks_injected_unsupported_claim_from_output():
     websites = [(c.get("website") or "") for c in result.validated_candidates]
     assert not any("shadow-supply" in w for w in websites)
     assert any("acme-chairs" in w for w in websites)  # grounded candidate survives
+
+
+def test_controller_blocks_when_safe_would_cross_verify_via_other_vendor():
+    """Shadow's fabricated 999 must not pass SAFE via Acme's page mentioning S$999."""
+    from spider_qwen.agent.controller import Controller
+
+    good = "https://acme-chairs.sg/ergonomic"
+    bad = "https://shadow-supply.sg/ergonomic"
+    fixtures = {
+        good: {"title": "Acme Chairs", "text": "Acme supplies ergonomic office chairs in "
+               "Singapore. Public pricing S$999 per unit. MOQ 50 units. Email sales@acme-chairs.sg."},
+        bad: {"title": "Shadow Supply", "text": "Shadow Supply offers ergonomic office chairs "
+              "in Singapore. Public pricing S$129 per unit. MOQ 50 units. Email sales@shadow-supply.sg."},
+    }
+    controller = Controller(
+        search_provider=_FixedSearch([good, bad]),
+        fetch_provider=MockFetchProvider(fixtures=fixtures),
+        qwen_json_extractor=_InjectingQwen("shadow-supply"),
+        verify=True, state_dir=None, persist=False,
+    )
+    result = asyncio.run(controller.run("ergonomic office chairs Singapore",
+                                        mode="product_exact_price"))
+    assert result.metrics.get("candidates_blocked_unverified", 0) >= 1
+    websites = [(c.get("website") or "") for c in result.validated_candidates]
+    assert not any("shadow-supply" in w for w in websites)
+    # Acme's own page lists S$999; only Shadow's injected 999 must be blocked.
+    for cand in result.validated_candidates:
+        if "acme-chairs" in (cand.get("website") or ""):
+            assert cand.get("price") == 999.0
 
 
 def test_controller_without_verification_keeps_injected_claim():

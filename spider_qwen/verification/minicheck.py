@@ -2,10 +2,14 @@
 
 The deterministic default upholds a claim only if its concrete value is
 groundable in the evidence span -- a normalized substring match, with token
-overlap as a partial signal. This is the spider-qwen hot-path discipline: a fact
-counts only when it is literally present in the cited source, so a fabricated
-value (whose own self-referential extraction snippet might "contain" it) is
-caught when checked against the real page text.
+overlap as a partial signal. When ``subject`` is set (vendor-scoped atoms), the value and vendor must
+co-occur in the same sentence, or the sentence immediately above a price line,
+so a competitor's price on the same or another page cannot verify the claim.
+
+This is the spider-qwen hot-path discipline: a fact counts only when it is
+literally present in the cited source, so a fabricated value (whose own
+self-referential extraction snippet might "contain" it) is caught when checked
+against the real page text.
 
 An optional ``model`` seam supplies a learned NLI score (MiniCheck-FT5). Its
 output is type-checked and clamped to [0, 1] and can never raise into the hot
@@ -33,12 +37,21 @@ _TOKEN = re.compile(r"[a-z0-9@.+]+")
 # or year). Decimals compare by value so "129" still matches "129.00".
 _NUMERIC = re.compile(r"^\d+(?:\.\d+)?$")
 _NUMBER_IN_TEXT = re.compile(r"\d+(?:\.\d+)?")
+_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]?")
+
+
+# Generic business tokens must not alone "ground" a vendor name in SAFE corpus scans.
+_SUBJECT_STOP = frozenset({
+    "pte", "ltd", "limited", "co", "company", "corp", "inc", "singapore", "sg",
+    "the", "and", "of", "supply", "services", "trading", "enterprise", "group",
+    "global", "international", "solutions", "systems",
+})
 
 
 class MiniCheckResult(BaseModel):
     supported: bool
     score: float
-    method: str  # value_grounded | token_overlap | no_evidence | model
+    method: str  # value_grounded | relation_grounded | token_overlap | no_evidence | model | subject_ungrounded
     rationale: str = ""
 
 
@@ -48,6 +61,57 @@ def _norm(text: str) -> str:
 
 def _tokens(text: str) -> set[str]:
     return set(_TOKEN.findall((text or "").lower()))
+
+
+def _subject_tokens(subject: str) -> list[str]:
+    raw = [t for t in _TOKEN.findall((subject or "").lower()) if t not in _SUBJECT_STOP]
+    strong = [t for t in raw if len(t) >= 3]
+    if strong:
+        return strong
+    return [t for t in raw if len(t) >= 2]
+
+
+def _subject_grounded(subject: str, premise: str) -> bool:
+    """True when distinctive vendor tokens appear anywhere in the span."""
+    tokens = _subject_tokens(subject)
+    if not tokens:
+        norm_sub = _norm(subject)
+        return bool(norm_sub) and norm_sub in _norm(premise)
+    premise_tokens = _tokens(premise)
+    hits = sum(1 for t in tokens if t in premise_tokens)
+    return hits >= max(1, (len(tokens) + 1) // 2)
+
+
+def _subject_in_sentence(tokens: list[str], sentence: str) -> bool:
+    sent_tokens = _tokens(sentence)
+    hits = sum(1 for t in tokens if t in sent_tokens)
+    return hits >= max(1, (len(tokens) + 1) // 2)
+
+
+def _sentences(premise: str) -> list[str]:
+    parts = [s.strip() for s in _SENTENCE_RE.findall(premise or "") if s.strip()]
+    return parts if parts else [premise or ""]
+
+
+def _relation_grounded(subject: str, norm_value: str, premise: str) -> bool:
+    """True when the value and vendor co-occur in one sentence or the line above a price."""
+    tokens = _subject_tokens(subject)
+    sents = _sentences(premise)
+    for i, sent in enumerate(sents):
+        if not _value_grounded(norm_value, sent):
+            continue
+        if not tokens:
+            norm_sub = _norm(subject)
+            if norm_sub and norm_sub in _norm(sent):
+                return True
+            if i > 0 and norm_sub in _norm(sents[i - 1]):
+                return True
+        else:
+            if _subject_in_sentence(tokens, sent):
+                return True
+            if i > 0 and _subject_in_sentence(tokens, sents[i - 1]):
+                return True
+    return False
 
 
 def _value_grounded(norm_value: str, premise: str) -> bool:
@@ -72,33 +136,69 @@ class MiniCheck:
         self.model = model
 
     def check(self, *, claim: str, value: str = "", evidence_span: str = "",
-              field: str = "") -> MiniCheckResult:
+              field: str = "", subject: str = "") -> MiniCheckResult:
         premise = evidence_span or ""
         if not premise.strip():
             return MiniCheckResult(supported=False, score=0.0, method="no_evidence",
                                    rationale="no evidence span to ground the claim")
-        result = self._heuristic(claim=claim, value=value, premise=premise)
+        hypothesis = claim.strip() or value
+        result = self._heuristic(claim=hypothesis, value=value, premise=premise, subject=subject)
         if self.model is not None:
-            result = self._apply_model(result, claim=claim, premise=premise)
+            result = self._apply_model(
+                result, claim=hypothesis, value=value, premise=premise, subject=subject,
+            )
         return result
 
-    def _heuristic(self, *, claim: str, value: str, premise: str) -> MiniCheckResult:
+    def _heuristic(self, *, claim: str, value: str, premise: str,
+                   subject: str = "") -> MiniCheckResult:
+        relation = bool((subject or "").strip())
         norm_value = _norm(value)
         if norm_value:
-            if _value_grounded(norm_value, premise):
-                return MiniCheckResult(supported=True, score=1.0, method="value_grounded",
-                                       rationale=f"value '{value}' present in evidence")
+            if relation:
+                if _relation_grounded(subject, norm_value, premise):
+                    return MiniCheckResult(
+                        supported=True, score=1.0, method="relation_grounded",
+                        rationale=f"value '{value}' grounded with vendor '{subject}' in the same sentence",
+                    )
+                if _value_grounded(norm_value, premise):
+                    return MiniCheckResult(
+                        supported=False, score=0.0, method="subject_ungrounded",
+                        rationale=(
+                            f"value '{value}' appears on the page but not in a sentence "
+                            f"that also identifies vendor '{subject}'"
+                        ),
+                    )
+            elif _value_grounded(norm_value, premise):
+                return MiniCheckResult(
+                    supported=True, score=1.0, method="value_grounded",
+                    rationale=f"value '{value}' present in evidence",
+                )
             value_tokens = _tokens(value)
             score = round(len(value_tokens & _tokens(premise)) / len(value_tokens), 4) if value_tokens else 0.0
-            return MiniCheckResult(supported=score >= self.threshold, score=score,
-                                   method="token_overlap",
-                                   rationale=f"value '{value}' not grounded; token overlap {score}")
+            if relation and score >= self.threshold and not _relation_grounded(subject, norm_value, premise):
+                score = 0.0
+            return MiniCheckResult(
+                supported=score >= self.threshold, score=score, method="token_overlap",
+                rationale=f"value '{value}' not grounded; token overlap {score}",
+            )
         claim_tokens = _tokens(claim)
         score = round(len(claim_tokens & _tokens(premise)) / len(claim_tokens), 4) if claim_tokens else 0.0
-        return MiniCheckResult(supported=score >= self.threshold, score=score, method="token_overlap",
-                               rationale=f"claim-text token overlap {score}")
+        if relation and score >= self.threshold and not _subject_grounded(subject, premise):
+            score = 0.0
+        return MiniCheckResult(
+            supported=score >= self.threshold, score=score, method="token_overlap",
+            rationale=f"claim-text token overlap {score}",
+        )
 
-    def _apply_model(self, base: MiniCheckResult, *, claim: str, premise: str) -> MiniCheckResult:
+    def _apply_model(
+        self,
+        base: MiniCheckResult,
+        *,
+        claim: str,
+        value: str,
+        premise: str,
+        subject: str = "",
+    ) -> MiniCheckResult:
         try:
             out = self.model(claim, premise)  # type: ignore[misc]
         except Exception:
@@ -110,5 +210,17 @@ class MiniCheck:
             return base
         score = round(max(0.0, min(1.0, float(score))), 4)
         rationale = out.get("rationale")
-        return MiniCheckResult(supported=score >= self.threshold, score=score, method="model",
-                               rationale=rationale if isinstance(rationale, str) else base.rationale)
+        supported = score >= self.threshold
+        norm_value = _norm(value)
+        if supported and (subject or "").strip() and norm_value:
+            if not _relation_grounded(subject, norm_value, premise):
+                if _value_grounded(norm_value, premise):
+                    return MiniCheckResult(
+                        supported=False, score=0.0, method="subject_ungrounded",
+                        rationale=f"model score {score} rejected: vendor '{subject}' not co-located with value",
+                    )
+                supported = False
+        return MiniCheckResult(
+            supported=supported, score=score, method="model",
+            rationale=rationale if isinstance(rationale, str) else base.rationale,
+        )
