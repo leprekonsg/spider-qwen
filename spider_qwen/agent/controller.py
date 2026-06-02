@@ -54,6 +54,7 @@ from ..observability.tracing import Tracer
 from ..ranking.contact_ranker import ContactRanker
 from ..ranking.geo_strategy import SEA_COUNTRIES, GeoStrategy, build_query_templates
 from ..ranking.product_ranker import ProductRanker
+from ..ranking.serendipity import build_serendipity_result
 from ..ranking.service_ranker import ServiceRanker
 from ..rfq.generator import RFQGenerator
 from ..tools.fetch_service import FetchService, build_fetch_provider
@@ -205,6 +206,9 @@ class Controller:
         validated = validated[: budget.max_validated_candidates]
         stop_reason = self._stop_reason(chosen, validated, candidates, tracker, budget)
 
+        # T-1.1: reshape the ranked candidates into the four-slot serendipity view.
+        serendipity = build_serendipity_result(ranked, mode=chosen.value)
+
         rfq_drafts: list[dict] = []
         if route.produces_rfq:
             rfq_drafts = self._build_rfqs(query, validated, target_country, metrics, audit, run_id, review_store)
@@ -228,6 +232,7 @@ class Controller:
                 mode=chosen.value, confidence=classification.confidence, rationale=classification.rationale
             ),
             validated_candidates=[c.model_dump(mode="json") for c in validated],
+            serendipity=serendipity.model_dump(mode="json"),
             pricing_status_summary=self._pricing_summary(candidates),
             rfq_drafts=rfq_drafts,
             evidence_refs=[c_ref for c in validated for c_ref in c.evidence_refs],

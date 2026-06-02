@@ -24,6 +24,8 @@ class RunResult(BaseModel):
     stop_reason: str
     classification: Classification
     validated_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    # T-1.1: four-slot serendipity view (primary_answer + s1/s2/s3 + score).
+    serendipity: dict[str, Any] | None = None
     pricing_status_summary: dict[str, int] = Field(default_factory=dict)
     rfq_drafts: list[dict[str, Any]] = Field(default_factory=list)
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
