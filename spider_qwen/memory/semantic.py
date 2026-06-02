@@ -15,14 +15,15 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from .. import SCHEMA_VERSION
-from ..evidence.models import EvidenceRef, utc_now_iso
+from ..evidence.models import DisputedAlternative, EvidenceRef, utc_now_iso
 from ..modes.contracts import PrivacyClass
+from .promotion import contradicts
 
 
 class SemanticFact(BaseModel):
     schema_version: str = SCHEMA_VERSION
     fact_id: str = Field(default_factory=lambda: f"fact_{uuid4().hex[:12]}")
-    entity_type: Literal["vendor", "category"]
+    entity_type: Literal["vendor", "category", "part"]
     entity_name: str
     field: str
     value: str
@@ -32,6 +33,9 @@ class SemanticFact(BaseModel):
     created_at: str = Field(default_factory=utc_now_iso)
     last_verified_at: str = Field(default_factory=utc_now_iso)
     status: Literal["active", "stale", "disputed"] = "active"
+    # Competing values from contradicting sources; the primary value/refs above
+    # are the highest-confidence side, these retain every other side (T-2.3).
+    disputed_alternatives: list[DisputedAlternative] = Field(default_factory=list)
 
     def key(self) -> str:
         return f"{self.entity_type}:{self.entity_name.lower()}:{self.field}"
@@ -74,19 +78,49 @@ class SemanticMemory:
             self._persist()
             return fact
 
-        if existing.value == fact.value:
+        if not contradicts(existing.value, fact.value):
+            # Agreement (exact, or after case/spacing/punctuation normalization).
             existing.confidence = max(existing.confidence, fact.confidence)
             existing.last_verified_at = utc_now_iso()
-            existing.status = "active"
+            if existing.status != "disputed":
+                existing.status = "active"
             existing.evidence_refs = self._merge_refs(existing.evidence_refs, fact.evidence_refs)
         elif fact.confidence > existing.confidence + 0.1:
             # Newer, clearly higher-confidence claim wins.
             fact.fact_id = existing.fact_id
             self._facts[existing.fact_id] = fact
         else:
-            existing.status = "disputed"
+            # Genuine cross-source contradiction: dispute, retaining every side.
+            self._record_dispute(existing, fact)
         self._persist()
         return self._facts[existing.fact_id]
+
+    def _record_dispute(self, existing: SemanticFact, incoming: SemanticFact) -> None:
+        """Mark a fact disputed while retaining both values and both spans.
+
+        All competing sides are deduped by value; the highest-confidence side
+        becomes the primary value/refs, the rest become ``disputed_alternatives``.
+        """
+        sides: dict[str, DisputedAlternative] = {}
+        for alt in [DisputedAlternative(value=existing.value, confidence=existing.confidence,
+                                        evidence_refs=existing.evidence_refs),
+                    *existing.disputed_alternatives,
+                    DisputedAlternative(value=incoming.value, confidence=incoming.confidence,
+                                        evidence_refs=incoming.evidence_refs)]:
+            prior = sides.get(alt.value)
+            if prior is None:
+                sides[alt.value] = alt
+            else:
+                prior.confidence = max(prior.confidence, alt.confidence)
+                prior.evidence_refs = self._merge_refs(prior.evidence_refs, alt.evidence_refs)
+        ordered = sorted(sides.values(), key=lambda s: s.confidence, reverse=True)
+        primary = ordered[0]
+        existing.status = "disputed"
+        existing.last_verified_at = utc_now_iso()
+        existing.value = primary.value
+        existing.confidence = primary.confidence
+        existing.evidence_refs = primary.evidence_refs
+        existing.disputed_alternatives = ordered[1:]
 
     def get(self, fact_id: str) -> SemanticFact | None:
         return self._facts.get(fact_id)

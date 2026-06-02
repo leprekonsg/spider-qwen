@@ -48,6 +48,19 @@ class EvidenceRef(BaseModel):
     retrieved_at: str
 
 
+class DisputedAlternative(BaseModel):
+    """A competing value for a disputed fact, with its own evidence spans.
+
+    Lets a contradicted (entity, property) retain *every* side's value and
+    evidence rather than discarding the loser (T-2.3 contradiction policy).
+    """
+
+    schema_version: str = SCHEMA_VERSION
+    value: str
+    confidence: float = 0.0
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+
+
 class EvidenceItem(BaseModel):
     """Full evidence record persisted in the ledger."""
 
