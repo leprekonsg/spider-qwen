@@ -73,6 +73,13 @@ qwen:
   # Heuristic + offline by default; off so the base offline pipeline is unchanged.
   page_judge_enabled: false
 
+verification:
+  # T-2.2 verification spine: atomic decomposition -> MiniCheck entailment ->
+  # SAFE re-verification. Blocks candidates whose critical claims are not grounded
+  # in their cited evidence. Heuristic + offline by default; off so the base
+  # offline pipeline is unchanged. Env SPIDER_QWEN_VERIFICATION_ENABLED.
+  enabled: false
+
 rfq:
   allow_vendor_submission: false
   default_tone: "SEA-neutral professional English; short and direct"

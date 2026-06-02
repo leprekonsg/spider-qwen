@@ -25,6 +25,8 @@ from ..api.schema import Classification, RunResult
 from ..evidence.ledger import EvidenceLedger
 from ..evidence.graph import render_supplier_graph
 from ..evidence.models import EvidenceRef, sha256_hex
+from ..evidence.verifier import VerificationSpine
+from ..verification.minicheck import MiniCheck
 from ..extraction.contact import ContactExtractor
 from ..extraction.dedupe import dedupe_candidates
 from ..extraction.pricing import PricingExtractor, PricingResult
@@ -95,6 +97,8 @@ class Controller:
         fetch_provider: object | None = None,
         qwen_json_extractor: object | None = None,
         page_judge: object | None = None,
+        verify: bool | None = None,
+        minicheck: object | None = None,
         qwen_router: object | None = None,
         memory_mcp: SemanticMemoryMcpAdapter | None = None,
         state_dir: str | Path | None = None,
@@ -119,6 +123,10 @@ class Controller:
         self.page_judge = page_judge
         if self.page_judge is None and self.policy.qwen_page_judge_enabled():
             self.page_judge = PageJudge()
+        # T-2.2: verification spine. Opt-in (off by default) so the offline
+        # pipeline is unchanged unless enabled here or via policy.
+        self.verify_claims = self.policy.verification_enabled() if verify is None else verify
+        self.minicheck = minicheck
         self.memory_mcp = memory_mcp
         if self.memory_mcp is None and self.state_dir is not None:
             self.memory_mcp = SemanticMemoryMcpAdapter(self.state_dir)
@@ -240,6 +248,15 @@ class Controller:
             validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
 
         validated = validated[: budget.max_validated_candidates]
+
+        # T-2.2: verification spine. Block candidates whose critical claims are not
+        # entailed by their cited evidence; write verified/verifier_score onto the
+        # claim ledger rows. Opt-in, so the default offline pipeline is unchanged.
+        verification_metrics = {"claims_verified": 0, "claims_unsupported": 0,
+                                "candidates_blocked_unverified": 0}
+        if self.verify_claims:
+            validated, verification_metrics = self._verify_candidates(ledger, validated, tracer)
+
         stop_reason = self._stop_reason(chosen, validated, candidates, tracker, budget)
 
         # T-1.1: reshape the ranked candidates into the four-slot serendipity view.
@@ -282,6 +299,7 @@ class Controller:
                 "corrective_searches": corrective_searches,
                 "pages_rejected": fetch.rejected,
                 "pages_flagged": fetch.flagged,
+                **verification_metrics,
             },
             budget=tracker.snapshot(),
         )
@@ -624,6 +642,32 @@ class Controller:
         backed = [bool(refs and meta.vendor_name != "Unknown Vendor"), bool(contacts)]
         cand.evidence_completeness = round(sum(backed) / len(backed), 3)
         return cand
+
+    # --- verification (T-2.2) ---------------------------------------------
+    def _verify_candidates(self, ledger: EvidenceLedger, validated, tracer):
+        """Verify each candidate's claims; drop those with unsupported critical claims."""
+        spine = VerificationSpine(ledger, minicheck=self.minicheck or MiniCheck())
+        kept = []
+        verified_claims = unsupported_claims = blocked = 0
+        for cand in validated:
+            cv = spine.verify_candidate(cand)
+            verified_claims += sum(1 for c in cv.claims if c.verified)
+            unsupported_claims += sum(1 for c in cv.claims if not c.verified)
+            if not cv.verified:
+                blocked += 1
+                if tracer is not None:
+                    tracer.record(step="verify_claims", tool="minicheck_verifier", status="blocked",
+                                  input_count=len(cv.claims), output_count=0,
+                                  detail=cv.model_dump(mode="json"))
+                continue
+            if tracer is not None:
+                tracer.record(step="verify_claims", tool="minicheck_verifier", status="success",
+                              input_count=len(cv.claims), output_count=len(cv.claims),
+                              detail={"vendor": cv.vendor_name, "verifier_score": cv.verifier_score})
+            kept.append(cand)
+        metrics = {"claims_verified": verified_claims, "claims_unsupported": unsupported_claims,
+                   "candidates_blocked_unverified": blocked}
+        return kept, metrics
 
     # --- validation / stop ------------------------------------------------
     def _is_validated(self, candidate, mode: ProcurementMode, budget) -> bool:

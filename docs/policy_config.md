@@ -56,6 +56,19 @@ Legacy keys `router_model` / `json_extractor_model` are still honoured if presen
 the `models:` block. Env `QWEN_ROUTER_MODEL` / `QWEN_JSON_EXTRACTOR_MODEL` and
 `SPIDER_QWEN_MODEL_*` override config for live demos.
 
+## Verification
+
+- `verification.enabled` — T-2.2 verification spine. Decomposes each candidate
+  into atomic claims, checks every `(claim, evidence_span)` with a MiniCheck-style
+  entailment gatekeeper (grounding the claim value against the source *page* text,
+  not the extraction snippet), and re-grounds flagged atoms against the wider
+  evidence corpus (SAFE). Candidates whose critical claims are not grounded are
+  blocked from output; `verified` / `verifier_score` are written onto each claim
+  ledger row. Heuristic + offline by default; off so the base pipeline is
+  unchanged. Env `SPIDER_QWEN_VERIFICATION_ENABLED`. Learned NLI (MiniCheck-FT5)
+  and live search (TinyFish) plug into the `MiniCheck(model=...)` /
+  `SafeReverifier(search_fn=...)` seams.
+
 ## RFQ
 `allow_vendor_submission: false` (v1 hard rule — never overridden in code),
 `default_tone`, `minimum_checklist_completeness: 0.65`.

@@ -129,6 +129,11 @@ class Policy:
     def qwen_page_judge_enabled(self) -> bool:
         return _env_bool("QWEN_PAGE_JUDGE_ENABLED", self.data.get("qwen", {}).get("page_judge_enabled", False))
 
+    def verification_enabled(self) -> bool:
+        # T-2.2 verification spine. Off by default; the deterministic gatekeeper
+        # blocks candidates whose critical claims are not grounded in evidence.
+        return _env_bool("SPIDER_QWEN_VERIFICATION_ENABLED", self.data.get("verification", {}).get("enabled", False))
+
     def qwen_router_confidence_threshold(self) -> float:
         return float(os.getenv("QWEN_ROUTER_CONFIDENCE_THRESHOLD") or self.data.get("qwen", {}).get("router_confidence_threshold", 0.65))
 
