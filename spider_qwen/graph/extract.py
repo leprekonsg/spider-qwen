@@ -88,6 +88,11 @@ def _is_mpn(token: str) -> bool:
     return len(token) >= 4 and any(c.isalpha() for c in token) and any(c.isdigit() for c in token)
 
 
+def find_mpns(text: str) -> list[str]:
+    """All MPN-like tokens in ``text`` (shared by extraction and retrieval seeding)."""
+    return [m.group(0) for m in _MPN_RE.finditer(text or "") if _is_mpn(m.group(0))]
+
+
 def _resolve(surface: str) -> tuple[str, str] | None:
     """Return (node_type, node_id) for a known entity surface, else None."""
     key = _WS.sub(" ", surface.strip().lower())

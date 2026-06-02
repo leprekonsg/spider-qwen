@@ -158,6 +158,21 @@ class Controller:
         )
         return RateLimiter() if live else NullRateLimiter()
 
+    def graph_retrieve(self, query: str, ledger, *, top_k: int = 5):
+        """T-3.2: build the supplier-part graph from a run's ledger page text and
+        run PPR multi-hop retrieval. Opt-in (not in the default pipeline); every
+        edge references the asserting page's ledger_id + its source reliability."""
+        from ..graph.extract import ingest_text
+        from ..graph.retrieve import GraphRetriever
+        from ..graph.store import GraphStore
+
+        store = GraphStore()
+        for item in ledger.items():
+            if item.text:
+                ingest_text(store, item.text, evidence_claim_id=item.ledger_id,
+                            reliability=item.reliability)
+        return GraphRetriever(store).retrieve(query, top_k=top_k)
+
     def _classify(self, query: str, forced_mode: str | None = None):
         result = self.classifier.classify(query, forced_mode=forced_mode)
         if forced_mode and forced_mode != "auto":
