@@ -50,9 +50,21 @@ privacy:
     - named_person_phone
     - direct_mobile
 
+# Canonical Qwen model role assignments (build plan section 2). Never hard-code
+# model strings in code; resolve through Policy.model_for(<role>). Override any
+# role at runtime with env SPIDER_QWEN_MODEL_<ROLE> (e.g. SPIDER_QWEN_MODEL_PLANNER).
+# Pin dated snapshots for demo reproducibility; the rolling alias can change
+# planner behaviour mid-run.
+models:
+  planner: "qwen3.7-max"            # planning / reasoning / high-stakes judging (deep-thinking ON, 1M ctx)
+  extraction: "qwen3.5-flash"       # extraction / classification / query-variants / reflection (thinking OFF)
+  extraction_fallback: "qwen-flash" # fallback when the flash snapshot is unavailable
+  embeddings: "text-embedding-v4"   # skills / notes / FFF specs (Matryoshka 768d index, 2048d rerank)
+  ocr: "qwen-vl-ocr-2025-11-20"     # datasheet / legacy-book OCR
+
 qwen:
-  router_model: "qwen3-max-2026-01-23"
-  json_extractor_model: "qwen-flash"
+  # Model names live in the models: block above. Legacy router_model /
+  # json_extractor_model keys are still honoured if present (backward compat).
   structured_extraction_enabled: false
   router_fallback_enabled: false
   router_confidence_threshold: 0.65

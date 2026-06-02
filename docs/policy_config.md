@@ -28,15 +28,32 @@ by default; `business_contact` stays OFF.
 `high_sensitivity_fields`: `named_person_email`, `named_person_phone`,
 `direct_mobile`.
 
+## Models (role -> Qwen model)
+
+Canonical model role assignments live under `models:`; never hard-code model
+strings in code. Resolve with `Policy.model_for(role)`.
+
+| Role | Default | Use |
+|---|---|---|
+| `planner` | `qwen3.7-max` | planning / reasoning / high-stakes judging |
+| `extraction` | `qwen3.5-flash` | extraction / classification / query-variants |
+| `extraction_fallback` | `qwen-flash` | flash snapshot unavailable |
+| `embeddings` | `text-embedding-v4` | skills / notes / FFF specs |
+| `ocr` | `qwen-vl-ocr-2025-11-20` | datasheet / legacy-book OCR |
+
+Override a role at runtime with env `SPIDER_QWEN_MODEL_<ROLE>` (e.g.
+`SPIDER_QWEN_MODEL_PLANNER`). Pin dated snapshots for demo reproducibility.
+
 ## Qwen
 
-- `router_model`
-- `json_extractor_model`
 - `structured_extraction_enabled`
 - `router_fallback_enabled`
 - `router_confidence_threshold`
 
-Environment variables with the same names override config for live demos.
+Legacy keys `router_model` / `json_extractor_model` are still honoured if present
+(they override `models.planner` / `models.extraction`). New configs should use
+the `models:` block. Env `QWEN_ROUTER_MODEL` / `QWEN_JSON_EXTRACTOR_MODEL` and
+`SPIDER_QWEN_MODEL_*` override config for live demos.
 
 ## RFQ
 `allow_vendor_submission: false` (v1 hard rule — never overridden in code),

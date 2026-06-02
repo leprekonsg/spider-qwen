@@ -18,10 +18,45 @@ from ..modes.contracts import ProcurementMode
 
 _DEFAULT_PATH = Path(__file__).resolve().parent.parent / "governance" / "policy_config.yaml"
 
+# Env override per model role: SPIDER_QWEN_MODEL_<ROLE>.
+_MODEL_ENV = {
+    "planner": "SPIDER_QWEN_MODEL_PLANNER",
+    "extraction": "SPIDER_QWEN_MODEL_EXTRACTION",
+    "extraction_fallback": "SPIDER_QWEN_MODEL_EXTRACTION_FALLBACK",
+    "embeddings": "SPIDER_QWEN_MODEL_EMBEDDINGS",
+    "ocr": "SPIDER_QWEN_MODEL_OCR",
+}
+
 
 class Policy:
     def __init__(self, data: dict[str, Any]) -> None:
         self.data = data
+
+    # --- model roles ------------------------------------------------------
+    @property
+    def models(self) -> dict[str, str]:
+        return dict(self.data.get("models", {}))
+
+    def model_for(self, role: str) -> str:
+        """Resolve the Qwen model string for a role (planner|extraction|...).
+
+        Precedence: env SPIDER_QWEN_MODEL_<ROLE> > models.<role> in config.
+        Raises KeyError with an actionable message when the role is unconfigured.
+        """
+        env = _MODEL_ENV.get(role)
+        if env:
+            override = os.getenv(env)
+            if override:
+                return override
+        models = self.data.get("models", {})
+        value = models.get(role)
+        if value:
+            return str(value)
+        hint = f" or set {env}" if env else ""
+        raise KeyError(
+            f"No Qwen model configured for role '{role}'. "
+            f"Add 'models.{role}: <model>' to policy_config.yaml{hint}."
+        )
 
     @property
     def schema_version(self) -> str:
@@ -70,10 +105,20 @@ class Policy:
         return bool(self.data.get("privacy", {}).get("review_gate_enabled", {}).get(privacy_class, False))
 
     def qwen_router_model(self) -> str:
-        return os.getenv("QWEN_ROUTER_MODEL") or str(self.data.get("qwen", {}).get("router_model", "qwen3-max-2026-01-23"))
+        # env > legacy qwen.router_model > canonical models.planner.
+        return (
+            os.getenv("QWEN_ROUTER_MODEL")
+            or str(self.data.get("qwen", {}).get("router_model") or "")
+            or self.model_for("planner")
+        )
 
     def qwen_json_extractor_model(self) -> str:
-        return os.getenv("QWEN_JSON_EXTRACTOR_MODEL") or str(self.data.get("qwen", {}).get("json_extractor_model", "qwen-flash"))
+        # env > legacy qwen.json_extractor_model > canonical models.extraction.
+        return (
+            os.getenv("QWEN_JSON_EXTRACTOR_MODEL")
+            or str(self.data.get("qwen", {}).get("json_extractor_model") or "")
+            or self.model_for("extraction")
+        )
 
     def qwen_structured_extraction_enabled(self) -> bool:
         return _env_bool("QWEN_STRUCTURED_EXTRACTION_ENABLED", self.data.get("qwen", {}).get("structured_extraction_enabled", False))
