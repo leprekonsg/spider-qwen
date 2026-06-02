@@ -56,6 +56,7 @@ from ..ranking.geo_strategy import SEA_COUNTRIES, GeoStrategy, build_query_templ
 from ..ranking.product_ranker import ProductRanker
 from ..ranking.serendipity import build_serendipity_result
 from ..ranking.service_ranker import ServiceRanker
+from ..serendipity.corrective import corrective_queries, evaluate_retrieval
 from ..rfq.generator import RFQGenerator
 from ..tools.fetch_service import FetchService, build_fetch_provider
 from ..tools.qwen_json_extractor import QwenJsonExtractor, QwenPageExtraction
@@ -178,14 +179,25 @@ class Controller:
             target_country = self._detect_target_country(query)
 
         # SEA-first gather, then global fallback only if min not met.
+        sea_pages: list = []
         candidates = await self._gather(
             ctx, route, query, search, fetch, region="SEA", target_country=target_country,
-            reserve_search_calls=1 if budget.max_search_calls > 1 else 0,
+            reserve_search_calls=1 if budget.max_search_calls > 1 else 0, pages_out=sea_pages,
         )
         candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
         ranker = self._rankers[route.ranker]
         ranked = ranker.rank(candidates)
         validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
+
+        # T-1.3: CRAG corrective evaluation of the SEA retrieval quality.
+        crag = evaluate_retrieval(query, sea_pages)
+        tracer.record(
+            step="crag_evaluate", tool="qwen_corrective", status="success",
+            input_count=len(crag.assessments),
+            detail={"verdict": crag.verdict, "confidence": crag.confidence,
+                    "mean_relevance": crag.mean_relevance, "pages": len(crag.assessments)},
+        )
+        corrective_searches = 0
 
         extraction_budget_remaining = tracker.candidates_extracted < budget.max_candidates_to_extract
         if (
@@ -194,10 +206,22 @@ class Controller:
             and tracker.can_search()
             and not tracker.runtime_exceeded()
         ):
-            tracer.record(step="geo_fallback", tool="search", status="success")
-            more = await self._gather(
-                ctx, route, query, search, fetch, region="global", target_country=target_country
-            )
+            if crag.verdict == "incorrect" and crag.assessments:
+                # Retrieval judged off-target: broaden / broker-pivot rather than answer.
+                corr = corrective_queries(query, crag, mode=chosen.value)
+                tracer.record(step="crag_corrective", tool="search", status="success",
+                              detail={"verdict": crag.verdict, "queries": [c.text for c in corr]})
+                before = tracker.search_calls
+                more = await self._gather_queries(
+                    ctx, route, [c.text for c in corr], search, fetch,
+                    location=None, target_country=target_country, pages_out=sea_pages,
+                )
+                corrective_searches = tracker.search_calls - before
+            else:
+                tracer.record(step="geo_fallback", tool="search", status="success")
+                more = await self._gather(
+                    ctx, route, query, search, fetch, region="global", target_country=target_country
+                )
             candidates = dedupe_candidates(candidates + more)
             candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
             ranked = ranker.rank(candidates)
@@ -241,6 +265,9 @@ class Controller:
                 "quote_channel_found_rate": metrics.quote_channel_found_rate,
                 "memory_recalls": len(memory_recalls),
                 "pending_reviews": len(review_store.list(status="pending")) if review_store else 0,
+                "crag_verdict": crag.verdict,
+                "crag_confidence": crag.confidence,
+                "corrective_searches": corrective_searches,
             },
             budget=tracker.snapshot(),
         )
@@ -260,19 +287,44 @@ class Controller:
         region: str,
         target_country: str | None,
         reserve_search_calls: int = 0,
+        pages_out: list | None = None,
     ) -> list:
         templates = build_query_templates(
             query, region=region, target_country=target_country, mode=route.mode.value
         )
         location = None if region == "global" else self.geo.location_code(target_country)
+        return await self._gather_queries(
+            ctx, route, templates, search, fetch,
+            location=location, target_country=target_country,
+            reserve_search_calls=reserve_search_calls, pages_out=pages_out,
+        )
+
+    async def _gather_queries(
+        self,
+        ctx: ExecutionContext,
+        route: RoutePlan,
+        queries: list[str],
+        search: SearchService,
+        fetch: FetchService,
+        *,
+        location: str | None,
+        target_country: str | None,
+        reserve_search_calls: int = 0,
+        pages_out: list | None = None,
+    ) -> list:
+        """Search the given query strings, fetch, and build candidates.
+
+        Candidates always match against the buyer's original query (``ctx.query``),
+        even when ``queries`` are expanded/corrective variants.
+        """
         urls: list[str] = []
-        for template in templates:
+        for q in queries:
             if not ctx.tracker.can_search():
                 break
             if reserve_search_calls and ctx.tracker.remaining_search_calls() <= reserve_search_calls:
                 break
             try:
-                result_set = await search.search(template, location=location)
+                result_set = await search.search(q, location=location)
             except BudgetExceeded:
                 break
             urls.extend(result_set.urls())
@@ -286,6 +338,8 @@ class Controller:
         except BudgetExceeded:
             return []
         ctx.working.add_fetched([p.final_url or p.url for p in fetched.results])
+        if pages_out is not None:
+            pages_out.extend(fetched.results)
 
         candidates = []
         for page in fetched.results:
@@ -293,7 +347,7 @@ class Controller:
                 continue
             if not ctx.tracker.consume_extraction():
                 break
-            candidates.append(self._build_candidate(ctx, route, query, page, target_country))
+            candidates.append(self._build_candidate(ctx, route, ctx.query, page, target_country))
         return candidates
 
     def _recall_memory(self, query: str, ctx: ExecutionContext, audit: AuditLog) -> list[MemoryRecall]:

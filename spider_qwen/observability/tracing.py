@@ -10,6 +10,8 @@ import json
 import time
 from pathlib import Path
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -23,6 +25,8 @@ class TraceEvent(BaseModel):
     latency_ms: int = 0
     status: str = "success"
     error: str | None = None
+    # Structured step payload (e.g. CRAG verdict, DAG shape, cost breakdown).
+    detail: dict[str, Any] | None = None
     timestamp: float = Field(default_factory=time.time)
 
 
@@ -43,12 +47,13 @@ class Tracer:
         latency_ms: int = 0,
         status: str = "success",
         error: str | None = None,
+        detail: dict[str, Any] | None = None,
     ) -> None:
         self.events.append(
             TraceEvent(
                 run_id=self.run_id, mode=self.mode, step=step, tool=tool,
                 input_count=input_count, output_count=output_count,
-                latency_ms=latency_ms, status=status, error=error,
+                latency_ms=latency_ms, status=status, error=error, detail=detail,
             )
         )
 
