@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .budget import BudgetExceeded, BudgetTracker, StopReason
+from .compiler import LLMCompiler, RateLimiter, ToolNode
 from .execution_context import ExecutionContext, new_run_id
 from .planner import Planner
 from .policy import Policy, load_policy
@@ -116,6 +117,9 @@ class Controller:
             self.memory_mcp = SemanticMemoryMcpAdapter(self.state_dir)
         self.router = ModeRouter()
         self.planner = Planner()
+        # T-1.4: LLM-Compiler + free-tier token buckets (5 search/min, 25 fetch/min).
+        self.rate_limiter = RateLimiter()
+        self.compiler = LLMCompiler(self.rate_limiter)
         self.geo = GeoStrategy(self.policy.boost_countries, self.policy.default_region)
         self._extractors = {
             "vendor_metadata": VendorMetadataExtractor(),
@@ -328,6 +332,57 @@ class Controller:
             except BudgetExceeded:
                 break
             urls.extend(result_set.urls())
+        return await self._fetch_and_extract(ctx, route, urls, fetch, target_country, pages_out)
+
+    async def gather_parallel(
+        self,
+        ctx: ExecutionContext,
+        route: RoutePlan,
+        queries: list[str],
+        search: SearchService,
+        fetch: FetchService,
+        *,
+        location: str | None,
+        target_country: str | None,
+        pages_out: list | None = None,
+    ) -> list:
+        """T-1.4: run independent searches concurrently via the LLM-Compiler DAG.
+
+        Used by the width-first GRAM-lite mode (T-3.3). Searches are capped to the
+        remaining search budget and rate-limited by the controller's token buckets.
+        """
+        budgeted = list(queries)[: max(0, ctx.tracker.remaining_search_calls())]
+        if not budgeted:
+            return []
+
+        def _search_node(q: str):
+            async def run(_dep):
+                if not ctx.tracker.can_search():
+                    return None
+                try:
+                    return await search.search(q, location=location)
+                except BudgetExceeded:
+                    return None
+            return run
+
+        nodes = [ToolNode(id=f"search_{i}", kind="search", run=_search_node(q))
+                 for i, q in enumerate(budgeted)]
+        results, _trace = await self.compiler.execute(nodes, tracer=ctx.tracer)
+        urls: list[str] = []
+        for rs in results.values():
+            if rs is not None:
+                urls.extend(rs.urls())
+        return await self._fetch_and_extract(ctx, route, urls, fetch, target_country, pages_out)
+
+    async def _fetch_and_extract(
+        self,
+        ctx: ExecutionContext,
+        route: RoutePlan,
+        urls: list[str],
+        fetch: FetchService,
+        target_country: str | None,
+        pages_out: list | None = None,
+    ) -> list:
         urls = _dedupe(urls)[: ctx.tracker.budget.max_candidates_to_extract]
         ctx.working.add_urls(urls)
         if not urls or not ctx.tracker.can_fetch():
