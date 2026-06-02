@@ -9,8 +9,10 @@ same interface without changing the controller.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from ..modes.router import RoutePlan
+from ..serendipity.query_rewrite import SearchQuery, expand_query
 
 
 @dataclass(frozen=True)
@@ -31,3 +33,13 @@ class Planner:
             steps.append(PlanStep("rfq", "Generate RFQ drafts (draft only, never sent)"))
         steps.append(PlanStep("persist", "Write evidence ledger, episodic memory, traces"))
         return steps
+
+    def expand_query(
+        self,
+        query: str,
+        *,
+        mode: str | None = None,
+        llm: Callable[[str], str] | None = None,
+    ) -> list[SearchQuery]:
+        """Step-Back + HyDE + Query2Doc expansion for vague/obsolete queries (T-1.2)."""
+        return expand_query(query, mode=mode, llm=llm)
