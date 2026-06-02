@@ -87,8 +87,13 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
         return 1
     if args.evidence_command == "verify":
         result = verify_ledger(ledger)
-        print(json.dumps(result.model_dump(), indent=2))
-        return 0 if result.ok else 1
+        chain = ledger.verify_chain()  # T-2.4: re-walk the Merkle hash chain
+        out = result.model_dump()
+        out["chain_checked"] = chain.checked
+        out["chain_ok"] = chain.ok
+        out["chain_issues"] = [i.model_dump() for i in chain.issues]
+        print(json.dumps(out, indent=2))
+        return 0 if (result.ok and chain.ok) else 1
     if args.evidence_command == "graph":
         print(render_supplier_graph(ledger))
         return 0

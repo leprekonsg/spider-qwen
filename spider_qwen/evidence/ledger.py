@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from .dedupe import dedupe_items
 from .models import EvidenceItem, EvidenceRef, SourceTool, sha256_hex
 
@@ -27,13 +29,36 @@ def _validate_run_id(run_id: str) -> str:
     return run_id
 
 
+def _chain_hash(content_digest: str, parent_hash: str) -> str:
+    """Link a row to its parent: sha256(claim_bytes || parent_sha) (T-2.4)."""
+    return sha256_hex(content_digest + parent_hash)
+
+
+class ChainIssue(BaseModel):
+    ledger_id: str
+    reason: str
+
+
+class ChainVerificationResult(BaseModel):
+    run_id: str
+    checked: int = 0
+    issues: list[ChainIssue] = Field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.issues
+
+
 class EvidenceLedger:
     """In-memory ledger for one run, optionally persisted to a JSON file."""
 
-    def __init__(self, run_id: str, state_dir: str | Path | None = None) -> None:
+    def __init__(self, run_id: str, state_dir: str | Path | None = None, *,
+                 reliability_priors: dict[str, float] | None = None) -> None:
         self.run_id = _validate_run_id(run_id)
         self._items: dict[str, EvidenceItem] = {}
         self._state_dir = Path(state_dir) if state_dir else None
+        self._reliability_priors = reliability_priors
+        self._chain_tip = ""  # chain_hash of the most recently appended row
 
     def record(
         self,
@@ -49,6 +74,14 @@ class EvidenceLedger:
         metadata: dict[str, Any] | None = None,
     ) -> EvidenceRef:
         """Record one evidence item and return its reference."""
+        # Imported lazily: governance/__init__ pulls in modes.contracts ->
+        # evidence.models, which would cycle if imported at ledger module load.
+        from ..governance.source_reliability import reliability_for
+
+        _source_class, reliability = reliability_for(
+            final_url or url, text=text or "", title=title or "",
+            priors=self._reliability_priors,
+        )
         item = EvidenceItem(
             source_tool=source_tool,
             url=url,
@@ -60,8 +93,12 @@ class EvidenceLedger:
             text_hash=sha256_hex(text) if text else None,
             language=language,
             confidence=confidence,
+            reliability=reliability,
             metadata=metadata or {},
         )
+        item.parent_hash = self._chain_tip
+        item.chain_hash = _chain_hash(item.content_digest(), self._chain_tip)
+        self._chain_tip = item.chain_hash
         self._items[item.ledger_id] = item
         return item.to_ref()
 
@@ -76,6 +113,26 @@ class EvidenceLedger:
 
     def deduped_items(self) -> list[EvidenceItem]:
         return dedupe_items(self.items())
+
+    def verify_chain(self) -> ChainVerificationResult:
+        """Re-walk the Merkle chain; any tampered or mis-linked row is reported."""
+        result = ChainVerificationResult(run_id=self.run_id)
+        parent = ""
+        for item in self._items.values():
+            result.checked += 1
+            expected = _chain_hash(item.content_digest(), parent)
+            if item.parent_hash != parent:
+                result.issues.append(ChainIssue(
+                    ledger_id=item.ledger_id,
+                    reason=f"parent_hash mismatch (expected {parent[:12] or 'genesis'})",
+                ))
+            elif item.chain_hash != expected:
+                result.issues.append(ChainIssue(
+                    ledger_id=item.ledger_id,
+                    reason="chain_hash mismatch: row content was tampered",
+                ))
+            parent = item.chain_hash
+        return result
 
     def __len__(self) -> int:
         return len(self._items)
@@ -106,4 +163,7 @@ class EvidenceLedger:
             for raw in payload.get("items", []):
                 item = EvidenceItem.model_validate(raw)
                 ledger._items[item.ledger_id] = item
+            if ledger._items:
+                # Continue the chain from the last appended row.
+                ledger._chain_tip = next(reversed(ledger._items.values())).chain_hash
         return ledger

@@ -18,39 +18,14 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable
-from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
+from ..governance.source_reliability import classify_source, host_of
 from ..serendipity.corrective import content_terms
 
-# Named authoritative sources (suffix-matched so subdomains count, not substrings
-# -- "multi.com" must not read as the manufacturer "ti.com").
-_MANUFACTURERS = (
-    "ti.com", "analog.com", "st.com", "nxp.com", "infineon.com", "microchip.com",
-    "onsemi.com", "renesas.com", "rohm.com", "vishay.com", "diodes.com",
-    "hirose.com", "molex.com", "te.com", "amphenol.com", "samtec.com",
-    "murata.com", "tdk.com", "bourns.com",
-)
-_DISTRIBUTORS = (
-    "digikey.com", "digikey.sg", "mouser.com", "mouser.sg", "arrow.com",
-    "avnet.com", "farnell.com", "newark.com", "element14.com", "rs-online.com",
-    "rsdelivers.com", "future.com", "verical.com",
-)
-_AGGREGATORS = (
-    "octopart.com", "oemsecrets.com", "findchips.com", "alldatasheet.com",
-    "datasheets.com", "componentsearchengine.com",
-)
-# Brokers + marketplaces are keyword-matched: domains vary, and the consequence
-# (flag / reject) is conservative either way.
-_BROKERS = (
-    "rochester", "lansdale", "brokerforum", "netcomponents", "icsource",
-)
-_MARKETPLACES = (
-    "alibaba", "aliexpress", "made-in-china", "ebay", "amazon", "indiamart",
-    "tradeindia", "dhgate",
-)
-
+# Page-judge gate weights per source tier (distinct from T-2.4's reliability
+# prior; the tiering itself is shared via governance.source_reliability).
 _AUTHORITY = {
     "manufacturer": 0.95,
     "distributor": 0.85,
@@ -62,11 +37,6 @@ _AUTHORITY = {
     "marketplace": 0.2,
 }
 
-_PROCUREMENT_SIGNALS = (
-    "quote", "quotation", "rfq", "vendor", "supplier", "price", "pricing",
-    "contact", "sales", "catalog", "catalogue", "datasheet", "stock", "moq",
-    "pte ltd", "we supply", "we provide", "request a quote",
-)
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 _PRICE_RE = re.compile(
     r"(?:S\$|US\$|RM|SGD|USD|MYR|EUR|GBP|\$|£|€)\s?\d[\d,]*(?:\.\d+)?",
@@ -84,32 +54,6 @@ class PageVerdict(BaseModel):
     contradiction: float
     source_class: str
     rationale: str = ""
-
-
-def _host(url: str) -> str:
-    host = (urlparse(url).netloc or url or "").lower()
-    return host[4:] if host.startswith("www.") else host
-
-
-def _suffix_match(host: str, domains: tuple[str, ...]) -> bool:
-    return any(host == d or host.endswith("." + d) for d in domains)
-
-
-def _classify_source(host: str, text: str, title: str) -> str:
-    if any(k in host for k in _MARKETPLACES):
-        return "marketplace"
-    if _suffix_match(host, _DISTRIBUTORS):
-        return "distributor"
-    if _suffix_match(host, _MANUFACTURERS):
-        return "manufacturer"
-    if any(k in host for k in _BROKERS):
-        return "broker"
-    if _suffix_match(host, _AGGREGATORS):
-        return "aggregator"
-    if host.endswith(".gov") or ".gov." in host or host.endswith(".edu") or ".edu." in host:
-        return "government"
-    blob = f"{title} {text}".lower()
-    return "business" if any(s in blob for s in _PROCUREMENT_SIGNALS) else "unknown"
 
 
 def _relevance(query: str, title: str, text: str) -> float:
@@ -141,7 +85,7 @@ def _contradiction(text: str, host: str, prior_items: Any) -> float:
         return 0.0
     for it in prior_items or ():
         it_url = getattr(it, "final_url", None) or getattr(it, "url", "") or ""
-        if _host(it_url) != host:
+        if host_of(it_url) != host:
             continue
         prev = _prices(getattr(it, "text", None) or getattr(it, "snippet", "") or "")
         if prev and now_prices.isdisjoint(prev):
@@ -185,8 +129,8 @@ class PageJudge:
         final_url: str | None = None,
     ) -> PageVerdict:
         page_url = final_url or url
-        host = _host(page_url)
-        source_class = _classify_source(host, text, title or "")
+        host = host_of(page_url)
+        source_class = classify_source(host, text, title or "")
         authority = _AUTHORITY[source_class]
         relevance = _relevance(query, title or "", text)
         freshness = _freshness(text, self.current_year)

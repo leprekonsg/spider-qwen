@@ -8,6 +8,7 @@ semantic facts). Downstream code must reference ledger IDs, never raw URLs.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
@@ -78,10 +79,29 @@ class EvidenceItem(BaseModel):
     language: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     confidence: float = 0.0
+    # T-2.4: source-reliability prior (set by the ledger at record time) and the
+    # Merkle hash chain linking this row to the one appended before it.
+    reliability: float = 1.0
+    parent_hash: str = ""
+    chain_hash: str = ""
 
     def model_post_init(self, __context: Any) -> None:  # noqa: D401
         if not self.snippet_hash:
             object.__setattr__(self, "snippet_hash", sha256_hex(self.snippet))
+
+    @property
+    def effective_confidence(self) -> float:
+        """Base confidence weighted by the source-reliability prior (T-2.4)."""
+        return round(self.confidence * self.reliability, 6)
+
+    def content_digest(self) -> str:
+        """Stable digest over all content fields except the chain links.
+
+        Tampering with any persisted field changes this digest, so re-walking
+        the chain detects it.
+        """
+        payload = self.model_dump(mode="json", exclude={"chain_hash", "parent_hash"})
+        return sha256_hex(json.dumps(payload, sort_keys=True, ensure_ascii=False))
 
     def to_ref(self) -> EvidenceRef:
         return EvidenceRef(

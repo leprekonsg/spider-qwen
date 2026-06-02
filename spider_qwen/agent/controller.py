@@ -183,7 +183,8 @@ class Controller:
         budget = self.policy.budget_for(chosen, route.budget_key)
 
         run_id = new_run_id()
-        ledger = EvidenceLedger(run_id, self.state_dir)
+        ledger = EvidenceLedger(run_id, self.state_dir,
+                                reliability_priors=self.policy.source_reliability())
         tracker = BudgetTracker(budget)
         working = WorkingMemory(run_id=run_id, query=query, mode=chosen.value)
         tracer = Tracer(run_id, chosen.value, self.state_dir)

@@ -134,6 +134,13 @@ class Policy:
         # blocks candidates whose critical claims are not grounded in evidence.
         return _env_bool("SPIDER_QWEN_VERIFICATION_ENABLED", self.data.get("verification", {}).get("enabled", False))
 
+    def source_reliability(self) -> dict[str, float]:
+        # T-2.4 per-source reliability priors; yaml overrides the code defaults.
+        from ..governance.source_reliability import DEFAULT_RELIABILITY
+
+        overrides = self.data.get("source_reliability", {}) or {}
+        return {**DEFAULT_RELIABILITY, **{k: float(v) for k, v in overrides.items()}}
+
     def qwen_router_confidence_threshold(self) -> float:
         return float(os.getenv("QWEN_ROUTER_CONFIDENCE_THRESHOLD") or self.data.get("qwen", {}).get("router_confidence_threshold", 0.65))
 

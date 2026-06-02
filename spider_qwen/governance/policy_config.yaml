@@ -80,6 +80,19 @@ verification:
   # offline pipeline is unchanged. Env SPIDER_QWEN_VERIFICATION_ENABLED.
   enabled: false
 
+source_reliability:
+  # T-2.4 per-source reliability prior; multiplies into per-claim (effective)
+  # confidence. Runtime defaults live in governance/source_reliability.py; the
+  # values here override them. Manufacturer datasheet highest, marketplace lowest.
+  manufacturer: 0.99
+  distributor: 0.95
+  government: 0.9
+  aggregator: 0.85
+  business: 0.6
+  broker: 0.5
+  unknown: 0.4
+  marketplace: 0.2
+
 rfq:
   allow_vendor_submission: false
   default_tone: "SEA-neutral professional English; short and direct"
