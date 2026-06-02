@@ -60,6 +60,7 @@ from ..ranking.service_ranker import ServiceRanker
 from ..serendipity.corrective import corrective_queries, evaluate_retrieval
 from ..rfq.generator import RFQGenerator
 from ..tools.fetch_service import FetchService, build_fetch_provider
+from ..tools.page_judge import PageJudge
 from ..tools.qwen_json_extractor import QwenJsonExtractor, QwenPageExtraction
 from ..tools.search_service import SearchService, build_search_provider
 
@@ -93,6 +94,7 @@ class Controller:
         search_provider: object | None = None,
         fetch_provider: object | None = None,
         qwen_json_extractor: object | None = None,
+        page_judge: object | None = None,
         qwen_router: object | None = None,
         memory_mcp: SemanticMemoryMcpAdapter | None = None,
         state_dir: str | Path | None = None,
@@ -112,6 +114,11 @@ class Controller:
         self.qwen_json_extractor = qwen_json_extractor
         if self.qwen_json_extractor is None and self.policy.qwen_structured_extraction_enabled():
             self.qwen_json_extractor = QwenJsonExtractor(model=self.policy.qwen_json_extractor_model())
+        # T-2.1: page judge gate. Opt-in (off by default) so the offline pipeline
+        # is unchanged unless a judge is injected or the policy flag enables it.
+        self.page_judge = page_judge
+        if self.page_judge is None and self.policy.qwen_page_judge_enabled():
+            self.page_judge = PageJudge()
         self.memory_mcp = memory_mcp
         if self.memory_mcp is None and self.state_dir is not None:
             self.memory_mcp = SemanticMemoryMcpAdapter(self.state_dir)
@@ -168,7 +175,8 @@ class Controller:
         )
 
         search = SearchService(self.search_provider, ledger, tracker, tracer)
-        fetch = FetchService(self.fetch_provider, ledger, tracker, tracer)
+        fetch = FetchService(self.fetch_provider, ledger, tracker, tracer,
+                             judge=self.page_judge, query=query)
         memory_recalls = self._recall_memory(query, ctx, audit)
 
         if review_store and mode == "auto" and classification.confidence < self.policy.qwen_router_confidence_threshold():
@@ -272,6 +280,8 @@ class Controller:
                 "crag_verdict": crag.verdict,
                 "crag_confidence": crag.confidence,
                 "corrective_searches": corrective_searches,
+                "pages_rejected": fetch.rejected,
+                "pages_flagged": fetch.flagged,
             },
             budget=tracker.snapshot(),
         )

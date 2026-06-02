@@ -126,6 +126,9 @@ class Policy:
     def qwen_router_fallback_enabled(self) -> bool:
         return _env_bool("QWEN_ROUTER_FALLBACK_ENABLED", self.data.get("qwen", {}).get("router_fallback_enabled", False))
 
+    def qwen_page_judge_enabled(self) -> bool:
+        return _env_bool("QWEN_PAGE_JUDGE_ENABLED", self.data.get("qwen", {}).get("page_judge_enabled", False))
+
     def qwen_router_confidence_threshold(self) -> float:
         return float(os.getenv("QWEN_ROUTER_CONFIDENCE_THRESHOLD") or self.data.get("qwen", {}).get("router_confidence_threshold", 0.65))
 

@@ -49,6 +49,7 @@ Override a role at runtime with env `SPIDER_QWEN_MODEL_<ROLE>` (e.g.
 - `structured_extraction_enabled`
 - `router_fallback_enabled`
 - `router_confidence_threshold`
+- `page_judge_enabled` — gate fetched pages (relevance/freshness/authority/contradicts-ledger) before persist; reject/flag low-trust pages. Env `QWEN_PAGE_JUDGE_ENABLED`.
 
 Legacy keys `router_model` / `json_extractor_model` are still honoured if present
 (they override `models.planner` / `models.extraction`). New configs should use

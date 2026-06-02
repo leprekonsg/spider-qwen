@@ -119,11 +119,20 @@ class FetchService:
         ledger: "EvidenceLedger",
         tracker: "BudgetTracker | None" = None,
         tracer: object | None = None,
+        *,
+        judge: object | None = None,
+        query: str | None = None,
     ) -> None:
         self.provider = provider
         self.ledger = ledger
         self.tracker = tracker
         self.tracer = tracer
+        # T-2.1: optional page judge gate (accept/flag/reject) run before persist.
+        self.judge = judge
+        self.query = query or ""
+        self.judged = 0
+        self.rejected = 0
+        self.flagged = 0
 
     async def fetch(
         self, urls: list[str], output_format: str = "markdown", include_links: bool = True
@@ -136,7 +145,40 @@ class FetchService:
             urls = urls[:allowed]
         source_tool = getattr(self.provider, "fetch_source_tool", "tinyfish_fetch")
         result_set = await self.provider.fetch(urls, output_format, include_links)
+        kept: list[FetchResult] = []
         for p in result_set.results:
+            verdict = None
+            if self.judge is not None:
+                # Judge every page, including empty-text ones: an image-only / no-
+                # extract page from a low-authority host must not slip past the gate.
+                verdict = self.judge.judge(
+                    url=p.url, final_url=p.final_url, title=p.title,
+                    text=p.text or "", query=self.query, prior_items=self.ledger.items(),
+                )
+                self.judged += 1
+                if verdict.verdict == "reject":
+                    # Low-authority / off-topic: never written to the ledger.
+                    self.rejected += 1
+                    result_set.errors.append({
+                        "url": p.final_url or p.url,
+                        "error": f"rejected by page judge: {verdict.rationale}",
+                        "verdict": verdict.model_dump(mode="json"),
+                    })
+                    if self.tracer is not None:
+                        self.tracer.record(step="page_judge", tool="page_judge", status="rejected",
+                                           input_count=1, output_count=0,
+                                           detail=verdict.model_dump(mode="json"))
+                    continue
+
+            confidence = 0.6
+            metadata: dict = {"links": p.links[:20], "provider": result_set.provider}
+            if verdict is not None:
+                if verdict.verdict == "flag":
+                    self.flagged += 1
+                    confidence = 0.4  # flagged evidence is down-weighted, not trusted
+                metadata["gate_status"] = "flagged" if verdict.verdict == "flag" else "accepted"
+                metadata["judge"] = verdict.model_dump(mode="json")
+
             p.evidence_ref = self.ledger.record(
                 source_tool=source_tool,
                 url=p.url,
@@ -145,9 +187,11 @@ class FetchService:
                 snippet=(p.text or "")[:500],
                 text=p.text,
                 language=p.language,
-                confidence=0.6,
-                metadata={"links": p.links[:20], "provider": result_set.provider},
+                confidence=confidence,
+                metadata=metadata,
             )
+            kept.append(p)
+        result_set.results = kept
         if self.tracer is not None:
             self.tracer.record(step="fetch", tool=source_tool, status="success",
                                input_count=len(urls), output_count=len(result_set.results))
