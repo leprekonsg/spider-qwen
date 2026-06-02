@@ -3,8 +3,8 @@
 A planner (qwen3.7-max, in spirit) emits a DAG of tool calls; the executor runs
 independent nodes concurrently via ``asyncio.gather`` while respecting the
 TinyFish free-tier limits (5 search/min, 25 fetch/min) through per-kind token
-buckets. The default sequential controller pipeline is unchanged; the controller
-exposes ``gather_parallel`` (used from T-3.3 GRAM-lite) built on this executor.
+buckets. The controller gather path uses this executor for concurrent searches and
+fetches; ``gather_parallel`` (T-3.3 GRAM-lite) uses the same machinery.
 
 Buckets accept injectable ``now``/``sleep`` so rate-limit behaviour is testable
 without minute-long real waits.
@@ -39,10 +39,22 @@ class TokenBucket:
         self._now = now or time.monotonic
         self._sleep = sleep or asyncio.sleep
         self._last = self._now()
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop_id: int | None = None
+
+    def _lock_for_loop(self) -> asyncio.Lock:
+        """Recreate the lock when the running event loop changes (benchmark harness)."""
+        try:
+            loop_id = id(asyncio.get_running_loop())
+        except RuntimeError:
+            loop_id = None
+        if self._lock is None or self._lock_loop_id != loop_id:
+            self._lock = asyncio.Lock()
+            self._lock_loop_id = loop_id
+        return self._lock
 
     async def acquire(self, n: float = 1) -> None:
-        async with self._lock:
+        async with self._lock_for_loop():
             while True:
                 now = self._now()
                 self._tokens = min(self.capacity, self._tokens + (now - self._last) * self.rate)
@@ -74,6 +86,18 @@ class RateLimiter:
         bucket = self.buckets.get(kind)
         if bucket is not None:
             await bucket.acquire(n)
+
+
+class NullRateLimiter:
+    """No-op limiter for offline/mock providers.
+
+    Mock providers consume no external quota, so throttling them only adds
+    real wall-clock waits (the offline 80-case benchmark would otherwise block
+    ~1h on token refills). Same ``acquire`` interface as ``RateLimiter``.
+    """
+
+    async def acquire(self, kind: str, n: float = 1) -> None:
+        return None
 
 
 @dataclass

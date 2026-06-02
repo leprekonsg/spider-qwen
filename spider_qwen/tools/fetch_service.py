@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 class TinyFishFetchProvider:
     provider_name = "tinyfish"
     fetch_source_tool = "tinyfish_fetch"
+    rate_limited = True  # consumes the live TinyFish free-tier fetch quota
 
     def __init__(self, client: TinyFishClient | None = None) -> None:
         self.client = client or tinyfish_from_env()
@@ -50,6 +51,7 @@ class TinyFishFetchProvider:
 class MockFetchProvider:
     provider_name = "mock"
     fetch_source_tool = "mock"
+    rate_limited = False  # offline fixtures hit no external quota; never throttle
 
     def __init__(self, fixtures: dict[str, dict] | None = None) -> None:
         self.fixtures = fixtures or {}

@@ -179,3 +179,54 @@ def expand_query(
     add(f"{base} obsolete stock {operators}", "broker_operator", "long-tail broker sources")
 
     return out
+
+
+# Kinds wired into the primary controller gather (T-1.2). HyDE alone is omitted — it is
+# long-form pseudo-doc text; query2doc carries the same signal in a search-friendly form.
+_GATHER_EXPANSION_KINDS = (
+    "obsolescence", "mpn_pattern", "broker_operator", "step_back", "query2doc",
+)
+
+
+def merge_gather_queries(
+    geo_templates: list[str],
+    expanded: list[SearchQuery],
+    *,
+    max_queries: int | None = None,
+) -> list[str]:
+    """Merge SEA/geo templates with T-1.2 expansion variants for the primary search path.
+
+    Geo and expansion strings are interleaved so a small ``max_search_calls`` budget
+    still runs obsolescence / MPN / broker variants instead of spending every call
+    on country-suffixed templates alone.
+    """
+    seen: set[str] = set()
+    geo: list[str] = []
+    expansion: list[str] = []
+
+    def add_to(bucket: list[str], text: str) -> None:
+        normalized = " ".join((text or "").split())
+        key = normalized.lower()
+        if key and key not in seen:
+            seen.add(key)
+            bucket.append(normalized)
+
+    for q in geo_templates:
+        add_to(geo, q)
+    for kind in _GATHER_EXPANSION_KINDS:
+        for sq in expanded:
+            if sq.kind == kind:
+                add_to(expansion, sq.text)
+
+    out: list[str] = []
+    gi = ei = 0
+    while gi < len(geo) or ei < len(expansion):
+        if gi < len(geo):
+            out.append(geo[gi])
+            gi += 1
+        if ei < len(expansion):
+            out.append(expansion[ei])
+            ei += 1
+    if max_queries is not None and max_queries >= 0:
+        return out[:max_queries]
+    return out

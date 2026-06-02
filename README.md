@@ -18,13 +18,22 @@ ready-to-review RFQ drafts — without ever submitting or sending anything.
 It behaves like a digital sourcing analyst: it receives a buyer's request,
 searches public sources through approved providers, verifies vendor evidence,
 compares options, prepares recommendations, and leaves findings for human review.
+Operational estimate: for routine supplier discovery and RFQ drafting, the goal
+is to reduce research from hours of manual tab-hopping to minutes of
+evidence-backed draft preparation.
 
 - **Qwen-native layer:** optional Qwen JSON extraction (DashScope `json_object` mode), low-confidence tool-call routing, domain skill prompts, and an in-process MCP-compatible memory seam.
 - **Web layer:** [TinyFish](https://docs.tinyfish.ai) Search + Fetch (primary), Qwen WebExtractor (single-page fallback), deterministic mocks for demos.
 - **Guarantee:** every vendor / contact / price / RFQ output references ledger evidence; extracted claims carry span metadata when available.
 
-> Current scope: `search → fetch → extract → rank → RFQ draft → persist evidence + memory`.
+> Current scope: `search (SEA/geo templates + Step-Back/HyDE expansion) → concurrent fetch
+> → extract → rank → RFQ draft → persist evidence + memory`.
 > **No** portal submission, browser automation, or code interpreter.
+>
+> **Serendipity slots (T-1.1 scaffold):** runs expose `primary_answer`, `s1_substitutes`,
+> `s2_long_tail_sources`, and `s3_risk_signals` in JSON. Phase 1 fills `s1`/`s2` from rank
+> positions 2–4 and 5+ with deterministic scores — not yet true substitute or long-tail
+> classification (supplier graph, bandit, Wayback in later phases).
 
 ## Brand concept
 

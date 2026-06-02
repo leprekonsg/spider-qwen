@@ -84,6 +84,7 @@ class QwenWebExtractorFetchProvider:
 
     provider_name = "qwen_web_extractor"
     fetch_source_tool = "qwen_web_extractor"
+    rate_limited = True  # single-page live extraction; consumes the live quota
 
     def __init__(self, extractor: QwenWebExtractor | None = None) -> None:
         self.extractor = extractor or QwenWebExtractor()

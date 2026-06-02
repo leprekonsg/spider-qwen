@@ -1,9 +1,9 @@
-"""T-1.1: serendipity 4-slot output schema + scoring.
+"""T-1.1: serendipity 4-slot output schema + scoring (rank-based scaffold).
 
 Run results are reshaped into {primary_answer, s1_substitutes,
 s2_long_tail_sources, s3_risk_signals, evidence_refs, serendipity_score}.
-Each non-primary slot item is scored relevance x novelty x unexpectedness in
-[0,1] against a top-ranked baseline.
+Phase 1 maps s1 to ranks 2-4 and s2 to rank 5+; true S1/S2 classification
+arrives in later graph/bandit phases.
 """
 
 from __future__ import annotations
@@ -65,6 +65,7 @@ def test_primary_is_highest_ranked():
 
 
 def test_substitutes_are_ranks_2_to_4():
+    """Scaffold: s1_substitutes are ranked positions 2-4, not graph-derived substitutes."""
     cands = [_cand(f"v{i}", 100 - i) for i in range(6)]
     res = build_serendipity_result(cands, mode="service_quote_required")
     assert [s.candidate["vendor_name"] for s in res.s1_substitutes] == ["v1", "v2", "v3"]

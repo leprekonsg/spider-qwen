@@ -24,7 +24,7 @@ class PlanStep:
 class Planner:
     def plan(self, route: RoutePlan) -> list[PlanStep]:
         steps = [
-            PlanStep("search", "SEA-first ranked URL discovery (global fallback if needed)"),
+            PlanStep("search", "SEA/geo templates + Step-Back/HyDE expansion (SEA-first, global fallback)"),
             PlanStep("fetch", "Retrieve clean page content for candidate URLs"),
             PlanStep("extract", f"Run extractors: {', '.join(route.extractors)}"),
             PlanStep("rank", f"Score with the {route.ranker} ranker"),

@@ -11,6 +11,7 @@ import time
 
 from spider_qwen.agent.compiler import (
     LLMCompiler,
+    NullRateLimiter,
     RateLimiter,
     ToolNode,
     TokenBucket,
@@ -138,6 +139,94 @@ def test_compiler_rejects_unknown_dependency():
         raise AssertionError("expected ValueError for unknown dependency")
 
 
+def test_controller_primary_gather_records_query_expansion():
+    import asyncio
+
+    from spider_qwen.agent.controller import Controller
+    from spider_qwen.tools.fetch_service import MockFetchProvider
+    from spider_qwen.tools.search_service import MockSearchProvider, SearchService
+
+    recorded: list[str] = []
+
+    class RecordingSearch(MockSearchProvider):
+        async def search(self, query, location, language, limit):
+            recorded.append(query)
+            return await super().search(query, location, language, limit)
+
+    controller = Controller(search_provider=RecordingSearch(),
+                            fetch_provider=MockFetchProvider(), state_dir=None, persist=False)
+    asyncio.run(controller.run(
+        "16-pin SMT op-amp TI obsolete replacement Singapore",
+        mode="product_exact_price",
+    ))
+    assert recorded
+    assert any("nrnd" in q.lower() or "obsolete" in q.lower() for q in recorded)
+    assert len(set(recorded)) >= 2
+
+
+def test_controller_fetch_runs_concurrently_in_gather():
+    import asyncio
+    import time
+
+    from spider_qwen.agent.budget import BudgetTracker
+    from spider_qwen.agent.controller import Controller
+    from spider_qwen.agent.execution_context import ExecutionContext, new_run_id
+    from spider_qwen.agent.policy import load_policy
+    from spider_qwen.evidence.ledger import EvidenceLedger
+    from spider_qwen.memory.working import WorkingMemory
+    from spider_qwen.modes.contracts import ProcurementMode
+    from spider_qwen.modes.router import ModeRouter
+    from spider_qwen.observability.tracing import Tracer
+    from spider_qwen.tools.fetch_service import FetchService, MockFetchProvider
+    from spider_qwen.tools.search_service import MockSearchProvider, SearchService
+    latency = 0.05
+    state = {"in_flight": 0, "peak": 0}
+
+    class SlowFetch(MockFetchProvider):
+        async def fetch(self, urls, output_format="markdown", include_links=True):
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+            await asyncio.sleep(latency)
+            try:
+                return await super().fetch(urls, output_format, include_links)
+            finally:
+                state["in_flight"] -= 1
+
+    controller = Controller(
+        search_provider=MockSearchProvider(),
+        fetch_provider=SlowFetch(),
+        state_dir=None,
+        persist=False,
+    )
+    controller.compiler = LLMCompiler(RateLimiter(search_per_minute=600, fetch_per_minute=600))
+    mode = ProcurementMode.SERVICE_QUOTE_REQUIRED
+    route = ModeRouter().route(mode)
+    budget = load_policy().budget_for(mode, route.budget_key)
+    run_id = new_run_id()
+    ledger = EvidenceLedger(run_id, None)
+    tracker = BudgetTracker(budget)
+    working = WorkingMemory(run_id=run_id, query="office cleaning Singapore", mode=mode.value)
+    tracer = Tracer(run_id, mode.value)
+    ctx = ExecutionContext(run_id=run_id, query="office cleaning Singapore", mode=mode,
+                           ledger=ledger, tracker=tracker, working=working, tracer=tracer)
+    search = SearchService(MockSearchProvider(), ledger, tracker, tracer)
+    fetch = FetchService(SlowFetch(), ledger, tracker, tracer)
+
+    queries = [f"office cleaning Singapore vendor {i}" for i in range(5)]
+    t0 = time.monotonic()
+    cands = asyncio.run(controller.gather_parallel(
+        ctx, route, queries, search, fetch, location="SG", target_country="Singapore"))
+    elapsed = time.monotonic() - t0
+
+    assert cands
+    assert state["peak"] >= 5, f"peak concurrent fetches {state['peak']}"
+    sequential = latency * 5
+    assert elapsed < sequential * 0.75, f"{elapsed:.3f}s not faster than sequential {sequential:.3f}s"
+    fetch_events = [e for e in tracer.events if e.step == "compiler_execute"]
+    assert fetch_events
+    assert fetch_events[-1].detail.get("peak_by_kind", {}).get("fetch", 0) >= 5
+
+
 def test_controller_gather_parallel_uses_compiler():
     from spider_qwen.agent.budget import BudgetTracker
     from spider_qwen.agent.controller import Controller
@@ -173,3 +262,45 @@ def test_controller_gather_parallel_uses_compiler():
 
     assert cands
     assert any(e.step == "compiler_execute" for e in tracer.events)
+
+
+def test_offline_controller_does_not_throttle_mock_providers():
+    """Regression: mock providers must bypass the wall-clock rate limiter.
+
+    Routing concurrent search/fetch through the rate-limited compiler once made
+    the 80-case offline benchmark block ~1h on token refills (~45s per case
+    after the 5-token burst drained). Mock providers consume no external quota,
+    so they must use NullRateLimiter and never wait.
+    """
+    from spider_qwen.agent.controller import Controller
+    from spider_qwen.tools.fetch_service import MockFetchProvider
+    from spider_qwen.tools.search_service import MockSearchProvider
+
+    controller = Controller(search_provider=MockSearchProvider(),
+                            fetch_provider=MockFetchProvider(), state_dir=None, persist=False)
+    assert isinstance(controller.rate_limiter, NullRateLimiter)
+
+    # Each run fires several searches; if throttled, the 2nd+ run alone would
+    # block tens of seconds. Three runs well under 5s proves no wall-clock wait.
+    t0 = time.monotonic()
+    for _ in range(3):
+        asyncio.run(controller.run("office cleaning services Singapore", mode="auto"))
+    assert time.monotonic() - t0 < 5.0
+
+
+def test_controller_throttles_when_a_provider_hits_a_live_quota():
+    """A live-quota provider must still get a real RateLimiter (protect the API)."""
+    from spider_qwen.agent.controller import Controller
+    from spider_qwen.tools.search_service import MockSearchProvider
+
+    class LiveFetchStub:
+        rate_limited = True
+        provider_name = "stub"
+        fetch_source_tool = "stub"
+
+        async def fetch(self, urls, output_format="markdown", include_links=True):
+            raise AssertionError("provider should not be called in this wiring test")
+
+    controller = Controller(search_provider=MockSearchProvider(),
+                            fetch_provider=LiveFetchStub(), state_dir=None, persist=False)
+    assert isinstance(controller.rate_limiter, RateLimiter)

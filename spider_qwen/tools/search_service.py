@@ -26,6 +26,7 @@ class SearchProviderError(Exception):
 class TinyFishSearchProvider:
     provider_name = "tinyfish"
     search_source_tool = "tinyfish_search"
+    rate_limited = True  # consumes the live TinyFish free-tier search quota
 
     def __init__(self, client: TinyFishClient | None = None) -> None:
         self.client = client or tinyfish_from_env()
@@ -68,6 +69,7 @@ class QwenMcpSearchProvider:
 
     provider_name = "qwen_mcp"
     search_source_tool = "mcp_search"
+    rate_limited = True  # consumes the live Qwen MCP / Model Studio quota
 
     def __init__(
         self,
@@ -91,6 +93,7 @@ class MockSearchProvider:
 
     provider_name = "mock"
     search_source_tool = "mock"
+    rate_limited = False  # offline fixtures hit no external quota; never throttle
 
     def __init__(self, fixtures: dict[str, list[dict]] | None = None) -> None:
         self.fixtures = fixtures or {}

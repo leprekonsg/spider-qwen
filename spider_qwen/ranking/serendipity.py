@@ -1,19 +1,23 @@
-"""T-1.1: serendipity output schema + deterministic scoring.
+"""T-1.1: serendipity output schema + deterministic scoring (scaffold).
 
-Reshapes a ranked candidate list into the four-slot serendipity result the build
-plan calls for:
+Reshapes a ranked candidate list into the four-slot JSON shape the build plan
+calls for:
 
     {primary_answer, s1_substitutes[], s2_long_tail_sources[],
      s3_risk_signals[], evidence_refs[], serendipity_score}
+
+**Scaffold behaviour (Phase 1):** ``primary_answer`` is rank #1; ``s1_substitutes``
+are ranks 2–4; ``s2_long_tail_sources`` are rank 5+. That satisfies the schema
+acceptance test but is *not* true S1 substitute / S2 long-tail classification
+yet — those arrive with the supplier graph (T-3.1), bandit/Wayback (T-5.x), and
+upstream slot population. Do not describe this module as full serendipity discovery.
 
 Each non-primary slot item is scored ``relevance x novelty x unexpectedness`` in
 [0,1] against a top-ranked baseline (a proxy for the "top-3 authorized
 distributor" baseline in the plan; source-type classification arrives in T-2.4).
 
-Scoring is deterministic and LLM-free so it stays reproducible and unit-testable.
-Later phases inject richer slot content (true substitutes via the supplier graph
-and legacy-OCR, long-tail sources via the bandit/Wayback, S3 signals via the
-proactive bundle) through ``extra_risk_signals`` and by populating slots upstream.
+Scoring is deterministic and LLM-free. Later phases inject richer slot content
+via ``extra_risk_signals`` and by populating slots upstream before this reshape.
 """
 
 from __future__ import annotations
