@@ -52,7 +52,7 @@ from ..modes.contracts import (
 )
 from ..modes.qwen_router import QwenModeRouter, QwenModeRouterError
 from ..modes.router import ModeRouter, RoutePlan
-from ..observability.metrics import Metrics
+from ..observability.metrics import CostMeter, Metrics
 from ..observability.tracing import Tracer
 from ..ranking.contact_ranker import ContactRanker
 from ..ranking.geo_strategy import SEA_COUNTRIES, GeoStrategy, build_query_templates
@@ -191,7 +191,8 @@ class Controller:
         routed.rationale = f"{routed.rationale}; deterministic precheck was {result.mode.value} at {result.confidence:.2f}"
         return routed
 
-    async def run(self, query: str, mode: str = "auto", target_country: str | None = None) -> RunResult:
+    async def run(self, query: str, mode: str = "auto", target_country: str | None = None,
+                  high_risk: bool = False) -> RunResult:
         classification = self._classify(query, forced_mode=mode)
         chosen = classification.mode
         route = self.router.route(chosen)
@@ -304,6 +305,20 @@ class Controller:
         )
         metrics.avg_runtime_seconds = round(tracker.elapsed_seconds(), 3)
         metrics.budget_exhausted = tracker.stop_reason is not None
+
+        # T-7.3 cost dashboard. The offline pipeline calls no model, so the meter
+        # is empty (zero $); the report still logs TinyFish calls + the routing
+        # plan (decision -> max under the high_risk_procurement tag).
+        cost_meter = CostMeter()
+        routing = [self.policy.route_task(step, high_risk=high_risk)
+                   for step in ("classification", "planning", "extraction", "judge", "decision")]
+        max_model = next((r.model for r in routing if r.tier == "max"), "")
+        metrics.cost = cost_meter.report(
+            self.policy.model_pricing(),
+            max_model=max_model,
+            tinyfish_calls=tracker.search_calls + tracker.fetch_urls,
+            routing=routing,
+        )
 
         result = RunResult(
             run_id=run_id,

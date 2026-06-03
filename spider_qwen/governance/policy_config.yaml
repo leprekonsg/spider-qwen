@@ -62,6 +62,17 @@ models:
   embeddings: "text-embedding-v4"   # skills / notes / FFF specs (Matryoshka 768d index, 2048d rerank)
   ocr: "qwen-vl-ocr-2025-11-20"     # datasheet / legacy-book OCR
 
+# T-7.3 cost router pricing. USD per 1K tokens, per model. Illustrative values;
+# override with your contracted rates. The router sends cheap/high-volume steps
+# (extraction/classification/judge) to flash and only planning/reasoning/
+# high-risk decisions to max; the dashboard reports $-saved-vs-all-max.
+pricing:
+  qwen3.7-max: { input: 0.0024, output: 0.0096 }
+  qwen3.5-flash: { input: 0.0003, output: 0.0006 }
+  qwen-flash: { input: 0.0002, output: 0.0004 }
+  text-embedding-v4: { input: 0.00007, output: 0.0 }
+  qwen-vl-ocr-2025-11-20: { input: 0.0010, output: 0.0010 }
+
 qwen:
   # Model names live in the models: block above. Legacy router_model /
   # json_extractor_model keys are still honoured if present (backward compat).

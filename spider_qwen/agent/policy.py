@@ -15,6 +15,7 @@ import yaml
 
 from .budget import Budget
 from ..modes.contracts import ProcurementMode
+from ..observability.metrics import RouteDecision
 
 _DEFAULT_PATH = Path(__file__).resolve().parent.parent / "governance" / "policy_config.yaml"
 
@@ -25,6 +26,31 @@ _MODEL_ENV = {
     "extraction_fallback": "SPIDER_QWEN_MODEL_EXTRACTION_FALLBACK",
     "embeddings": "SPIDER_QWEN_MODEL_EMBEDDINGS",
     "ocr": "SPIDER_QWEN_MODEL_OCR",
+}
+
+# T-7.3 cost router. Cheap, high-volume steps -> flash; planning/reasoning ->
+# max. The high_risk_procurement tag escalates any step to max.
+_TASK_TIER = {
+    "classification": "flash",
+    "extraction": "flash",
+    "extraction_fallback": "flash",
+    "judge": "flash",
+    "reflection": "flash",
+    "query_expansion": "flash",
+    "decision": "flash",
+    "planning": "max",
+    "reasoning": "max",
+}
+_TIER_ROLE = {"flash": "extraction", "max": "planner"}
+
+# Illustrative USD per 1K tokens; override per model via policy_config.yaml
+# `pricing:`. Flash is far cheaper than max, which is what makes the router pay.
+DEFAULT_MODEL_PRICING = {
+    "qwen3.7-max": {"input": 0.0024, "output": 0.0096},
+    "qwen3.5-flash": {"input": 0.0003, "output": 0.0006},
+    "qwen-flash": {"input": 0.0002, "output": 0.0004},
+    "text-embedding-v4": {"input": 0.00007, "output": 0.0},
+    "qwen-vl-ocr-2025-11-20": {"input": 0.0010, "output": 0.0010},
 }
 
 
@@ -57,6 +83,33 @@ class Policy:
             f"No Qwen model configured for role '{role}'. "
             f"Add 'models.{role}: <model>' to policy_config.yaml{hint}."
         )
+
+    # --- cost router (T-7.3) ----------------------------------------------
+    def route_task(self, task: str, *, high_risk: bool = False) -> RouteDecision:
+        """Pick the model tier for a logical step.
+
+        extraction/classification/judge -> flash; planning/reasoning -> max; an
+        unknown step defaults to flash. The high_risk_procurement tag escalates
+        any step to max.
+        """
+        base = _TASK_TIER.get(task, "flash")
+        tier = "max" if (high_risk or base == "max") else "flash"
+        role = _TIER_ROLE[tier]
+        try:
+            model = self.model_for(role)
+        except KeyError:
+            model = ""  # routing decision still stands when no model is configured
+        return RouteDecision(
+            task=task, tier=tier, role=role, model=model,
+            escalated=high_risk and base != "max",
+        )
+
+    def model_pricing(self) -> dict[str, dict[str, float]]:
+        """Per-model {input, output} USD/1K-token table; yaml overrides defaults."""
+        merged = {k: dict(v) for k, v in DEFAULT_MODEL_PRICING.items()}
+        for model, price in (self.data.get("pricing", {}) or {}).items():
+            merged[str(model)] = {**merged.get(str(model), {}), **{k: float(v) for k, v in (price or {}).items()}}
+        return merged
 
     @property
     def schema_version(self) -> str:
