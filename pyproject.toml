@@ -25,6 +25,9 @@ qwen = ["openai>=1.40"]
 # starlette>=1.0.1 is required: it fixes the BadHost Host-header auth bypass
 # (CVE-2026-48710) and supersedes the earlier multipart / FileResponse DoS fixes.
 server = ["fastapi>=0.115", "uvicorn>=0.29", "starlette>=1.0.1"]
+# T-7.1: expose spider-qwen as an MCP stdio server. Optional -- handlers are
+# dependency-free; only the FastMCP adapter (spider_qwen.mcp.server) needs this.
+mcp = ["mcp>=1.2"]
 dev = ["pytest>=8.0", "pygments>=2.7"]
 
 [project.scripts]
