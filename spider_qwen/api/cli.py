@@ -196,6 +196,37 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_skills(args: argparse.Namespace) -> int:
+    from ..skills.registry import SkillRegistry
+
+    reg = SkillRegistry.load()
+    if args.skills_command == "list":
+        print(json.dumps([s.model_dump(mode="json") for s in reg.all()], indent=2))
+        return 0
+    if args.skills_command == "match":
+        if not args.query:
+            print('usage: spider-qwen skills match "<query>"', file=sys.stderr)
+            return 2
+        matches = reg.match(args.query)
+        print(json.dumps(
+            [{"name": m.skill.name, "score": m.score, "description": m.skill.description} for m in matches],
+            indent=2,
+        ))
+        return 0
+    if args.skills_command == "show":
+        if not args.query:
+            print("usage: spider-qwen skills show <name>", file=sys.stderr)
+            return 2
+        skill = reg.get(args.query)
+        if skill is None:
+            print(f"No skill named '{args.query}' under .qwen/skills", file=sys.stderr)
+            return 1
+        print(json.dumps(skill.model_dump(mode="json"), indent=2))
+        return 0
+    print("usage: spider-qwen skills [list|match|show] [query]", file=sys.stderr)
+    return 2
+
+
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     from ..benchmarks.evaluate_service_mode import run_gold_set
 
@@ -248,6 +279,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("event_id", nargs="?")
     p_review.add_argument("--status", choices=["all", "pending", "approved", "rejected"], default="pending")
     p_review.set_defaults(func=_cmd_review)
+
+    p_skills = sub.add_parser("skills", help="List, match, or show project Qwen Agent Skills")
+    p_skills.add_argument("skills_command", choices=["list", "match", "show"])
+    p_skills.add_argument("query", nargs="?", help="Query for 'match' or skill name for 'show'")
+    p_skills.set_defaults(func=_cmd_skills)
 
     p_bench = sub.add_parser("benchmark", help="Run the gold-set benchmark")
     p_bench.add_argument("--gold-set", required=True)

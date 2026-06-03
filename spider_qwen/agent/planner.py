@@ -9,10 +9,22 @@ same interface without changing the controller.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from functools import lru_cache
+from typing import TYPE_CHECKING, Callable
 
 from ..modes.router import RoutePlan
 from ..serendipity.query_rewrite import SearchQuery, expand_query
+
+if TYPE_CHECKING:
+    from ..skills.models import AgentSkill
+    from ..skills.registry import SkillRegistry
+
+
+@lru_cache(maxsize=1)
+def _default_skill_registry() -> "SkillRegistry":
+    from ..skills.registry import SkillRegistry
+
+    return SkillRegistry.load()
 
 
 @dataclass(frozen=True)
@@ -43,3 +55,19 @@ class Planner:
     ) -> list[SearchQuery]:
         """Step-Back + HyDE + Query2Doc expansion for vague/obsolete queries (T-1.2)."""
         return expand_query(query, mode=mode, llm=llm)
+
+    def select_skills(
+        self,
+        query: str,
+        *,
+        top_k: int = 3,
+        registry: "SkillRegistry | None" = None,
+    ) -> list[AgentSkill]:
+        """Auto-select project Qwen Agent Skills relevant to the query (T-7.2).
+
+        Deterministic description match; the planner picks which skills' domain
+        instructions a Qwen-assisted step would consult. Returns [] when no
+        skill's description overlaps the query.
+        """
+        reg = registry if registry is not None else _default_skill_registry()
+        return [m.skill for m in reg.match(query, top_k=top_k)]
