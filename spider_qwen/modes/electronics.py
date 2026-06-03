@@ -6,6 +6,24 @@ high FFF similarity, and an active lifecycle -- otherwise it is at most
 ``needs_engineering_review``. A substitute with no evidence at all is ``rejected``
 and excluded. Deterministic; the substitutes themselves are populated upstream by
 the graph cross-references / Wayback / legacy-OCR miners.
+
+STATUS: schema-ready, NOT emitted by ``Controller.run()``. ``electronics_substitution``
+is currently routed through product-shaped discovery (router -> product ranker),
+and this builder is exercised standalone (tests) to lock the safety rule + schema.
+
+BLOCKING NOTE: structured emission requires FFF + lifecycle + datasheet signals
+that the not-yet-built miners produce (T-5.1 legacy-OCR cross-ref, T-5.2 Wayback,
+T-6.1 DMSMS SD-22 ladder). Wiring it before those land would emit candidates with
+empty semantics (fff=0, lifecycle=unknown, no datasheet evidence) that all fall to
+``needs_engineering_review``/``rejected`` -- low value and easy to mistake for a
+real substitute assessment.
+
+PHASE GATE (wire ``ElectronicsSubstitutionResult`` into ``run()`` only when ALL hold):
+  1. input MPN extracted;
+  2. substitute MPN evidence exists;
+  3. datasheet / FFF signal populated;
+  4. lifecycle status populated (or explicitly ``unknown``);
+  5. CoVe / verification filters unsafe substitutes (T-2.3 spine wired in).
 """
 
 from __future__ import annotations
