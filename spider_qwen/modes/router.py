@@ -52,6 +52,17 @@ _ROUTES: dict[ProcurementMode, RoutePlan] = {
         produces_rfq=False,
         required_evidence_fields=("vendor_name", "contact"),
     ),
+    # T-R.4: electronics substitution rides the product extraction/ranking path
+    # (reuses the product budget) but produces a substitute shortlist, not a price.
+    ProcurementMode.ELECTRONICS_SUBSTITUTION: RoutePlan(
+        mode=ProcurementMode.ELECTRONICS_SUBSTITUTION,
+        budget_key="product_exact_price",
+        extractors=("vendor_metadata", "pricing", "contact"),
+        ranker="product",
+        produces_rfq=False,
+        required_evidence_fields=("vendor_name", "product_url"),
+        serendipity_mode=True,  # substitute discovery is width-first
+    ),
     # Revalidation reuses the contact/quote extraction path against a known target.
     ProcurementMode.REVALIDATION: RoutePlan(
         mode=ProcurementMode.REVALIDATION,

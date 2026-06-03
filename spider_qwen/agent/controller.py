@@ -864,7 +864,7 @@ class Controller:
             return False
         if candidate.evidence_completeness < budget.evidence_completeness_threshold:
             return False
-        if mode == ProcurementMode.PRODUCT_EXACT_PRICE:
+        if mode in (ProcurementMode.PRODUCT_EXACT_PRICE, ProcurementMode.ELECTRONICS_SUBSTITUTION):
             return candidate.pricing_status in _PRICED_STATUSES
         if mode == ProcurementMode.SERVICE_QUOTE_REQUIRED:
             return candidate.quote_channel is not None and candidate.service_match_evidence

@@ -37,6 +37,24 @@ _CONTACT_INTENT = (
 )
 _REVALIDATION_INTENT = ("revalidate", "re-validate", "refresh", "verify again", "is it still", "still valid")
 
+# T-R.4: electronics substitute vertical. Only fires on strong signals (substitute
+# / obsolescence intent, or an MPN alongside a component term) so generic product
+# and service queries keep their existing classification.
+_ELECTRONICS_TERMS = (
+    "ic", "mosfet", "mcu", "microcontroller", "capacitor", "resistor", "transistor",
+    "connector", "op-amp", "opamp", "diode", "regulator", "datasheet", "semiconductor",
+    "integrated circuit", "fpga", "eeprom", "voltage regulator",
+)
+_SUBSTITUTE_INTENT = (
+    "substitute", "replacement", "cross reference", "cross-reference", "equivalent",
+    "alternative part", "drop-in", "drop in", "pin compatible", "pin-compatible", "fff",
+)
+_OBSOLESCENCE_INTENT = (
+    "obsolete", "eol", "end of life", "end-of-life", "nrnd", "nla", "ltb",
+    "last time buy", "last-time-buy", "superseded", "discontinued", "pcn",
+)
+_MPN_RE = re.compile(r"\b[a-z]{1,6}-?\d{2,}[a-z0-9\-]*\b", re.IGNORECASE)
+
 _QUANTITY_RE = re.compile(r"\b\d{2,}\b")
 
 
@@ -70,7 +88,20 @@ class ModeClassifier:
         reval_intent = _hits(text, _REVALIDATION_INTENT)
         has_quantity = bool(_QUANTITY_RE.search(text))
 
+        elec_terms = _hits(text, _ELECTRONICS_TERMS)
+        substitute_intent = _hits(text, _SUBSTITUTE_INTENT)
+        obsolescence_intent = _hits(text, _OBSOLESCENCE_INTENT)
+        has_mpn = bool(_MPN_RE.search(text))
+        # Require a genuine substitute/obsolescence signal (or an MPN with a
+        # component term) so plain product/service queries are never reclassified.
+        elec_signal = bool(substitute_intent or obsolescence_intent or (has_mpn and elec_terms))
+        electronics_score = (
+            2.0 * len(substitute_intent) + 1.5 * len(obsolescence_intent)
+            + 1.5 * len(elec_terms) + (1.5 if has_mpn else 0.0)
+        ) if elec_signal else 0.0
+
         scores: dict[ProcurementMode, float] = {
+            ProcurementMode.ELECTRONICS_SUBSTITUTION: electronics_score,
             ProcurementMode.REVALIDATION: 3.0 * len(reval_intent),
             ProcurementMode.CONTACT_ENRICHMENT_ONLY: (
                 2.0 * len(contact_intent)
@@ -106,6 +137,9 @@ class ModeClassifier:
                 "price_intent": price_intent,
                 "contact_intent": contact_intent,
                 "revalidation_intent": reval_intent,
+                "electronics_terms": elec_terms,
+                "substitute_intent": substitute_intent,
+                "obsolescence_intent": obsolescence_intent,
             },
             rationale=f"selected {mode.value} (score={top:.1f}, margin={margin:.1f})",
         )

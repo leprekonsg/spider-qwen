@@ -21,6 +21,9 @@ class ProcurementMode(str, Enum):
     SERVICE_QUOTE_REQUIRED = "service_quote_required"
     CONTACT_ENRICHMENT_ONLY = "contact_enrichment_only"
     REVALIDATION = "revalidation"
+    # T-R.4: electronics substitute/cross-reference vertical (S1). Additive; the
+    # deviation #11 mapping onto PRODUCT_EXACT_PRICE/REVALIDATION stays as fallback.
+    ELECTRONICS_SUBSTITUTION = "electronics_substitution"
 
 
 class PricingStatus(str, Enum):
@@ -79,6 +82,15 @@ SUCCESS_CONTRACTS: dict[ProcurementMode, dict[str, Any]] = {
     ProcurementMode.REVALIDATION: {
         "mode": "revalidation",
         "success_if": ["target_fact_refreshed_or_marked_stale"],
+    },
+    ProcurementMode.ELECTRONICS_SUBSTITUTION: {
+        "mode": "electronics_substitution",
+        "success_if": [
+            "at_least_one_substitute_candidate_with_evidence",
+            "each_substitute_has_fff_and_lifecycle_signal",
+            "no_drop_in_claim_without_datasheet_evidence",
+        ],
+        "v1_boundary": "candidate substitutes for engineering review; never a guaranteed drop-in",
     },
 }
 

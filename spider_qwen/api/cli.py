@@ -208,7 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("query")
     p_run.add_argument(
         "--mode", default="auto",
-        choices=["auto", "product_exact_price", "service_quote_required", "contact_enrichment_only", "revalidation"],
+        choices=["auto", "product_exact_price", "service_quote_required", "contact_enrichment_only",
+                 "revalidation", "electronics_substitution"],
     )
     p_run.add_argument("--country", default=None, help="Target country (e.g. Singapore)")
     p_run.add_argument("--offline", action="store_true", help="Use deterministic mock providers")
