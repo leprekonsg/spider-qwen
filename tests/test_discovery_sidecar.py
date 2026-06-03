@@ -75,6 +75,37 @@ def test_obsolete_substitute_is_gated_out_by_cove():
     assert s1.note  # the removal is noted, not silent
 
 
+def test_multi_hop_substitute_surfaced_via_ppr():
+    # LM4562 is reachable only as NE5532 -> NE5532A -> LM4562 (2 hops); a direct-
+    # neighbour-only S1 would drop it.
+    led = _Ledger([_item(
+        "https://datasheet.example/ne5532",
+        "NE5532 is superseded by NE5532A. NE5532A cross-references LM4562.",
+    )])
+    res = build_discovery("NE5532 substitute", led)
+    s1 = next(s for s in res.slots if s.slot == "S1")
+    by_mpn = {it.detail["mpn"]: it for it in s1.items}
+    assert "NE5532A" in by_mpn and by_mpn["NE5532A"].detail["depth"] == 1
+    assert "LM4562" in by_mpn and by_mpn["LM4562"].detail["depth"] == 2
+    assert by_mpn["LM4562"].evidence_refs
+    assert "->" in by_mpn["LM4562"].detail["path"]  # human-readable relation path
+
+
+def test_obsolete_original_in_one_sentence_does_not_taint_substitute():
+    # "Obsolete NE5532 is superseded by NE5532A" -- the EOL marker is about NE5532,
+    # the predecessor; the healthy successor NE5532A must NOT inherit it and be
+    # dropped by CoVe.
+    led = _Ledger([_item(
+        "https://datasheet.example/ne5532",
+        "Obsolete NE5532 is superseded by NE5532A.",
+    )])
+    res = build_discovery("NE5532 substitute", led)
+    s1 = next(s for s in res.slots if s.slot == "S1")
+    by_mpn = {it.detail["mpn"]: it for it in s1.items}
+    assert "NE5532A" in by_mpn
+    assert by_mpn["NE5532A"].detail["lifecycle"] != "eol"
+
+
 def test_s2_surfaces_long_tail_broker_source():
     led = _Ledger([
         _item("https://datasheet.example/ne5532", "NE5532 is superseded by NE5532A."),

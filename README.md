@@ -33,7 +33,7 @@ evidence-backed draft preparation.
 > **Serendipity slots.** Every run exposes a four-slot `serendipity` view
 > (`primary_answer` + `s1`/`s2`/`s3`), the default lightweight view built from rank
 > positions. Opt into `--serendipity` for a discovery **sidecar** that populates
-> S1/S2/S3 from the real components — graph-PPR substitutes (CoVe-verified),
+> S1/S2/S3 from the real components — multi-hop graph substitutes (PPR-ranked, CoVe-verified),
 > long-tail/archived sources, and lifecycle/PCN + DMSMS risk — each item carrying
 > `evidence_refs` + its `source_component`. The sidecar runs after the normal
 > pipeline on already-fetched evidence (no extra fetch budget) and leaves the

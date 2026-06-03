@@ -19,6 +19,7 @@ into the default pipeline is deferred to a v2 hardening pass.
 from __future__ import annotations
 
 import re
+from collections import deque
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -27,6 +28,7 @@ from .. import SCHEMA_VERSION
 from ..evidence.models import EvidenceRef
 from ..governance.source_reliability import classify_source, host_of
 from ..graph.extract import find_mpns, ingest_text
+from ..graph.retrieve import personalized_pagerank
 from ..graph.schema import part_key
 from ..graph.store import GraphStore
 from ..verification.cove import ChainOfVerification, SubstituteCandidate
@@ -37,10 +39,23 @@ from .signals import SUBSTITUTE_RELS, detect_lifecycle, proactive_watch
 # budget, but compute is still capped; clipping is noted, never silent).
 _MAX_SUBSTITUTES = 8
 _MAX_SOURCES = 8
+_MAX_HOPS = 2          # substitute chains stay bounded (graph acceptance is <=2 hops)
+_HOP_DECAY = 0.85      # per-hop confidence decay (matches T-3.3 GRAM-lite)
 # Tiers that count as "long tail / hidden" sources beyond the authoritative ones.
 _LONG_TAIL_TIERS = ("broker", "marketplace", "aggregator")
 _OBSOLETE_STATES = ("eol", "ltb", "nrnd")
 _SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
+# Substitute-relation phrases (mirror graph.extract._REL_PHRASES). When an MPN
+# appears immediately AFTER one of these it is the successor/replacement, so a
+# lifecycle marker in that sentence describes the predecessor, not this part.
+_SUCCESSOR_PHRASES = (
+    "cross-references", "cross references", "cross-reference for",
+    "is superseded by", "superseded by", "replaced by",
+    "pin-compatible with", "pin compatible with", "same die as", "renamed to",
+)
+_SUCCESSOR_RE = re.compile(
+    r"(?:" + "|".join(re.escape(p) for p in _SUCCESSOR_PHRASES) + r")\s*$", re.IGNORECASE
+)
 
 
 class DiscoverySlotItem(BaseModel):
@@ -89,45 +104,104 @@ def _build_graph(ledger) -> GraphStore:
 
 
 def _local_lifecycle(text: str, mpn: str) -> str:
-    """Lifecycle state in the sentence(s) that mention ``mpn`` (localized, so the
-    original part being EOL does not taint a healthy substitute)."""
-    low = mpn.lower()
+    """Lifecycle state asserted ABOUT ``mpn``, not merely the sentence it sits in.
+
+    Word-boundary matched (so a seed MPN that prefixes the substitute -- NE5532 in
+    NE5532A -- cannot taint it), and occurrences where ``mpn`` is the OBJECT of a
+    supersession/cross-reference phrase are skipped: a lifecycle marker there
+    ("Obsolete NE5532 is superseded by NE5532A") describes the predecessor being
+    replaced, not the healthy substitute."""
+    token = re.compile(r"\b" + re.escape(mpn) + r"\b", re.IGNORECASE)
     for sentence in _SENTENCE_SPLIT.split(text or ""):
-        if low in sentence.lower():
+        for m in token.finditer(sentence):
+            if _SUCCESSOR_RE.search(sentence[: m.start()]):
+                continue  # mpn is the replacement here; marker belongs to the predecessor
             state = detect_lifecycle(sentence)
             if state != "unknown":
                 return state
     return "unknown"
 
 
+def _substitute_adjacency(store: GraphStore) -> dict[str, list[tuple[str, float]]]:
+    """Adjacency over substitute relations only, weighted confidence x reliability,
+    so PPR ranks reachable substitutes by seed-proximity (not by unrelated
+    manufacturer/distributor edges)."""
+    adj: dict[str, list[tuple[str, float]]] = {}
+    for e in store.edges():
+        if e["rel"] in SUBSTITUTE_RELS:
+            adj.setdefault(e["src"], []).append(
+                (e["dst"], float(e["confidence"]) * float(e["reliability"])))
+    return adj
+
+
+def _walk_substitutes(store: GraphStore, seeds: list[str]) -> dict[str, dict[str, Any]]:
+    """Multi-hop BFS over substitute relations from each seed, so a chain
+    NE5532 -> NE5532A -> LM358 surfaces LM358, not just the direct neighbour.
+    Returns the best (shallowest, then highest-confidence) reachable substitute
+    per MPN, each with its asserting-edge evidence, relation, hop depth, per-hop
+    decayed confidence, and a human-readable path."""
+    seed_keys = {part_key(s) for s in seeds}
+    found: dict[str, dict[str, Any]] = {}
+    for seed in seeds:
+        queue: deque[tuple[str, int, str]] = deque([(part_key(seed), 0, seed.upper())])
+        seen = {part_key(seed)}
+        while queue:
+            node, depth, path = queue.popleft()
+            if depth >= _MAX_HOPS:
+                continue
+            for edge in store.neighbors(node, rels=SUBSTITUTE_RELS):
+                dst = edge["dst"]
+                sub_mpn = (dst.split(":", 1)[1] if ":" in dst else dst).upper()
+                hop_depth = depth + 1
+                conf = float(edge["confidence"]) * (_HOP_DECAY ** depth)
+                new_path = f"{path} -> {edge['rel']} -> {sub_mpn}"
+                prev = found.get(sub_mpn)
+                if dst not in seed_keys and (
+                    prev is None
+                    or hop_depth < prev["depth"]
+                    or (hop_depth == prev["depth"] and conf > prev["confidence"])
+                ):
+                    found[sub_mpn] = {
+                        "relation": edge["rel"], "confidence": conf,
+                        "evidence_claim_id": edge["evidence_claim_id"],
+                        "depth": hop_depth, "seed": seed, "path": new_path,
+                    }
+                if dst not in seen:
+                    seen.add(dst)
+                    queue.append((dst, hop_depth, new_path))
+    return found
+
+
 def _discover_substitutes(query: str, ledger, store: GraphStore, seeds: list[str], text: str, cove) -> DiscoverySlot:
+    found = _walk_substitutes(store, seeds)
+    # PPR over the substitute subgraph orders candidates by seed-proximity (T-3.2).
+    scores = (personalized_pagerank(_substitute_adjacency(store), [part_key(s) for s in seeds])
+              if seeds else {})
+    ordered = sorted(found.items(), key=lambda kv: scores.get(part_key(kv[0]), 0.0), reverse=True)
+
     drafts: list[SubstituteCandidate] = []
     meta: dict[str, dict[str, Any]] = {}
-    for seed in seeds:
-        for edge in store.neighbors(part_key(seed), rels=SUBSTITUTE_RELS):
-            dst = edge["dst"]
-            sub_mpn = (dst.split(":", 1)[1] if ":" in dst else dst).upper()
-            if sub_mpn in meta:
-                continue  # dedupe by substitute part across asserting pages
-            ref = _ref(ledger, edge["evidence_claim_id"])
-            refs = [ref] if ref else []
-            lifecycle = _local_lifecycle(text, sub_mpn)
-            drafts.append(SubstituteCandidate(
-                mpn=sub_mpn, lifecycle_status=lifecycle, confidence=float(edge["confidence"]),
-                rationale=f"{seed} {edge['rel']} {sub_mpn}", evidence_refs=refs,
-            ))
-            meta[sub_mpn] = {"relation": edge["rel"], "confidence": float(edge["confidence"]), "seed": seed}
+    for sub_mpn, info in ordered:
+        ref = _ref(ledger, info["evidence_claim_id"])
+        refs = [ref] if ref else []
+        drafts.append(SubstituteCandidate(
+            mpn=sub_mpn, lifecycle_status=_local_lifecycle(text, sub_mpn),
+            confidence=info["confidence"], rationale=info["path"], evidence_refs=refs,
+        ))
+        meta[sub_mpn] = info
 
     result = (cove or ChainOfVerification()).verify(drafts)
     items: list[DiscoverySlotItem] = []
     for cand in result.verified[:_MAX_SUBSTITUTES]:
         m = meta.get(cand.mpn, {})
         items.append(DiscoverySlotItem(
-            kind="substitute", summary=f"{cand.mpn} (via {m.get('relation', 'CROSS_REFERENCE')})",
+            kind="substitute",
+            summary=f"{cand.mpn} (via {m.get('relation', 'CROSS_REFERENCE')}, {m.get('depth', 1)}-hop)",
             source_component="graph_ppr", evidence_refs=cand.evidence_refs,
             detail={"mpn": cand.mpn, "relation": m.get("relation", ""),
-                    "confidence": m.get("confidence", 0.0), "lifecycle": cand.lifecycle_status,
-                    "seed": m.get("seed", "")},
+                    "confidence": round(float(m.get("confidence", 0.0)), 4),
+                    "lifecycle": cand.lifecycle_status, "seed": m.get("seed", ""),
+                    "depth": m.get("depth", 0), "path": m.get("path", "")},
         ))
     notes = []
     if result.removed:
