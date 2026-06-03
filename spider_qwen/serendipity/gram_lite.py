@@ -1,16 +1,20 @@
-"""T-3.3: GRAM-lite "Serendipity Mode" (width-first, depth-capped, budgeted).
+"""T-3.3: GRAM-lite "Serendipity Mode" (width-sampled, depth-capped, budgeted).
 
-Width-first: sample ``S=5`` diverse query trajectories (synonym / broader-class /
+At each node sample ``S=5`` diverse query trajectories (synonym / broader-class /
 broker-operator / SEA-local-language / mfr-alt-PN) -- reusing the T-1.2 expansion
-for diversity -- run them, and recurse to ``D_MAX=3`` with per-hop confidence
+for diversity -- and recurse depth-first to ``D_MAX=3`` with per-hop confidence
 ``x0.85``. A verification fan-out of ``K=3`` lenses (re-fetch / competing-vendor /
 Wayback) routes disagreements to the disputed handler (T-2.3). Every recursion
 edge is recorded as ``(parent_sha, child_sha, depth, query, ts)``.
 
 Deterministic and offline by default: ``fetch_fn`` / ``verify_fn`` / ``llm`` /
 ``disputed_handler`` are injectable seams. Hard caps (<=1 Max + <=25 flash + <=45
-fetch per top-level query) are enforced by construction -- the recursion stops
-before a cap is crossed, so ``within_caps`` is always true.
+fetch per top-level query) are enforced by construction. The fetch budget is
+split so discovery cannot starve verification: a reserve of
+``VERIFY_K * VERIFY_LEAVES`` fetches is held back for the fan-out, and traversal
+is depth-first so ``D_MAX`` is reached within the reduced discovery budget (a
+breadth-first sweep would spend the whole budget on breadth first). Leftover
+discovery budget rolls into verification. ``within_caps`` is always true.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ WIDTH_S = 5
 DEPTH_MAX = 3
 HOP_DECAY = 0.85
 VERIFY_K = 3
+VERIFY_LEAVES = 5  # leaves the K=3 fan-out reserves fetch budget for per top query
 VERIFY_LENSES = ("refetch", "competing_vendor", "wayback")
 
 CATEGORIES = ("synonym", "broader_class", "broker_operator", "sea_local_language", "mfr_alt_pn")
@@ -121,20 +126,27 @@ def run_serendipity(
     ts = ts or _now_iso()
     spent = {"max_calls": 1, "flash": 0, "fetch": 0}  # 1 top-level qwen-max planning call
 
+    # Hold back fetch budget for the K=3 verification fan-out so discovery cannot
+    # consume it all (else the normal path verifies nothing). Discovery is bounded
+    # by ``discovery_cap``; the reserve plus any unspent discovery budget funds
+    # verification, keeping the total within ``caps.fetch``.
+    verify_reserve = min(caps.fetch, VERIFY_K * VERIFY_LEAVES)
+    discovery_cap = max(0, caps.fetch - verify_reserve)
+
     edges: list[RecursionEdge] = []
     leaves: list[tuple[str, str, int]] = []
-    queue: list[tuple[str, str, int]] = [(_sha(query), query, 0)]
+    stack: list[tuple[str, str, int]] = [(_sha(query), query, 0)]
 
-    while queue:
-        parent_sha, parent_query, depth = queue.pop(0)
-        # Stop before crossing any cap: no flash unless at least one fetch can follow.
-        if depth >= d_max or spent["flash"] + 1 > caps.flash or spent["fetch"] + 1 > caps.fetch:
+    while stack:
+        parent_sha, parent_query, depth = stack.pop()  # depth-first: reach D_MAX cheaply
+        # Stop before crossing a cap: no flash unless a discovery fetch can follow.
+        if depth >= d_max or spent["flash"] + 1 > caps.flash or spent["fetch"] + 1 > discovery_cap:
             leaves.append((parent_sha, parent_query, depth))
             continue
         spent["flash"] += 1
         spawned = 0
         for traj in sample_trajectories(parent_query, mode, llm=llm)[:width]:
-            if spent["fetch"] + 1 > caps.fetch:
+            if spent["fetch"] + 1 > discovery_cap:
                 break
             spent["fetch"] += 1
             if fetch_fn is not None:
@@ -148,7 +160,7 @@ def run_serendipity(
                 query=traj.query, category=traj.category,
                 confidence=round(HOP_DECAY ** (depth + 1), 4), ts=ts,
             ))
-            queue.append((child_sha, traj.query, depth + 1))
+            stack.append((child_sha, traj.query, depth + 1))
             spawned += 1
         if spawned == 0:
             leaves.append((parent_sha, parent_query, depth))

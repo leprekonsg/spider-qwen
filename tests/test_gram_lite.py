@@ -75,6 +75,22 @@ def test_no_dispute_when_verifiers_agree():
     assert res.disputed == []
 
 
+def test_default_caps_still_perform_verification_fanout():
+    # Regression: discovery must reserve budget for the K=3 fan-out. The prior
+    # width-first BFS spent all 45 fetches on discovery, so the normal path did
+    # zero verification (edges=45, verifications=0) despite the "K=3 verify" claim.
+    captured = []
+    res = run_serendipity(
+        "NE5532 substitute", mode="product_exact_price",
+        verify_fn=lambda q, lens: {"refetch": "active", "competing_vendor": "NRND", "wayback": "active"}[lens],
+        disputed_handler=captured.append, ts="t0",
+    )
+    assert res.verifications, "default-cap run must perform verification fan-out"
+    assert res.cost["fetch"] <= 45 and res.within_caps is True
+    assert any(e.depth == 3 for e in res.edges)        # still reaches D_MAX
+    assert res.disputed and len(captured) == len(res.disputed)
+
+
 def test_router_substitute_and_revalidation_invoke_serendipity():
     r = ModeRouter()
     assert r.route(ProcurementMode.PRODUCT_EXACT_PRICE).serendipity_mode is True
