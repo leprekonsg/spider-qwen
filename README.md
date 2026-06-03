@@ -180,18 +180,41 @@ text and falls back cleanly on provider or schema errors.
 
 ## Benchmarks
 
-Current offline gold set: `80` deterministic cases, `20` per mode.
+Current offline gold set: `100` deterministic cases, `20` per mode (service,
+product, contact, revalidation, electronics-substitution). The
+electronics-substitution block adds 20 obsolete-part cases tagged by serendipity
+sense (S1 substitute / S2 long-tail source / S3 risk signal). Reproduce with:
+
+```bash
+spider-qwen benchmark --gold-set spider_qwen/benchmarks/gold_set.json
+```
 
 | Metric | Offline result |
 |---|---:|
-| Mode classification accuracy | `0.95` |
-| Quote-channel precision | `1.00` |
-| RFQ draft completeness | `1.00` |
-| Evidence coverage | `1.00` |
+| Mode classification accuracy | `0.96` |
+| Quote-channel precision (service) | `1.00` |
+| RFQ draft completeness (service) | `1.00` |
+| Evidence coverage (validated rows) | `1.00` |
+
+Per-mode classification accuracy:
+
+| Mode | Cases | Accuracy |
+|---|---:|---:|
+| service_quote_required | 20 | `1.00` |
+| product_exact_price | 20 | `1.00` |
+| contact_enrichment_only | 20 | `1.00` |
+| electronics_substitution | 20 | `1.00` |
+| revalidation | 20 | `0.80` |
 
 These are fixture-backed regression numbers, not live-web claims. A separate
-`spider_qwen/benchmarks/live_validation_set.json` contains a small rate-limited
-live validation set for reporting deployed-path behavior.
+`spider_qwen/benchmarks/live_validation_set.json` carries a small rate-limited
+live validation set for deployed-path reporting.
+
+**External agent benchmarks (BFCL V4, tau-bench, LOCOMO): deferred to v2.** They
+require their published datasets and live model/API access, which the offline,
+deterministic harness deliberately does not bundle. Numbers are intentionally
+omitted rather than estimated -- consistent with the project's "evidence or it
+didn't happen" rule. The adapters are tracked as a v2 roadmap item.
 
 ## RFQ drafts — and what spider-qwen never does
 

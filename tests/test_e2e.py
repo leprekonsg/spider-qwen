@@ -90,11 +90,12 @@ def test_cli_run_product_no_rfq(capsys, monkeypatch, tmp_path):
 
 def test_benchmark_service_harness():
     summary = run_gold_set(GOLD_SET, offline=True)
-    assert summary["cases"] == 80
+    assert summary["cases"] == 100
     assert summary["per_mode"]["service_quote_required"]["cases"] == 20
     assert summary["per_mode"]["product_exact_price"]["cases"] == 20
     assert summary["per_mode"]["contact_enrichment_only"]["cases"] == 20
     assert summary["per_mode"]["revalidation"]["cases"] == 20
+    assert summary["per_mode"]["electronics_substitution"]["cases"] == 20  # T-8.1 obsolete-part S1/S2/S3
     assert summary["mode_classification_accuracy"] >= 0.8
     assert summary["quote_channel_precision"] >= 0.9
     assert summary["rfq_draft_completeness"] >= 0.9
