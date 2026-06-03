@@ -4,6 +4,10 @@ Providers:
 - TinyFishFetchProvider          (primary, multi-URL clean content + links)
 - QwenWebExtractorFetchProvider  (single-page fallback; see qwen_web_extractor)
 - MockFetchProvider              (offline deterministic fixtures)
+
+T-5.2: an optional Wayback recoverer (``wayback=``) turns a dead/404 fetch into an
+archived snapshot recorded as a ``wayback_cdx`` evidence item. Opt-in; the default
+controller pipeline does not wire it (full discovery-layer integration is Phase 8).
 """
 
 from __future__ import annotations
@@ -60,10 +64,17 @@ class MockFetchProvider:
         self, urls: list[str], output_format: str = "markdown", include_links: bool = True
     ) -> FetchResultSet:
         results: list[FetchResult] = []
+        errors: list[dict] = []
         for url in urls:
             fx = self.fixtures.get(url)
             if fx is not None:
-                results.append(FetchResult(url=url, final_url=url, source_tool="mock", **fx))
+                status = fx.get("status")
+                if isinstance(status, int) and status >= 400:
+                    # Simulate a dead/blocked URL so the Wayback fallback (T-5.2) is exercised.
+                    errors.append({"url": url, "status": status, "error": f"HTTP {status}"})
+                    continue
+                results.append(FetchResult(url=url, final_url=url, source_tool="mock",
+                                           **{k: v for k, v in fx.items() if k != "status"}))
             else:
                 # Derive page topic from the URL path so the deterministic mock
                 # exercises service-match/extraction the way a real page would.
@@ -109,7 +120,7 @@ class MockFetchProvider:
                         source_tool="mock",
                     )
                 )
-        return FetchResultSet(results=results, errors=[], provider="mock")
+        return FetchResultSet(results=results, errors=errors, provider="mock")
 
 
 class FetchService:
@@ -124,6 +135,7 @@ class FetchService:
         *,
         judge: object | None = None,
         query: str | None = None,
+        wayback: object | None = None,
     ) -> None:
         self.provider = provider
         self.ledger = ledger
@@ -132,9 +144,12 @@ class FetchService:
         # T-2.1: optional page judge gate (accept/flag/reject) run before persist.
         self.judge = judge
         self.query = query or ""
+        # T-5.2: optional Wayback recoverer; recovers dead/404 fetches from the archive.
+        self.wayback = wayback
         self.judged = 0
         self.rejected = 0
         self.flagged = 0
+        self.recovered = 0
 
     async def fetch(
         self, urls: list[str], output_format: str = "markdown", include_links: bool = True
@@ -194,10 +209,55 @@ class FetchService:
             )
             kept.append(p)
         result_set.results = kept
+        if self.wayback is not None and result_set.errors:
+            await self._recover_dead_urls(result_set)
         if self.tracer is not None:
             self.tracer.record(step="fetch", tool=source_tool, status="success",
                                input_count=len(urls), output_count=len(result_set.results))
         return result_set
+
+    async def _recover_dead_urls(self, result_set: FetchResultSet) -> None:
+        """T-5.2: recover dead/404 fetch errors from the Wayback archive.
+
+        Each recovered snapshot is recorded as a `wayback_cdx` evidence item at a
+        reduced confidence (archived content is temporally uncertain) and appended
+        to the result set so downstream extraction can still use it.
+        """
+        for err in result_set.errors:
+            dead_url = err.get("url")
+            # Skip judge-rejected pages: an err carrying a "verdict" came from the
+            # page-judge gate (low-authority / off-topic), not a dead link. Recovering
+            # its archived copy would re-persist a page the gate excluded, bypassing
+            # the safety gate. Only genuine dead/transport errors are recovered.
+            if not dead_url or err.get("recovered_via") or err.get("verdict"):
+                continue
+            snap = await self.wayback.recover(dead_url)
+            if snap is None:
+                continue
+            ref = self.ledger.record(
+                source_tool="wayback_cdx",
+                url=snap.original_url,
+                final_url=snap.archive_url,
+                snippet=(snap.text or "")[:500],
+                text=snap.text,
+                confidence=0.5,
+                metadata={
+                    "recovered_from": dead_url,
+                    "archive_url": snap.archive_url,
+                    "wayback_timestamp": snap.timestamp,
+                    "provider": "wayback_cdx",
+                },
+            )
+            result_set.results.append(FetchResult(
+                url=snap.original_url, final_url=snap.archive_url, text=snap.text,
+                source_tool="wayback_cdx", evidence_ref=ref,
+            ))
+            err["recovered_via"] = "wayback_cdx"
+            self.recovered += 1
+            if self.tracer is not None:
+                self.tracer.record(step="wayback_recover", tool="wayback_cdx", status="success",
+                                   input_count=1, output_count=1,
+                                   detail={"recovered_from": dead_url, "archive_url": snap.archive_url})
 
 
 def build_fetch_provider(name: str | None = None, *, fixtures: dict | None = None) -> object:

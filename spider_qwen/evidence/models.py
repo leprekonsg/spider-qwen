@@ -21,6 +21,7 @@ SourceTool = Literal[
     "tinyfish_search",
     "tinyfish_fetch",
     "qwen_web_extractor",
+    "wayback_cdx",
     "mcp_search",
     "semantic_memory",
     "mock",
