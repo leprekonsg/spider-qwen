@@ -1,8 +1,10 @@
 """Semantic memory MVP: evidence-backed facts with a conflict policy.
 
-Only evidence-backed facts are stored. Conflict policy: prefer the most recent
-high-confidence evidence; if confidence ties or conflict is high, mark disputed.
-Disputed facts must never be used in RFQ drafts (enforced by callers).
+Only evidence-backed facts are stored. Conflict policy: agreeing evidence
+reinforces (confidence and spans merge); any cross-source contradiction on the
+same (entity, property) becomes a disputed record that retains every side, with
+the highest-confidence value as primary. Disputed facts must never be used in RFQ
+drafts (enforced by callers).
 """
 
 from __future__ import annotations
@@ -85,12 +87,10 @@ class SemanticMemory:
             if existing.status != "disputed":
                 existing.status = "active"
             existing.evidence_refs = self._merge_refs(existing.evidence_refs, fact.evidence_refs)
-        elif fact.confidence > existing.confidence + 0.1:
-            # Newer, clearly higher-confidence claim wins.
-            fact.fact_id = existing.fact_id
-            self._facts[existing.fact_id] = fact
         else:
-            # Genuine cross-source contradiction: dispute, retaining every side.
+            # Any cross-source contradiction is disputed, retaining every side; the
+            # highest-confidence side becomes primary. A more confident claim never
+            # silently overwrites and discards the weaker span (T-2.3).
             self._record_dispute(existing, fact)
         self._persist()
         return self._facts[existing.fact_id]

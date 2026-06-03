@@ -69,3 +69,18 @@ def test_case_variant_value_is_not_a_dispute(tmp_path):
     fact = mem.upsert(_fact("Active", 0.8, "ev_b"))  # same value, different case
     assert fact.status == "active"
     assert fact.disputed_alternatives == []
+
+
+def test_higher_confidence_contradiction_still_disputed_retaining_weaker_span(tmp_path):
+    # A clearly more confident contradicting claim must NOT silently overwrite and
+    # discard the weaker span; it becomes the primary value of a disputed record.
+    mem = SemanticMemory(tmp_path)
+    mem.upsert(_fact("active", 0.60, "ev_low"))         # weaker source: active
+    fact = mem.upsert(_fact("NRND", 0.90, "ev_high"))   # stronger source: NRND
+
+    assert fact.status == "disputed"
+    assert fact.value == "NRND"                         # highest-confidence side is primary
+    assert {fact.value} | {a.value for a in fact.disputed_alternatives} == {"active", "NRND"}
+    all_refs = {r.ledger_id for r in fact.evidence_refs}
+    all_refs |= {r.ledger_id for a in fact.disputed_alternatives for r in a.evidence_refs}
+    assert {"ev_low", "ev_high"} <= all_refs            # weaker span retained, not lost
