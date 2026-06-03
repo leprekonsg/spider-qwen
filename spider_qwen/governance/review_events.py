@@ -96,11 +96,26 @@ class ReviewStore:
         path = self._path()
         if path is None or not path.exists():
             return []
-        return [PendingHumanReview.model_validate(raw) for raw in json.loads(path.read_text(encoding="utf-8"))]
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            # A corrupt store (e.g. an interrupted or interleaved write) must not
+            # crash the run. Quarantine the bad file so the data is recoverable
+            # and the next write starts clean rather than appending to garbage.
+            path.replace(path.with_suffix(".corrupt"))
+            return []
+        return [PendingHumanReview.model_validate(item) for item in raw]
 
     def _write(self, events: list[PendingHumanReview]) -> None:
         path = self._path()
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps([e.model_dump() for e in events], indent=2), encoding="utf-8")
+        payload = json.dumps([e.model_dump() for e in events], indent=2)
+        # Write to a unique temp file then atomically replace, so a reader (or a
+        # concurrent writer) never observes a half-written file. os.replace is
+        # atomic on POSIX and Windows; the temp name is unique so concurrent
+        # writers do not clobber each other's temp (last replace wins).
+        tmp = path.with_name(f"{path.name}.{uuid4().hex[:8]}.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(path)

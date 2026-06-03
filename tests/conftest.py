@@ -22,6 +22,21 @@ def _is_loopback(host) -> bool:
     return isinstance(host, str) and host.lower() in _LOOPBACK
 
 
+@pytest.fixture(autouse=True)
+def _isolate_state_dir(monkeypatch, tmp_path):
+    """Redirect the default agent state dir at a per-test tmp dir.
+
+    Code paths that resolve state via ``$SPIDER_QWEN_STATE_DIR`` (the CLI, HTTP
+    server, MCP handlers) otherwise fall back to the repo-local ``.spider_qwen``.
+    Tests invoking ``main(["run", ...])`` would then share the SAME files; under
+    a parallel run those interleave into a corrupt JSON store that crashes
+    unrelated tests. Isolating per test makes that impossible. Tests that pass
+    ``state_dir`` explicitly are unaffected (the env var is not consulted), and a
+    test setting the var itself simply overrides this default.
+    """
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+
+
 @pytest.fixture
 def no_network(monkeypatch):
     """Block outbound network for the duration of a test.
