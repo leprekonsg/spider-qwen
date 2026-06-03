@@ -198,6 +198,30 @@ def test_cli_run_with_mock_qwen_json(capsys, tmp_path, monkeypatch):
     assert verify["checked_claims"] >= 1
 
 
+def test_cli_run_reason_uses_reasoning_spine(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    result = _run_cli(
+        capsys,
+        ["run", "office cleaning Singapore", "--mode", "service_quote_required", "--offline", "--reason"],
+    )
+    # --reason routes through run_reasoning, so the payload is a ReasoningResult
+    # (winner bundle + why-it-won explanation), not a RunResult.
+    assert result["mode"] == "service_quote_required"
+    assert result["winner"] is not None
+    assert "won" in result["explanation"].lower()
+    assert result["within_budget"] is True
+    assert result["winner"]["trajectory"]["strategy"]
+    assert result["winner"]["evidence_refs"], "winner bundle must carry ledger evidence"
+
+
+def test_cli_run_default_is_not_reasoning(capsys, tmp_path, monkeypatch):
+    # Without --reason the default run() pipeline is used (RunResult shape).
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    result = _run_cli(capsys, ["run", "office cleaning Singapore", "--offline"])
+    assert "winner" not in result
+    assert "rfq_drafts" in result
+
+
 def test_cli_evidence_rejects_path_traversal_id(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
     rc = main(["evidence", "show", "../../etc/passwd"])

@@ -3,10 +3,14 @@
   spider-qwen classify "office cleaning Singapore"
   spider-qwen run "office cleaning Singapore" --mode auto
   spider-qwen run "500 ergonomic chairs Singapore" --mode product_exact_price
+  spider-qwen run "NE5532 substitute" --reason     # multi-trajectory reasoning spine
   spider-qwen evidence show <run_id>
   spider-qwen benchmark --gold-set spider_qwen/benchmarks/gold_set.json
 
 Use --offline to run with deterministic mock providers (no API keys needed).
+Use --reason to explore several strategy trajectories with bounded recursive
+repair and pick the winner via the deterministic Process Reward Model (returns a
+ReasoningResult with a why-it-won explanation instead of the standard RunResult).
 """
 
 from __future__ import annotations
@@ -71,7 +75,11 @@ def _cmd_classify(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     controller = _build_controller(args)
-    result = asyncio.run(controller.run(args.query, mode=args.mode, target_country=args.country))
+    if getattr(args, "reason", False):
+        # Opt-in multi-trajectory reasoning spine; emits a ReasoningResult.
+        result = asyncio.run(controller.run_reasoning(args.query, mode=args.mode, target_country=args.country))
+    else:
+        result = asyncio.run(controller.run(args.query, mode=args.mode, target_country=args.country))
     print(json.dumps(result.model_dump(mode="json"), indent=2))
     return 0
 
@@ -213,6 +221,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("--country", default=None, help="Target country (e.g. Singapore)")
     p_run.add_argument("--offline", action="store_true", help="Use deterministic mock providers")
+    p_run.add_argument("--reason", action="store_true",
+                       help="Use the multi-trajectory reasoning spine (PPRM winner selection); emits a ReasoningResult")
     p_run.add_argument("--qwen-json", action="store_true", help="Enable mocked Qwen JSON extraction when used with --offline")
     p_run.add_argument("--require-review", action="store_true", default=None, help="Persist HITL review gates for this run")
     p_run.set_defaults(func=_cmd_run)
