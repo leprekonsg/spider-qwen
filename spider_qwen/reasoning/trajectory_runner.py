@@ -80,7 +80,12 @@ def _merge(base: TrajectoryBundle, repair: TrajectoryBundle) -> TrajectoryBundle
             base.evidence_refs.append(ref)
 
     base.candidate_count += repair.candidate_count
-    base.disputed_count = repair.disputed_count  # repair re-checks contradictions
+    # A repair round can only surface new disputes, never silently clear an
+    # unresolved one: its disputed_count reflects contradictions within the repair
+    # subset, not whether round 1's dispute was resolved (we model no resolution
+    # mechanism). max() keeps disputed_count and conflict_penalty consistent so a
+    # bundle can never report 0 disputes while still carrying a conflict penalty.
+    base.disputed_count = max(base.disputed_count, repair.disputed_count)
     base.conflict_penalty = max(base.conflict_penalty, repair.conflict_penalty)
     base.counterfeit_penalty = max(base.counterfeit_penalty, repair.counterfeit_penalty)
     base.rounds_used = repair.trajectory.round

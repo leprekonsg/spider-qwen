@@ -80,3 +80,33 @@ def test_strategy_queries_are_bounded_and_strategy_shaped():
     qs = strategy_queries(TrajectoryStrategy.FFF_SUBSTITUTE_FIRST, "NE5532", "electronics_substitution", max_queries=2)
     assert qs and len(qs) <= 2
     assert any(any(t in q.lower() for t in ("substitute", "cross", "equivalent", "replacement")) for q in qs)
+
+
+def test_repair_does_not_silently_clear_unresolved_disputes():
+    """A round-1 dispute must survive a repair round that merely found no
+    contradiction in its own (different) evidence subset. We model no
+    dispute-resolution mechanism, so disputes are sticky: the merged bundle keeps
+    disputed_count and conflict_penalty consistent (both monotonic via max), and
+    never reports disputed=False while still carrying a conflict penalty."""
+
+    def executor(traj: ReasoningTrajectory) -> TrajectoryBundle:
+        if traj.round == 1:
+            return TrajectoryBundle(
+                trajectory=traj, searches_used=2, fetches_used=4,
+                metrics=BundleMetrics(service_match=0.4, quote_channel=0.0, geo=0.4, checklist=0.4),
+                disputed_count=1, conflict_penalty=0.4,
+            )
+        # Repair recovers the quote channel but does NOT resolve round 1's dispute.
+        return TrajectoryBundle(
+            trajectory=traj, searches_used=1, fetches_used=2,
+            metrics=BundleMetrics(quote_channel=1.0), disputed_count=0, conflict_penalty=0.0,
+        )
+
+    res = asyncio.run(
+        TrajectoryRunner(budget=ReasoningBudget(max_trajectories=1, max_refinement_rounds=2))
+        .run("office cleaning", "service_quote_required", executor=executor)
+    )
+    assert res.winner.metrics.quote_channel == 1.0  # repair still merged its improvement
+    assert res.winner.disputed_count == 1           # dispute not silently cleared
+    assert res.winner.conflict_penalty == 0.4       # stays consistent with the dispute
+    assert res.disputed is True
