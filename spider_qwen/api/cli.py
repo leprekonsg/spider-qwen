@@ -82,6 +82,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         result = asyncio.run(controller.run(
             args.query, mode=args.mode, target_country=args.country,
             high_risk=getattr(args, "high_risk", False),
+            serendipity=getattr(args, "serendipity", False),
         ))
     print(json.dumps(result.model_dump(mode="json"), indent=2))
     return 0
@@ -259,6 +260,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Use the multi-trajectory reasoning spine (PPRM winner selection); emits a ReasoningResult")
     p_run.add_argument("--high-risk", action="store_true", default=False,
                        help="Tag the run high_risk_procurement: the cost router forces max for the decision step")
+    p_run.add_argument("--serendipity", action="store_true", default=False,
+                       help="Discovery sidecar: populate S1/S2/S3 from real components (graph/Wayback/signals/DMSMS); default run is unchanged")
     p_run.add_argument("--qwen-json", action="store_true", help="Enable mocked Qwen JSON extraction when used with --offline")
     p_run.add_argument("--require-review", action="store_true", default=None, help="Persist HITL review gates for this run")
     p_run.set_defaults(func=_cmd_run)

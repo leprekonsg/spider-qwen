@@ -192,7 +192,7 @@ class Controller:
         return routed
 
     async def run(self, query: str, mode: str = "auto", target_country: str | None = None,
-                  high_risk: bool = False) -> RunResult:
+                  high_risk: bool = False, serendipity: bool = False) -> RunResult:
         classification = self._classify(query, forced_mode=mode)
         chosen = classification.mode
         route = self.router.route(chosen)
@@ -290,7 +290,7 @@ class Controller:
         stop_reason = self._stop_reason(chosen, validated, candidates, tracker, budget)
 
         # T-1.1: reshape the ranked candidates into the four-slot serendipity view.
-        serendipity = build_serendipity_result(ranked, mode=chosen.value)
+        serendipity_result = build_serendipity_result(ranked, mode=chosen.value)
 
         rfq_drafts: list[dict] = []
         if route.produces_rfq:
@@ -320,6 +320,14 @@ class Controller:
             routing=routing,
         )
 
+        # T-8.2: opt-in discovery sidecar. Runs after the pipeline on the existing
+        # ledger (no new fetch/search budget), so it cannot starve verification.
+        discovery = None
+        if serendipity:
+            from ..serendipity.discovery import build_discovery
+
+            discovery = build_discovery(query, ledger, mode=chosen.value)
+
         result = RunResult(
             run_id=run_id,
             query=query,
@@ -329,7 +337,8 @@ class Controller:
                 mode=chosen.value, confidence=classification.confidence, rationale=classification.rationale
             ),
             validated_candidates=[c.model_dump(mode="json") for c in validated],
-            serendipity=serendipity.model_dump(mode="json"),
+            serendipity=serendipity_result.model_dump(mode="json"),
+            serendipity_discovery=discovery.model_dump(mode="json") if discovery else None,
             pricing_status_summary=self._pricing_summary(candidates),
             rfq_drafts=rfq_drafts,
             evidence_refs=[c_ref for c in validated for c_ref in c.evidence_refs],

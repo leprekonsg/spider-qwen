@@ -30,10 +30,14 @@ evidence-backed draft preparation.
 > → extract → rank → RFQ draft → persist evidence + memory`.
 > **No** portal submission, browser automation, or code interpreter.
 >
-> **Serendipity slots (T-1.1 scaffold):** runs expose `primary_answer`, `s1_substitutes`,
-> `s2_long_tail_sources`, and `s3_risk_signals` in JSON. Phase 1 fills `s1`/`s2` from rank
-> positions 2–4 and 5+ with deterministic scores — not yet true substitute or long-tail
-> classification (supplier graph, bandit, Wayback in later phases).
+> **Serendipity slots.** Every run exposes a four-slot `serendipity` view
+> (`primary_answer` + `s1`/`s2`/`s3`), the default lightweight view built from rank
+> positions. Opt into `--serendipity` for a discovery **sidecar** that populates
+> S1/S2/S3 from the real components — graph-PPR substitutes (CoVe-verified),
+> long-tail/archived sources, and lifecycle/PCN + DMSMS risk — each item carrying
+> `evidence_refs` + its `source_component`. The sidecar runs after the normal
+> pipeline on already-fetched evidence (no extra fetch budget) and leaves the
+> default output unchanged; full default-pipeline integration is a v2 item.
 
 ## Brand concept
 
@@ -58,15 +62,27 @@ stores `claim_id`, `parent_ledger_id`, `start_char`, `end_char`, and `span_hash`
 when the fact maps to fetched page text, and `spider-qwen evidence verify`
 rechecks those spans. A ranked candidate with no evidence is dropped, not scored.
 
-## Hackathon track strategy
+## Why Qwen 3.7
 
-Default submission strategy is **one project, strongest eligible track**. The
-current rule read is that each Devpost submission identifies one track, while
-multiple submissions must be unique and substantially different. Spider-Qwen is
-therefore packaged as a Track 4 procurement autopilot unless organizer guidance
-explicitly permits one project to be judged across multiple tracks. The
-MemoryAgent loop is still implemented and documented as a supporting
-differentiator.
+Qwen 3.7-Max is the planner/controller in spirit: deep-thinking reasoning over a
+1M-token context for multi-hop substitute discovery and trajectory selection,
+while the cheap, high-volume work — extraction, classification, page judging,
+query expansion — routes to Qwen 3.5-Flash through the cost router (which reports
+`$-saved-vs-all-max`). The hot path stays deterministic (regex/heuristic
+extractors, no LLM) for reproducibility; Qwen adds JSON-constrained extraction,
+low-confidence tool-call routing, project skill prompts, and an MCP surface. Model
+IDs are policy-configured (the `models:` block), never hard-coded, so a dated
+snapshot can be pinned for demo reproducibility.
+
+## Project status
+
+Spider-Qwen is an open-source (MIT) reference implementation of an evidence-first
+procurement research agent. The core pipeline and the supporting layers
+(reasoning spine, discovery sidecar, memory loop, cost router, MCP server, Qwen
+Agent Skills) are implemented and covered by the offline test suite; everything
+runs deterministically with `--offline`, so the project is usable and verifiable
+without API keys. Contributions are welcome — open an issue or PR. Items still on
+the roadmap are listed under [Known limits / v2 roadmap](#known-limits--v2-roadmap).
 
 ## Install
 
@@ -95,7 +111,19 @@ spider-qwen evidence verify <run_id>
 spider-qwen evidence graph <run_id>
 spider-qwen memory show
 spider-qwen review list
+spider-qwen skills list                       # project Qwen Agent Skills
 spider-qwen benchmark --gold-set spider_qwen/benchmarks/gold_set.json
+```
+
+Opt-in modes (default `run` output is unchanged):
+
+```bash
+# Discovery sidecar: populate S1/S2/S3 from real components (graph/Wayback/signals/DMSMS)
+spider-qwen run "NE5532 obsolete substitute replacement" --offline --serendipity
+# Multi-trajectory reasoning spine (PPRM winner selection -> ReasoningResult)
+spider-qwen run "NE5532 substitute" --offline --reason
+# Cost router: high-risk forces the decision step to the max-tier model
+spider-qwen run "obsolete connector substitute" --offline --high-risk
 ```
 
 Example output (trimmed):
@@ -143,7 +171,15 @@ flowchart TD
   R --> RFQ["RFQ draft / supplier result"]
   RFQ --> H["Pending human review"]
   RFQ --> A["Audit log"]
+  B -. "opt-in --reason" .-> RS["Reasoning spine: trajectories + PPRM winner"]
+  RFQ -. "opt-in --serendipity" .-> SD["Discovery sidecar: S1 graph substitutes / S2 long-tail+Wayback / S3 lifecycle+DMSMS"]
+  L --> SD
+  B --> CR["Cost router + $ dashboard"]
 ```
+
+Opt-in layers (dotted) leave the default pipeline unchanged: `--reason` runs the
+multi-trajectory reasoning spine, `--serendipity` runs the discovery sidecar over
+the run's ledger, and the cost router records `$/run` + `$-saved-vs-all-max`.
 
 ## Procurement modes
 
@@ -153,6 +189,7 @@ flowchart TD
 | `service_quote_required` | services where price is quote-only | vendor shortlist + quote channel + **RFQ draft** |
 | `contact_enrichment_only` | you have vendors, need contacts | evidence-backed contacts + validation signals |
 | `revalidation` | refresh a stale memory fact | refreshed/`stale`/`disputed` fact (manual in v1) |
+| `electronics_substitution` | obsolete / EOL part needs a replacement | substitute candidates + FFF/lifecycle gate; S1/S2/S3 via `--serendipity` discovery |
 
 ### Pricing ontology
 
@@ -299,12 +336,22 @@ The included `Dockerfile` serves the same offline-safe API path.
 - `docs/ranking.md`
 - `docs/benchmarking.md`
 
-## Known limits
+## Known limits / v2 roadmap
 
-- Live providers can underperform on bot-walled sites; judging demo should use `--offline`.
+Known limits:
+
+- Live providers can underperform on bot-walled sites; demos should use `--offline`.
 - Claim spans exist when the claim is present in fetched text; link-only evidence remains ledger-backed without text offsets.
 - Qwen model IDs should be re-verified before live demos.
 - Browser automation, form submission, code interpreter, and non-Qwen LLMs are intentionally out of scope.
+- No demo video is bundled in this repository; the hero-query commands above reproduce the end-to-end run offline.
+
+v2 roadmap:
+
+- Wire the discovery sidecar (S1/S2/S3) into the default pipeline after demo + benchmark hardening (today it is opt-in via `--serendipity`).
+- The MCP **client** half (consume Google Drive / filesystem MCP) and the DashScope Responses-API `tools=[{type:mcp}]` wiring (the server half ships today).
+- External agent benchmarks (BFCL V4, tau-bench, LOCOMO) once their datasets + live access are wired.
+- Live per-call token metering into the cost dashboard, and the EOL forecaster sidecar (T-6.2).
 
 ## License
 

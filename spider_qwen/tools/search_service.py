@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from .fetch_service import _looks_like_obsolete_part_topic
 from .provider_types import SearchResult, SearchResultSet
 from .tinyfish_client import TinyFishClient, from_env as tinyfish_from_env
 
@@ -104,14 +105,30 @@ class MockSearchProvider:
         raw = self.fixtures.get(query)
         if raw is None:
             slug = "".join(c if c.isalnum() else "-" for c in query.lower()).strip("-")[:40]
-            raw = [
-                {
-                    "url": f"https://example-vendor-{i}.sg/{slug}",
-                    "title": f"Vendor {i} - {query}",
-                    "snippet": f"Provider {i} for {query}. Request a quotation via our contact page.",
-                }
-                for i in range(1, min(limit, 5) + 1)
-            ]
+            if _looks_like_obsolete_part_topic(query):
+                # T-8.2: seed an obsolete-part run with a datasheet page (cross-refs +
+                # lifecycle) and a broker page, so the --serendipity sidecar has real
+                # S1 (graph) and S2 (long-tail/broker) material offline.
+                raw = [
+                    {"url": f"https://datasheet-archive.example/{slug}",
+                     "title": f"Datasheet & cross-reference - {query}",
+                     "snippet": f"Obsolete-part cross-reference and lifecycle data for {query}."},
+                    {"url": f"https://rochester-electronics.example/{slug}",
+                     "title": f"Broker stock - {query}",
+                     "snippet": f"Long-tail / last-time-buy broker stock for {query}."},
+                    {"url": f"https://example-vendor-1.sg/{slug}",
+                     "title": f"Vendor 1 - {query}",
+                     "snippet": f"Provider 1 for {query}. Request a quotation via our contact page."},
+                ]
+            else:
+                raw = [
+                    {
+                        "url": f"https://example-vendor-{i}.sg/{slug}",
+                        "title": f"Vendor {i} - {query}",
+                        "snippet": f"Provider {i} for {query}. Request a quotation via our contact page.",
+                    }
+                    for i in range(1, min(limit, 5) + 1)
+                ]
         results = [
             SearchResult(
                 url=item["url"],

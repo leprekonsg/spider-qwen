@@ -13,6 +13,7 @@ controller pipeline does not wire it (full discovery-layer integration is Phase 
 from __future__ import annotations
 
 import os
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -98,6 +99,20 @@ class MockFetchProvider:
                     text = (
                         f"We supply {topic} in Singapore. Download our rate card for public pricing. "
                         f"Email {email} for volume terms."
+                    )
+                elif _looks_like_obsolete_part_topic(topic):
+                    # T-8.2: obsolete-part page with cross-reference + lifecycle prose
+                    # so the --serendipity discovery sidecar has real graph/signal
+                    # material offline. Phrasing matches the graph relation extractor.
+                    base = _first_mock_mpn(topic)
+                    text = (
+                        f"{base} is an obsolete component and is end-of-life (EOL). "
+                        f"PCN-2024-001 has been issued for {base}. "
+                        f"{base} is superseded by {base}A. "
+                        f"{base} cross-references {base}B. "
+                        f"{base} cross-references {base}C. "
+                        f"{base} is pin-compatible with {base}D. "
+                        f"For long-tail or last-time-buy stock, contact a broker or email {email}."
                     )
                 elif _looks_like_product_topic(topic):
                     text = (
@@ -270,6 +285,27 @@ def build_fetch_provider(name: str | None = None, *, fixtures: dict | None = Non
 
         return QwenWebExtractorFetchProvider()
     return TinyFishFetchProvider()
+
+
+_MOCK_MPN_RE = re.compile(r"\b[a-z]+\d[a-z0-9]*\b", re.I)
+_OBSOLETE_KEYWORDS = (
+    "obsolete", "substitute", "replacement", "eol", "discontinued",
+    "cross reference", "cross-reference", "alternate", "nrnd",
+)
+
+
+def _first_mock_mpn(topic: str) -> str:
+    """First MPN-shaped token (letters then a digit) in a mock topic, uppercased."""
+    for m in _MOCK_MPN_RE.finditer(topic or ""):
+        tok = m.group(0)
+        if len(tok) >= 4 and any(c.isalpha() for c in tok) and any(c.isdigit() for c in tok):
+            return tok.upper()
+    return ""
+
+
+def _looks_like_obsolete_part_topic(topic: str) -> bool:
+    low = (topic or "").lower()
+    return bool(_first_mock_mpn(low)) and any(k in low for k in _OBSOLETE_KEYWORDS)
 
 
 def _looks_like_product_topic(topic: str) -> bool:
