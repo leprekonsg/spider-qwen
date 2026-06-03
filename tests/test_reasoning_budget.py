@@ -47,3 +47,29 @@ def test_strategy_sets_are_distinct_per_vertical():
     assert strategies_for("product_exact_price") == electronics
     assert TrajectoryStrategy.QUOTE_CHANNEL_FIRST in service
     assert TrajectoryStrategy.FFF_SUBSTITUTE_FIRST in electronics
+
+
+def test_ceilings_include_refinement_rounds():
+    budget = ReasoningBudget()  # 3 traj x 2 search x 6 fetch x 2 rounds
+    assert budget.search_ceiling == 12
+    assert budget.fetch_ceiling == 36
+
+
+def test_runner_never_exceeds_ceilings_even_with_a_greedy_executor():
+    import asyncio
+
+    from spider_qwen.reasoning.trajectory import TrajectoryBundle, BundleMetrics
+    from spider_qwen.reasoning.trajectory_runner import TrajectoryRunner
+
+    budget = ReasoningBudget()
+
+    def greedy(traj):
+        # Claims to use far more than allowed; the runner must clamp per round.
+        return TrajectoryBundle(trajectory=traj, metrics=BundleMetrics(service_match=1.0),
+                                searches_used=99, fetches_used=99)
+
+    res = asyncio.run(TrajectoryRunner(budget=budget).run("q", "service_quote_required", executor=greedy))
+    assert res.total_searches <= budget.search_ceiling
+    assert res.total_fetches <= budget.fetch_ceiling
+    assert len(res.bundles) <= budget.max_trajectories
+    assert res.within_budget is True

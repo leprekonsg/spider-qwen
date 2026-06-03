@@ -70,11 +70,23 @@ class ReasoningBudget:
 
     @property
     def total_search_cap(self) -> int:
+        """Discovery searches per refinement round (width x per-trajectory)."""
         return self.max_trajectories * self.max_search_calls_per_trajectory
 
     @property
     def total_fetch_cap(self) -> int:
+        """Discovery fetches per refinement round (width x per-trajectory)."""
         return self.max_trajectories * self.max_fetch_urls_per_trajectory
+
+    @property
+    def search_ceiling(self) -> int:
+        """Absolute search ceiling across all trajectories and rounds."""
+        return self.total_search_cap * self.max_refinement_rounds
+
+    @property
+    def fetch_ceiling(self) -> int:
+        """Absolute fetch ceiling across all trajectories and rounds."""
+        return self.total_fetch_cap * self.max_refinement_rounds
 
 
 class ReasoningTrajectory(BaseModel):

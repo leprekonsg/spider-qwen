@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .budget import BudgetExceeded, BudgetTracker, StopReason
+from .budget import Budget, BudgetExceeded, BudgetTracker, StopReason
 from .compiler import LLMCompiler, NullRateLimiter, RateLimiter, ToolNode
 from .execution_context import ExecutionContext, new_run_id
 from .planner import Planner
@@ -335,6 +335,99 @@ class Controller:
 
         self._persist_run(ctx, audit, result, validated, review_store)
         return result
+
+    async def run_reasoning(self, query: str, mode: str = "auto", target_country: str | None = None):
+        """T-R.2: GRAM-lite multi-trajectory run with PPRM winner selection.
+
+        Opt-in alternative to ``run``: explores several strategy trajectories within
+        the frozen reasoning budget, repairs evidence gaps in a bounded round 2,
+        scores each bundle with the deterministic Process Reward Model, and returns
+        the winning bundle plus a why-it-won / why-alternates-lost explanation. Every
+        bundle ties its strategy/round to concrete ledger evidence ids (provenance).
+        Deterministic and network-free under offline mock providers.
+        """
+        from ..reasoning.trajectory import ReasoningBudget, ReasoningTrajectory, TrajectoryBundle
+        from ..reasoning.trajectory_runner import TrajectoryRunner
+
+        classification = self._classify(query, forced_mode=mode)
+        chosen = classification.mode
+        route = self.router.route(chosen)
+        run_id = new_run_id()
+        ledger = EvidenceLedger(run_id, self.state_dir, reliability_priors=self.policy.source_reliability())
+        tracer = Tracer(run_id, chosen.value, self.state_dir)
+        if target_country is None:
+            target_country = self._detect_target_country(query)
+        rbudget = ReasoningBudget()
+        ranker = self._rankers[route.ranker]
+
+        async def executor(traj: ReasoningTrajectory) -> TrajectoryBundle:
+            per_budget = Budget(
+                mode=chosen.value,
+                max_search_calls=rbudget.max_search_calls_per_trajectory,
+                max_fetch_urls=rbudget.max_fetch_urls_per_trajectory,
+                max_candidates_to_extract=rbudget.max_fetch_urls_per_trajectory,
+                min_validated_candidates=1,
+            )
+            tracker = BudgetTracker(per_budget)
+            working = WorkingMemory(run_id=run_id, query=query, mode=chosen.value)
+            ctx = ExecutionContext(run_id=run_id, query=query, mode=chosen, ledger=ledger,
+                                   tracker=tracker, working=working, tracer=tracer)
+            search = SearchService(self.search_provider, ledger, tracker, tracer)
+            fetch = FetchService(self.fetch_provider, ledger, tracker, tracer,
+                                 judge=self.page_judge, query=query)
+            cands = await self._gather_queries(
+                ctx, route, traj.queries, search, fetch, location=None, target_country=target_country,
+            )
+            ranked = ranker.rank(cands)
+            metrics, refs, disputed, conflict = self._bundle_metrics(chosen.value, ranked or cands)
+            tracer.record(
+                step="reasoning_trajectory", tool="search", status="success",
+                detail={"trajectory_id": traj.trajectory_id, "strategy": traj.strategy.value,
+                        "round": traj.round, "queries": traj.queries,
+                        "evidence_refs": [r.ledger_id for r in refs], "parent_run_id": run_id},
+            )
+            return TrajectoryBundle(
+                trajectory=traj, metrics=metrics, evidence_refs=refs, candidate_count=len(cands),
+                disputed_count=disputed, searches_used=tracker.search_calls,
+                fetches_used=tracker.fetch_urls, conflict_penalty=conflict,
+            )
+
+        return await TrajectoryRunner(budget=rbudget).run(query, chosen.value, executor=executor)
+
+    def _bundle_metrics(self, mode: str, candidates: list):
+        """Map ranked candidates -> normalized PPRM BundleMetrics + evidence refs."""
+        from ..reasoning.trajectory import BundleMetrics
+
+        refs: list[EvidenceRef] = []
+        seen: set[str] = set()
+        for cand in candidates:
+            for ref in cand.evidence_refs:
+                if ref.ledger_id not in seen:
+                    seen.add(ref.ledger_id)
+                    refs.append(ref)
+        hosts = {urlparse(r.url).netloc for r in refs if r.url}
+        diversity = round(min(1.0, len(hosts) / 3.0), 4) if refs else 0.0
+        metrics = BundleMetrics(evidence_diversity=diversity)
+        disputed, conflict = 0, 0.0
+
+        if mode in {"service_quote_required", "contact_enrichment_only"}:
+            svc = [c for c in candidates if isinstance(c, ServiceCandidate)]
+            if svc:
+                metrics.service_match = round(min(1.0, max(c.service_match_score for c in svc)), 4)
+                metrics.quote_channel = 1.0 if any(c.quote_channel for c in svc) else 0.0
+                metrics.geo = round(min(1.0, max(c.geo_score for c in svc)), 4)
+                metrics.checklist = round(min(1.0, max(c.checklist_completeness for c in svc)), 4)
+                metrics.contact_reliability = round(min(1.0, max(c.evidence_completeness for c in svc)), 4)
+                conflict = round(max((c.conflict_penalty for c in svc), default=0.0), 4)
+                disputed = sum(1 for c in svc if c.conflict_penalty > 0)
+        else:
+            prod = [c for c in candidates if isinstance(c, ProductCandidate)]
+            if prod:
+                metrics.fff_similarity = round(min(1.0, max((c.score for c in prod), default=0.0)), 4)
+                metrics.authorized_source = round(min(1.0, max(c.geo_score for c in prod)), 4)
+                metrics.stock = 1.0 if any(c.pricing_status != PricingStatus.NOT_FOUND for c in prod) else 0.0
+                metrics.datasheet_evidence = diversity
+        return metrics, refs, disputed, conflict
 
     # --- pipeline phases --------------------------------------------------
     async def _gather(
