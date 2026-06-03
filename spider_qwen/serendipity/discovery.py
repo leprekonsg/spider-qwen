@@ -290,6 +290,26 @@ def _discover_risk(ledger, store: GraphStore, seeds: list[str], text: str) -> Di
     return DiscoverySlot(slot="S3", kind="risk_watch_or_dmsms", supported=bool(items), note=note, items=items)
 
 
+def _enforce_evidence(slot: DiscoverySlot) -> DiscoverySlot:
+    """Hard rule 'evidence or it didn't happen': never promote a slot item that
+    carries no evidence_ref.
+
+    A single slot-agnostic gate (DRY). In practice S1 (CoVe already drops
+    no-evidence substitutes) and S2 (skips ref-less items) have nothing to withhold;
+    the load-bearing case is S3's evidence-or-fallback path. Applied uniformly as
+    cheap defense-in-depth -- when nothing is withheld the slot is returned
+    unchanged (no copy). Withheld items drop out, ``supported`` is recomputed, and
+    the withholding is noted -- never silent.
+    """
+    evidenced = [it for it in slot.items if it.evidence_refs]
+    withheld = len(slot.items) - len(evidenced)
+    if not withheld:
+        return slot
+    clause = f"{withheld} unsourced item(s) withheld (no evidence_ref)."
+    note = f"{slot.note} {clause}".strip()
+    return slot.model_copy(update={"items": evidenced, "supported": bool(evidenced), "note": note})
+
+
 def build_discovery(query: str, ledger, *, mode: str = "", cove: ChainOfVerification | None = None) -> DiscoveryResult:
     """Build the S1/S2/S3 discovery sidecar over a run's evidence ledger.
 
@@ -300,9 +320,9 @@ def build_discovery(query: str, ledger, *, mode: str = "", cove: ChainOfVerifica
     try:
         text = "\n".join(it.text for it in ledger.items() if it.text)
         seeds = find_mpns(query) or find_mpns(text)
-        s1 = _discover_substitutes(query, ledger, store, seeds, text, cove)
-        s2 = _discover_sources(ledger)
-        s3 = _discover_risk(ledger, store, seeds, text)
+        s1 = _enforce_evidence(_discover_substitutes(query, ledger, store, seeds, text, cove))
+        s2 = _enforce_evidence(_discover_sources(ledger))
+        s3 = _enforce_evidence(_discover_risk(ledger, store, seeds, text))
     finally:
         store.close()  # exception-safe: never leak the SQLite connection
 

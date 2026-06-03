@@ -89,6 +89,19 @@ class QwenMcpSearchProvider:
         return await self.backend(query, location, language, limit)
 
 
+def _mock_slug(query: str) -> str:
+    """URL slug for a synthesized mock page: the full slugified query, NOT truncated.
+
+    The fetch-side mock re-derives the page topic from this URL path, so dropping
+    characters here (an MPN, or an obsolescence/product keyword past some cutoff)
+    would silently flip the obsolete-part / product topic detection and empty the
+    S1/S3 discovery slots for any query whose key tokens fall past the cutoff.
+    Keeping the whole query is the simplest way to keep the search-side and
+    fetch-side topic classification consistent.
+    """
+    return "".join(c if c.isalnum() else "-" for c in query.lower()).strip("-")
+
+
 class MockSearchProvider:
     """Deterministic offline provider. Returns fixtures by query, else synthesizes."""
 
@@ -104,7 +117,7 @@ class MockSearchProvider:
     ) -> SearchResultSet:
         raw = self.fixtures.get(query)
         if raw is None:
-            slug = "".join(c if c.isalnum() else "-" for c in query.lower()).strip("-")[:40]
+            slug = _mock_slug(query)
             if _looks_like_obsolete_part_topic(query):
                 # T-8.2: seed an obsolete-part run with a datasheet page (cross-refs +
                 # lifecycle) and a broker page, so the --serendipity sidecar has real

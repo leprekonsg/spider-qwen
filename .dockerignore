@@ -26,6 +26,7 @@ venv/
 env/
 ENV/
 .pytest_cache/
+tmppytest-cache/
 .mypy_cache/
 .ruff_cache/
 test-results/
@@ -39,7 +40,6 @@ tests/
 CLAUDE.md
 AGENTS.md
 .claude/
-.qwen/
 .playwright-mcp/
 .cursor/
 .aider*

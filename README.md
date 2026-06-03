@@ -119,7 +119,7 @@ Opt-in modes (default `run` output is unchanged):
 
 ```bash
 # Discovery sidecar: populate S1/S2/S3 from real components (graph/Wayback/signals/DMSMS)
-spider-qwen run "NE5532 obsolete substitute replacement" --offline --serendipity
+spider-qwen run "find a replacement for an obsolete Hirose DF13-6P-1.25DSA, deliver to Singapore in 14 days" --offline --serendipity
 # Multi-trajectory reasoning spine (PPRM winner selection -> ReasoningResult)
 spider-qwen run "NE5532 substitute" --offline --reason
 # Cost router: high-risk forces the decision step to the max-tier model

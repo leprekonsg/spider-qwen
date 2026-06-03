@@ -38,6 +38,7 @@ from ..governance.review_events import ReviewStore
 from ..memory.episodic import EpisodicMemory, EpisodicRecord
 from ..memory.mcp import SemanticMemoryMcpAdapter
 from ..memory.promotion import should_promote_contact
+from ..memory.recall import rfq_eligible
 from ..memory.semantic import MemoryRecall, SemanticFact, SemanticMemory
 from ..memory.working import WorkingMemory
 from ..modes.classifier import ModeClassifier
@@ -451,6 +452,14 @@ class Controller:
                 metrics.authorized_source = round(min(1.0, max(c.geo_score for c in prod)), 4)
                 metrics.stock = 1.0 if any(c.pricing_status != PricingStatus.NOT_FOUND for c in prod) else 0.0
                 metrics.datasheet_evidence = diversity
+                # Known limit (disclosed): the remaining two electronics PPRM dims --
+                # lifecycle_safety (0.20) and risk (0.10) -- need PER-SUBSTITUTE
+                # lifecycle/FFF/counterfeit signals from the T-5.x miners, which are a
+                # v2 deferral. A blunt detect_lifecycle over the mixed evidence here
+                # would return the OBSOLETE original's state and wrongly penalise the
+                # very substitute-finding trajectories the mode targets, so we leave
+                # both unset (default 0.0) rather than fabricate a score. This caps a
+                # perfect electronics bundle at ~0.7 by design until the miners land.
         return metrics, refs, disputed, conflict
 
     # --- pipeline phases --------------------------------------------------
@@ -670,7 +679,12 @@ class Controller:
     def _apply_memory_recalls(self, ctx: ExecutionContext, candidates: list, recalls: list[MemoryRecall]) -> list:
         if not recalls:
             return candidates
-        quote_recalls = [r for r in recalls if r.fact.status == "active" and r.fact.field == "quote_channel"]
+        # Guardrail (defense-in-depth): disputed facts must not reach an RFQ draft.
+        # The primary gate is upstream -- recall returns active-only facts -- so this
+        # rfq_eligible re-check is a boundary guard; the allow_disputed policy flag
+        # only takes effect if a recall backend ever surfaces a non-active fact.
+        eligible = rfq_eligible(recalls, allow_disputed=self.policy.allow_disputed_facts_in_rfq)
+        quote_recalls = [r for r in eligible if r.fact.field == "quote_channel"]
         if not quote_recalls:
             return candidates
         for cand in candidates:

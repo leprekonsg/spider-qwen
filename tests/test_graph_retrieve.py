@@ -11,7 +11,7 @@ from spider_qwen.agent.controller import Controller
 from spider_qwen.evidence.ledger import EvidenceLedger
 from spider_qwen.graph.retrieve import (
     GraphRetriever,
-    flat_vector_rank,
+    flat_lexical_rank,
     personalized_pagerank,
 )
 from spider_qwen.graph.schema import part_key
@@ -74,11 +74,11 @@ def _recall_at_k(rankings: list[list[str]], golds: list[str], k: int) -> float:
     return sum(1 for r, g in zip(rankings, golds) if g in r[:k]) / len(golds)
 
 
-def test_ppr_beats_flat_vector_baseline_recall_at_5():
+def test_ppr_beats_flat_lexical_baseline_recall_at_5():
     store, queries, golds = _recall_fixture()
     retr = GraphRetriever(store)
     ppr = [[n.id for n in retr.retrieve(q, top_k=5).results] for q in queries]
-    flat = [flat_vector_rank(store, q, top_k=5) for q in queries]
+    flat = [flat_lexical_rank(store, q, top_k=5) for q in queries]
     ppr_recall = _recall_at_k(ppr, golds, 5)
     flat_recall = _recall_at_k(flat, golds, 5)
     assert ppr_recall > flat_recall, f"ppr={ppr_recall} flat={flat_recall}"

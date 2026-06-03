@@ -108,6 +108,28 @@ class VectorRecallBackend:
         return hits
 
 
+def rfq_eligible(recalls: list[MemoryRecall], *, allow_disputed: bool = False) -> list[MemoryRecall]:
+    """Recalls allowed to enrich an RFQ-bound candidate (boundary defense-in-depth).
+
+    Guardrail (hard rule): a fact with ``status='disputed'`` must never appear in a
+    generated RFQ draft. Active facts always pass; disputed facts pass ONLY when
+    policy explicitly opts in (``allow_disputed``); stale facts never enrich an RFQ.
+
+    NOTE: the PRIMARY exclusion is upstream -- ``SemanticMemory.recall`` returns only
+    ``active()`` facts, so the standard recall path never surfaces a disputed/stale
+    fact here. This helper is a defense-in-depth re-check at the RFQ boundary
+    (exercised directly by the guardrail tests); the ``allow_disputed`` opt-in only
+    takes effect if a recall backend ever surfaces non-active facts.
+    """
+    out: list[MemoryRecall] = []
+    for r in recalls:
+        if r.fact.status == "active":
+            out.append(r)
+        elif r.fact.status == "disputed" and allow_disputed:
+            out.append(r)
+    return out
+
+
 def build_recall_backend(
     memory: SemanticMemory,
     *,

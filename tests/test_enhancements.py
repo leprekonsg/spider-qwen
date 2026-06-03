@@ -195,11 +195,11 @@ def test_assistant_config_ignored_for_git_and_docker():
     dockerignore = open(".dockerignore", encoding="utf-8").read().splitlines()
 
     for ignored in [
-        ".qwen/",
         ".playwright-mcp/",
         ".playwright/",
         "playwright-report/",
         "test-results/",
+        "tmppytest-cache/",
     ]:
         assert ignored in gitignore
         assert ignored in dockerignore

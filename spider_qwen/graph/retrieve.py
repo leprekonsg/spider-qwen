@@ -6,9 +6,10 @@ candidate nodes by their personalized score. Each result carries a Reasoning-on-
 Graphs relation path that doubles as a buyer-facing explanation
 ("ATMEGA48 -> SUPERSEDED_BY -> ATMEGA48A").
 
-A deliberately flat lexical baseline (`flat_vector_rank`) stands in for a no-graph
-vector retriever; PPR beats it whenever the answer is graph-adjacent but
-lexically dissimilar to the query (the multi-hop substitute case).
+A deliberately flat LEXICAL baseline (`flat_lexical_rank`, a SequenceMatcher
+surface-overlap ranker -- not a learned vector retriever) stands in for no-graph
+retrieval; PPR beats it whenever the answer is graph-adjacent but lexically
+dissimilar to the query (the multi-hop substitute case).
 """
 
 from __future__ import annotations
@@ -66,8 +67,10 @@ def personalized_pagerank(
     return p
 
 
-def flat_vector_rank(store, query: str, *, top_k: int = 5) -> list[str]:
-    """No-graph baseline: rank nodes by lexical similarity of surface to query."""
+def flat_lexical_rank(store, query: str, *, top_k: int = 5) -> list[str]:
+    """No-graph baseline: rank nodes by lexical (surface-string) similarity to the
+    query. This is a lexical matcher, NOT a vector retriever -- it cannot find a
+    graph-adjacent answer whose surface is lexically dissimilar to the query."""
     q = query.lower()
     scored: list[tuple[str, float]] = []
     for nid in _all_node_ids(store):

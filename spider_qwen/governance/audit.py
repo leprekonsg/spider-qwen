@@ -26,8 +26,15 @@ class AuditEvent(BaseModel):
 
 
 class AuditLog:
-    # Actions that v1 must never emit.
-    FORBIDDEN = frozenset({"rfq_submitted", "rfq_sent", "form_submitted", "email_sent"})
+    # Actions v1 must never emit. Covers both spellings of the send/submit verbs
+    # (the spec and the code historically diverged on -submit vs -submitted) and
+    # the browser/agent automation that the "search + fetch only" rule forbids.
+    FORBIDDEN = frozenset({
+        "rfq_submitted", "rfq_sent",
+        "form_submit", "form_submitted",
+        "email_send", "email_sent",
+        "browser_drive", "browser_navigate", "browser_action",
+    })
 
     def __init__(self, run_id: str, state_dir: str | Path | None = None) -> None:
         self.run_id = run_id
