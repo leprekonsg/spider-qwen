@@ -24,7 +24,10 @@ from ..evidence.models import EvidenceRef, utc_now_iso
 from ..evidence.verifier import verify_ledger
 from ..evidence.graph import render_supplier_graph
 from ..governance.review_events import ReviewStatusTransitionError, ReviewStore
-from ..memory.decay import apply_decay, is_stale
+from ..memory.decay import apply_decay, is_stale, memory_stability_days
+from ..memory.episodic import EpisodicMemory
+from ..memory.notes import NoteStore
+from ..memory.reflections import ReflectionEngine
 from ..memory.revalidation import Revalidator
 from ..memory.semantic import SemanticMemory
 from ..modes.classifier import ModeClassifier
@@ -111,11 +114,24 @@ def _cmd_memory(args: argparse.Namespace) -> int:
                 {
                     **fact.model_dump(mode="json"),
                     "decayed_confidence": round(apply_decay(fact), 4),
+                    "stability_days": round(memory_stability_days(fact), 2),
                     "is_stale": is_stale(fact),
                     "ttl_status": fact.status,
                 }
             )
         print(json.dumps(rows, indent=2))
+        return 0
+    if args.memory_command == "reflect":
+        reflections = ReflectionEngine().reflect(
+            memory.all(), EpisodicMemory(_state_dir()).all()
+        )
+        print(json.dumps([r.model_dump(mode="json") for r in reflections], indent=2))
+        return 0
+    if args.memory_command == "notes":
+        # Read-only view: build Zettelkasten notes from the current facts.
+        store = NoteStore(state_dir=None)
+        notes = [store.add_from_fact(f) for f in memory.all()]
+        print(json.dumps([n.model_dump(mode="json") for n in notes], indent=2))
         return 0
     if args.memory_command == "revalidate":
         if not args.fact_id:
@@ -143,7 +159,7 @@ def _cmd_memory(args: argparse.Namespace) -> int:
         )
         print(json.dumps(refreshed.model_dump(mode="json") if refreshed else None, indent=2))
         return 0
-    print("usage: spider-qwen memory [show|revalidate]", file=sys.stderr)
+    print("usage: spider-qwen memory [show|revalidate|reflect|notes]", file=sys.stderr)
     return 2
 
 
@@ -206,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ev.set_defaults(func=_cmd_evidence)
 
     p_mem = sub.add_parser("memory", help="Inspect or revalidate semantic memory")
-    p_mem.add_argument("memory_command", choices=["show", "revalidate"])
+    p_mem.add_argument("memory_command", choices=["show", "revalidate", "reflect", "notes"])
     p_mem.add_argument("fact_id", nargs="?")
     p_mem.add_argument("--value", default=None)
     p_mem.add_argument("--confidence", type=float, default=0.85)

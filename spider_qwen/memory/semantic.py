@@ -38,6 +38,9 @@ class SemanticFact(BaseModel):
     # Competing values from contradicting sources; the primary value/refs above
     # are the highest-confidence side, these retain every other side (T-2.3).
     disputed_alternatives: list[DisputedAlternative] = Field(default_factory=list)
+    # MemoryBank re-access counter: each corroborating observation grows the
+    # fact's decay stability (spaced repetition). See memory/decay.py (T-4.1).
+    reinforcement_count: int = 0
 
     def key(self) -> str:
         return f"{self.entity_type}:{self.entity_name.lower()}:{self.field}"
@@ -81,9 +84,12 @@ class SemanticMemory:
             return fact
 
         if not contradicts(existing.value, fact.value):
-            # Agreement (exact, or after case/spacing/punctuation normalization).
+            # Agreement (exact, or after case/spacing/punctuation normalization):
+            # a corroborating observation re-accesses the fact, growing its decay
+            # stability (MemoryBank spaced repetition, T-4.1).
             existing.confidence = max(existing.confidence, fact.confidence)
             existing.last_verified_at = utc_now_iso()
+            existing.reinforcement_count += 1
             if existing.status != "disputed":
                 existing.status = "active"
             existing.evidence_refs = self._merge_refs(existing.evidence_refs, fact.evidence_refs)
