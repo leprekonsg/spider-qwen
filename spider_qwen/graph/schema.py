@@ -1,9 +1,11 @@
-"""T-3.1: SQLite LPG schema + canonical node-key helpers.
+"""T-3.1/T-4.3: SQLite LPG schema + canonical node-key helpers.
 
 Two tables in one SQLite file (the same store can hold the ledger + sqlite-vec
 embeddings). The asymmetric ``CROSS_REFERENCE{grade}`` edge is naturally a
-directional row; bi-temporality is the ``event_ts``/``ingest_ts`` columns (T-4.3
-builds on them, no new engine).
+directional row. Bi-temporality (T-4.3): ``event_ts`` = valid-from (when the fact
+became true), ``ingest_ts`` = recorded-at (when we observed it), ``valid_to`` =
+closed when a newer fact supersedes this one (NULL = current). The
+``edges_current`` view exposes only open rows. No new engine.
 """
 
 from __future__ import annotations
@@ -35,12 +37,19 @@ CREATE TABLE IF NOT EXISTS edges (
   evidence_claim_id TEXT NOT NULL,
   event_ts          TEXT,
   ingest_ts         TEXT NOT NULL,
+  valid_to          TEXT,
   grade             TEXT,
   props             TEXT NOT NULL DEFAULT '{}',
   PRIMARY KEY (src, dst, rel, evidence_claim_id)
 );
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src, rel);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst, rel);
+"""
+
+# Created after the valid_to migration so it never references a missing column.
+CREATE_VIEWS_SQL = """
+CREATE VIEW IF NOT EXISTS edges_current AS
+  SELECT * FROM edges WHERE valid_to IS NULL;
 """
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")

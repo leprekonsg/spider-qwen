@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .schema import CREATE_SQL, REL_TYPES
+from .schema import CREATE_SQL, CREATE_VIEWS_SQL, REL_TYPES
 
 
 def _now_iso() -> str:
@@ -26,7 +26,14 @@ class GraphStore:
         self.conn = sqlite3.connect(str(path))
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(CREATE_SQL)
+        self._migrate_valid_to()  # T-4.3: add valid_to to pre-existing graph files
+        self.conn.executescript(CREATE_VIEWS_SQL)  # view created after the column exists
         self.conn.commit()
+
+    def _migrate_valid_to(self) -> None:
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(edges)").fetchall()}
+        if "valid_to" not in cols:
+            self.conn.execute("ALTER TABLE edges ADD COLUMN valid_to TEXT")
 
     # --- writes ------------------------------------------------------------
 
@@ -51,6 +58,7 @@ class GraphStore:
         evidence_claim_id: str,
         event_ts: str | None = None,
         ingest_ts: str | None = None,
+        valid_to: str | None = None,
         grade: str | None = None,
         props: dict[str, Any] | None = None,
     ) -> None:
@@ -61,13 +69,13 @@ class GraphStore:
             )
         self.conn.execute(
             "INSERT INTO edges(src, dst, rel, confidence, reliability, evidence_claim_id, "
-            "event_ts, ingest_ts, grade, props) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "event_ts, ingest_ts, valid_to, grade, props) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(src, dst, rel, evidence_claim_id) DO UPDATE SET "
             "confidence=excluded.confidence, reliability=excluded.reliability, "
             "event_ts=excluded.event_ts, ingest_ts=excluded.ingest_ts, "
-            "grade=excluded.grade, props=excluded.props",
+            "valid_to=excluded.valid_to, grade=excluded.grade, props=excluded.props",
             (src, dst, rel, float(confidence), float(reliability), evidence_claim_id,
-             event_ts, ingest_ts or _now_iso(), grade, json.dumps(props or {})),
+             event_ts, ingest_ts or _now_iso(), valid_to, grade, json.dumps(props or {})),
         )
         self.conn.commit()
 
@@ -102,6 +110,51 @@ class GraphStore:
 
     def edge_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+
+    # --- bi-temporal (T-4.3) ----------------------------------------------
+
+    _FULL_COLS = (
+        "src, dst, rel, confidence, reliability, evidence_claim_id, "
+        "event_ts, ingest_ts, valid_to, grade, props"
+    )
+
+    def versions(self, src: str, dst: str, rel: str) -> list[dict[str, Any]]:
+        """All temporal versions of an edge key, oldest valid-from first."""
+        rows = self.conn.execute(
+            f"SELECT {self._FULL_COLS} FROM edges WHERE src=? AND dst=? AND rel=? "
+            "ORDER BY COALESCE(event_ts, '') ASC, ingest_ts ASC",
+            (src, dst, rel),
+        ).fetchall()
+        return [self._full_edge_row(r) for r in rows]
+
+    def current_edges(self) -> list[dict[str, Any]]:
+        """Open (non-superseded) edges via the edges_current view."""
+        rows = self.conn.execute(f"SELECT {self._FULL_COLS} FROM edges_current").fetchall()
+        return [self._full_edge_row(r) for r in rows]
+
+    def mark_superseded(self, src: str, dst: str, rel: str, *, valid_to: str, before: str | None = None) -> None:
+        """Close open rows for an edge key. With ``before`` set, only rows whose
+        valid_from precedes it are closed (so a simultaneous fact stays open)."""
+        if before is None:
+            self.conn.execute(
+                "UPDATE edges SET valid_to=? WHERE src=? AND dst=? AND rel=? AND valid_to IS NULL",
+                (valid_to, src, dst, rel),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE edges SET valid_to=? WHERE src=? AND dst=? AND rel=? AND valid_to IS NULL "
+                "AND (event_ts IS NULL OR event_ts < ?)",
+                (valid_to, src, dst, rel, before),
+            )
+        self.conn.commit()
+
+    @staticmethod
+    def _full_edge_row(r: tuple) -> dict[str, Any]:
+        return {
+            "src": r[0], "dst": r[1], "rel": r[2], "confidence": r[3], "reliability": r[4],
+            "evidence_claim_id": r[5], "event_ts": r[6], "ingest_ts": r[7],
+            "valid_to": r[8], "grade": r[9], "props": json.loads(r[10] or "{}"),
+        }
 
     def traverse(
         self,
