@@ -62,3 +62,22 @@ def test_current_view_excludes_superseded_rows():
     stocked = [r for r in current_rows if r["rel"] == "STOCKED_AT"]
     assert len(stocked) == 1
     assert stocked[0]["evidence_claim_id"] == "ev_new"
+
+
+def test_superseded_edge_excluded_from_default_reads():
+    """Supersession must take effect in the normal read paths, not just the
+    explicit current_edges() view: edges(), neighbors(), and traverse() return
+    only open (valid_to IS NULL) edges. Full history stays reachable via
+    versions()."""
+    g = _graph()
+
+    assert all(e["evidence_claim_id"] != "ev_old" for e in g.store.edges())
+
+    nbrs = g.store.neighbors("dist:acme", rels=["STOCKED_AT"])
+    assert [n["evidence_claim_id"] for n in nbrs] == ["ev_new"]
+
+    hops = g.store.traverse("dist:acme", rels=["STOCKED_AT"], max_depth=1)
+    assert len(hops) == 1  # only the open edge is traversed, not the superseded one
+
+    # History is not lost -- both versions remain queryable.
+    assert len(g.store.versions("dist:acme", "part:ne5532", "STOCKED_AT")) == 2

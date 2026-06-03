@@ -90,18 +90,23 @@ class GraphStore:
         return {"id": row[0], "type": row[1], "props": json.loads(row[2] or "{}")}
 
     def neighbors(self, node_id: str, rels: tuple[str, ...] | list[str] | None = None) -> list[dict[str, Any]]:
+        """Current (non-superseded) out-edges of a node. Bi-temporal history is
+        reached via ``versions``; superseded rows are excluded here so retrieval
+        never routes through a closed fact."""
         rels = tuple(rels) if rels else REL_TYPES
         placeholders = ",".join("?" * len(rels))
         rows = self.conn.execute(
             f"SELECT src, dst, rel, confidence, reliability, evidence_claim_id, grade "
-            f"FROM edges WHERE src = ? AND rel IN ({placeholders})",
+            f"FROM edges WHERE src = ? AND rel IN ({placeholders}) AND valid_to IS NULL",
             (node_id, *rels),
         ).fetchall()
         return [self._edge_row(r) for r in rows]
 
     def edges(self) -> list[dict[str, Any]]:
+        """Current (non-superseded) edges only; see ``versions`` for full history."""
         rows = self.conn.execute(
-            "SELECT src, dst, rel, confidence, reliability, evidence_claim_id, grade FROM edges"
+            "SELECT src, dst, rel, confidence, reliability, evidence_claim_id, grade "
+            "FROM edges WHERE valid_to IS NULL"
         ).fetchall()
         return [self._edge_row(r) for r in rows]
 
@@ -172,7 +177,7 @@ class GraphStore:
           UNION ALL
           SELECT e.dst, chain.path || ' -> ' || e.rel || ' -> ' || e.dst, chain.depth + 1
           FROM edges e JOIN chain ON e.src = chain.id
-          WHERE chain.depth < ? AND e.rel IN ({placeholders})
+          WHERE chain.depth < ? AND e.rel IN ({placeholders}) AND e.valid_to IS NULL
         )
         SELECT id, path, depth FROM chain WHERE depth > 0 ORDER BY depth, id
         """
