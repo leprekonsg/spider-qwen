@@ -211,10 +211,43 @@ def _side_reliabilities(side, ledger_get) -> list[float]:
     out: list[float] = []
     for ref in refs:
         item = ledger_get(ref.ledger_id) if ledger_get else None
-        if item is not None:
-            out.append(float(item.reliability))
-        else:
+        if item is None:
             out.append(_own_confidence(side))
+        elif getattr(item, "source_tool", "") == "semantic_memory":
+            out.extend(_memory_row_reliabilities(item))
+        else:
+            out.append(float(item.reliability))
     if not out:  # evidence-free side: weight by its recorded confidence alone
         out.append(_own_confidence(side))
     return out
+
+
+def _memory_row_reliabilities(item) -> list[float]:
+    """Weights for a synthetic semantic_memory recall row.
+
+    The row's own T-2.4 tier reflects the vendor page the recall was attached
+    to, not where the fact originally came from -- using it would miscalibrate
+    the interval (same trap _source_class_for avoids in evidence/verifier.py).
+    Weight by the ORIGINAL sources' tiers (metadata.source_evidence_refs,
+    URL-classified; the pages live in a previous run's ledger), each capped by
+    the row's recorded decayed recall confidence so a stale memory cannot claim
+    its original pedigree at full strength. No resolvable originals -> the
+    recall confidence alone.
+    """
+    from ..governance.source_reliability import (  # lazy: avoids import cycle
+        DEFAULT_RELIABILITY,
+        classify_source,
+        host_of,
+    )
+
+    conf = getattr(item, "confidence", None)
+    recall_conf = 0.5 if conf is None else float(conf)
+    sources = (getattr(item, "metadata", {}) or {}).get("source_evidence_refs") or []
+    tiers = [
+        DEFAULT_RELIABILITY.get(classify_source(host_of(s.get("url", ""))),
+                                DEFAULT_RELIABILITY["unknown"])
+        for s in sources if isinstance(s, dict) and s.get("url")
+    ]
+    if not tiers:
+        return [recall_conf]
+    return [min(t, recall_conf) for t in tiers]

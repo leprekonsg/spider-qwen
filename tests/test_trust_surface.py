@@ -84,6 +84,46 @@ def test_quote_channel_interval_none_without_channel():
     assert quote_channel_interval(_candidate(False)) is None
 
 
+class _MemoryRowLedger:
+    """Stub ledger resolving to a synthetic semantic_memory recall row."""
+
+    class _Item:
+        def __init__(self, confidence: float, source_urls: list[str]) -> None:
+            self.source_tool = "semantic_memory"
+            self.reliability = 0.6  # tier of the vendor page the recall attached to
+            self.confidence = confidence
+            self.metadata = {
+                "source_evidence_refs": [{"url": u} for u in source_urls],
+            }
+
+    def __init__(self, confidence: float, source_urls: list[str]) -> None:
+        self._item = self._Item(confidence, source_urls)
+
+    def get(self, ledger_id: str):
+        return self._item
+
+
+def test_memory_backed_interval_uses_original_provenance_capped_by_recall():
+    # Original provenance is a manufacturer page (tier 0.99) but the recall has
+    # decayed to 0.6: the interval must honor the decay, not the synthetic
+    # row's tier and not the original pedigree at full strength.
+    interval = quote_channel_interval(
+        _candidate(True), _MemoryRowLedger(0.6, ["https://www.ti.com/contact"]))
+    assert interval.belief == pytest.approx(0.6)
+
+    # Fresh recall (0.95) of a fact whose only original source is unclassified
+    # (tier 0.4): the weak provenance caps the belief, not the recall freshness.
+    interval = quote_channel_interval(
+        _candidate(True), _MemoryRowLedger(0.95, ["https://random-blog.example/post"]))
+    assert interval.belief == pytest.approx(0.4)
+
+
+def test_memory_backed_interval_without_originals_uses_recall_confidence():
+    interval = quote_channel_interval(_candidate(True), _MemoryRowLedger(0.7, []))
+    # Not the synthetic row's 0.6 tier -- the recorded recall confidence.
+    assert interval.belief == pytest.approx(0.7)
+
+
 def test_quote_channel_interval_falls_back_to_half_without_ledger():
     interval = quote_channel_interval(_candidate(True), ledger=None)
     # QuoteChannel records no confidence; an unresolvable ref must not be
