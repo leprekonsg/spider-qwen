@@ -19,6 +19,7 @@ Ed25519 tree-head signing is optional and activates only when the
 from __future__ import annotations
 
 import hashlib
+import re
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +28,16 @@ from .models import utc_now_iso
 
 _LEAF_PREFIX = b"\x00"
 _NODE_PREFIX = b"\x01"
+# Every digest handled by the verifiers must be a 64-char SHA-256 hex string.
+# Proofs arrive from UNTRUSTED external input; a malformed element must make
+# verification return False, never raise (bytes.fromhex would).
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _digest_or_none(value: str) -> str | None:
+    """Normalize an untrusted hex digest; None when it is not one."""
+    v = (value or "").strip().lower() if isinstance(value, str) else ""
+    return v if _HEX64.match(v) else None
 
 _CRYPTO_HINT = (
     "Ed25519 signing requires the 'cryptography' package. "
@@ -67,6 +78,7 @@ class TreeHead(BaseModel):
 class SignedTreeHead(BaseModel):
     """Ed25519-signed tree head (RFC 6962 STH analog)."""
 
+    schema_version: str = SCHEMA_VERSION
     head: TreeHead
     signature: str  # hex
     public_key: str  # hex, raw Ed25519 public bytes
@@ -187,12 +199,20 @@ class MerkleLog:
 
 def verify_inclusion(leaf_data: str, leaf_index: int, tree_size: int,
                      audit_path: list[str], root_hash: str) -> bool:
-    """RFC 6962 inclusion-proof verification. Pure: needs no log access."""
+    """RFC 6962 inclusion-proof verification. Pure: needs no log access.
+
+    All inputs are untrusted: a malformed proof (non-hex path element, bogus
+    root) is a failed verification, never an exception.
+    """
     if leaf_index < 0 or leaf_index >= tree_size:
+        return False
+    root = _digest_or_none(root_hash)
+    path = [_digest_or_none(p) for p in audit_path]
+    if root is None or any(p is None for p in path):
         return False
     fn, sn = leaf_index, tree_size - 1
     r = leaf_hash(leaf_data)
-    for p in audit_path:
+    for p in path:
         if sn == 0:
             return False
         if fn % 2 == 1 or fn == sn:
@@ -205,7 +225,7 @@ def verify_inclusion(leaf_data: str, leaf_index: int, tree_size: int,
             r = _node(r, p)
         fn >>= 1
         sn >>= 1
-    return sn == 0 and r == root_hash
+    return sn == 0 and r == root
 
 
 def verify_citation(proof: CitationProof) -> bool:
@@ -216,15 +236,24 @@ def verify_citation(proof: CitationProof) -> bool:
 
 def verify_consistency(first_size: int, second_size: int, first_root: str,
                        second_root: str, proof: list[str]) -> bool:
-    """RFC 6962 consistency-proof verification: first tree is a prefix of second."""
+    """RFC 6962 consistency-proof verification: first tree is a prefix of second.
+
+    All inputs are untrusted: a malformed proof is a failed verification,
+    never an exception.
+    """
     if first_size < 1 or first_size > second_size:
         return False
+    first = _digest_or_none(first_root)
+    second = _digest_or_none(second_root)
+    elements = [_digest_or_none(p) for p in proof]
+    if first is None or second is None or any(p is None for p in elements):
+        return False
     if first_size == second_size:
-        return not proof and first_root == second_root
-    path = list(proof)
+        return not elements and first == second
+    path = list(elements)
     # When first_size is a power of two, the first root is its own subtree hash.
     if first_size & (first_size - 1) == 0:
-        path = [first_root] + path
+        path = [first] + path
     if not path:
         return False
     fn, sn = first_size - 1, second_size - 1
@@ -246,7 +275,7 @@ def verify_consistency(first_size: int, second_size: int, first_root: str,
             sr = _node(sr, c)
         fn >>= 1
         sn >>= 1
-    return sn == 0 and fr == first_root and sr == second_root
+    return sn == 0 and fr == first and sr == second
 
 
 # --- optional Ed25519 signing (spider-qwen[crypto]) --------------------------
@@ -289,15 +318,25 @@ def sign_tree_head(head: TreeHead, private_key_bytes: bytes) -> SignedTreeHead:
     )
 
 
-def verify_signed_tree_head(sth: SignedTreeHead) -> bool:
+def verify_signed_tree_head(sth: SignedTreeHead, expected_public_key: str) -> bool:
+    """Verify an STH against a trusted, out-of-band public key (hex).
+
+    The key embedded in the STH is informational only: verifying against it
+    would let any attacker who rewrites the ledger re-sign with a fresh key
+    and self-validate. ``expected_public_key`` is the trust anchor the caller
+    obtained independently (config, pinned file, prior exchange).
+    """
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     except ImportError as exc:
         raise ImportError(_CRYPTO_HINT) from exc
     from cryptography.exceptions import InvalidSignature
 
+    anchor = (expected_public_key or "").strip().lower()
+    if not anchor or (sth.public_key or "").strip().lower() != anchor:
+        return False
     try:
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(sth.public_key)).verify(
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(anchor)).verify(
             bytes.fromhex(sth.signature), sth.signed_payload(),
         )
         return True

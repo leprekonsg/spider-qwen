@@ -53,11 +53,40 @@ def test_non_numeric_values_never_auto_contradict():
     assert not detect_numeric_contradiction("Acme Supplies", "sales@acme.sg", span)
 
 
+def test_addresses_years_and_phones_do_not_contradict():
+    # Numbers outside price/quantity context are not competing values.
+    assert not detect_numeric_contradiction(
+        "Acme Supplies", "999",
+        "Acme Supplies is at 123 Orchard Road. Request a quote.")
+    assert not detect_numeric_contradiction(
+        "Acme Supplies", "999", "Acme Supplies was founded in 1998.")
+    assert not detect_numeric_contradiction(
+        "Acme Supplies", "999", "Call Acme Supplies on 6555 1234 today.")
+
+
+def test_digits_in_subject_name_do_not_contradict():
+    # '3M' normalizes to '3m'; its own digits must never read as a competing
+    # numeric value asserted about the vendor.
+    assert not detect_numeric_contradiction(
+        "3M", "999", "3M accepts quote requests through its portal.")
+    assert not detect_numeric_contradiction(
+        "3M", "999", "Browse the 3M price list and request a quotation.")
+    # But a genuine competing price next to the name still contradicts.
+    assert detect_numeric_contradiction(
+        "3M", "999", "3M lists this part at S$129 per unit.")
+
+
 def test_worst_decision_aggregation():
     assert worst_decision([]) == "proceed"
     assert worst_decision(["proceed", "proceed"]) == "proceed"
     assert worst_decision(["proceed", "regenerate"]) == "regenerate"
     assert worst_decision(["regenerate", "replan", "proceed"]) == "replan"
+
+
+def test_worst_decision_fails_closed_on_unknown_strings():
+    # An unrecognized decision must aggregate as the most severe outcome,
+    # not silently score as proceed.
+    assert worst_decision(["proceed", "bogus"]) == "replan"
 
 
 # --- GRADE -------------------------------------------------------------------
@@ -103,6 +132,22 @@ def test_worst_grade_aggregation():
     assert worst_grade([]) == "very_low"
     assert worst_grade(["high", "moderate", "low"]) == "low"
     assert worst_grade(["high", "high"]) == "high"
+    assert worst_grade(["high", "bogus"]) == "very_low"  # fail closed
+
+
+def test_start_tiers_track_source_reliability_table():
+    # Tiers derive from governance/source_reliability.DEFAULT_RELIABILITY:
+    # a class added there must grade here without a second table to sync.
+    from spider_qwen.governance.source_reliability import DEFAULT_RELIABILITY
+    from spider_qwen.verification.grade import _start_tier
+
+    expected = {"manufacturer": 4, "distributor": 4, "government": 4,
+                "aggregator": 3, "business": 3, "broker": 2, "unknown": 2,
+                "marketplace": 1}
+    assert set(expected) == set(DEFAULT_RELIABILITY)  # vocabulary in lockstep
+    for source_class, tier in expected.items():
+        assert _start_tier(source_class) == tier, source_class
+    assert _start_tier("never_heard_of_it") == _start_tier("unknown")
 
 
 # --- spine integration ---------------------------------------------------------
@@ -143,6 +188,31 @@ def test_spine_emits_grounded_proceed_with_grade():
     assert price.grade == "moderate"
     assert cv.decision == "proceed"
     assert ledger.get(claim_ref.ledger_id).metadata.get("grounding") == "grounded"
+
+
+def test_memory_recalled_claim_grades_from_original_provenance():
+    # A recalled fact's grade must come from the evidence it was promoted
+    # from, not from the synthetic semantic_memory row (which would always
+    # classify "unknown" and silently erase a manufacturer pedigree).
+    from spider_qwen.evidence.ledger import EvidenceLedger
+    from spider_qwen.evidence.verifier import VerificationSpine
+
+    ledger = EvidenceLedger("run_prov")
+    recalled = ledger.record(
+        source_tool="semantic_memory", url="semantic-memory", snippet="sales@acme.sg",
+        metadata={"fact_id": "fact_1", "source_evidence_refs": [
+            {"ledger_id": "ev_old", "url": "https://ti.com/contact",
+             "snippet_hash": "h", "retrieved_at": "2026-06-01T00:00:00+00:00"},
+            {"ledger_id": "ev_old2", "url": "https://alibaba.com/item",
+             "snippet_hash": "h2", "retrieved_at": "2026-06-01T00:00:00+00:00"},
+        ]})
+    spine = VerificationSpine(ledger)
+    # Best original source wins: manufacturer over marketplace.
+    assert spine._source_class_for(recalled) == "manufacturer"
+    # No recorded provenance -> unknown, not a crash.
+    bare = ledger.record(source_tool="semantic_memory", url="semantic-memory",
+                         snippet="x", metadata={"fact_id": "fact_2"})
+    assert spine._source_class_for(bare) == "unknown"
 
 
 def test_spine_emits_contradicted_replan_when_source_disagrees():

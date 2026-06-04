@@ -14,12 +14,16 @@ extension. The hot offline default stays deterministic and network-free.
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Protocol
 
+from .citation_rank import citation_multiplier
 from .decay import apply_decay
 from .semantic import MemoryRecall, SemanticMemory
 
 Embedder = Callable[[str], list[float]]
+
+logger = logging.getLogger(__name__)
 
 
 class RecallBackend(Protocol):
@@ -99,12 +103,16 @@ class VectorRecallBackend:
             fact = self.memory.get(fact_id)
             if fact is None or fact.status != "active":
                 continue
+            # Same ledger-supervised usage boost as the lexical path: switching
+            # backends must not silently drop the citation-weighted ranking.
+            score = (1.0 / (1.0 + float(distance))) * citation_multiplier(fact)
             hits.append(MemoryRecall(
                 fact=fact,
                 decayed_confidence=round(apply_decay(fact), 4),
-                score=round(1.0 / (1.0 + float(distance)), 4),
+                score=round(score, 4),
                 reason="vector knn",
             ))
+        hits.sort(key=lambda r: r.score, reverse=True)
         return hits
 
 
@@ -138,10 +146,19 @@ def build_recall_backend(
     db_path: str = ":memory:",
     dim: int = 768,
 ) -> RecallBackend:
-    """Return the best available recall backend, falling back to lexical."""
+    """Return the best available recall backend, falling back to lexical.
+
+    The choice is logged: which backend serves recall changes ranking
+    behavior, so a silent fallback would be a silent failure.
+    """
     if prefer_vector and embedder is not None and sqlite_vec_available():
         try:
-            return VectorRecallBackend(memory, embedder, db_path=db_path, dim=dim)
-        except Exception:
-            pass  # any failure (extension/version/API) -> deterministic lexical
+            backend = VectorRecallBackend(memory, embedder, db_path=db_path, dim=dim)
+            logger.info("memory recall backend: vector (sqlite-vec)")
+            return backend
+        except Exception as exc:
+            logger.warning(
+                "vector recall backend unavailable (%s); falling back to lexical", exc
+            )
+    logger.info("memory recall backend: lexical")
     return LexicalRecallBackend(memory)

@@ -18,7 +18,7 @@ Pure Python, deterministic, no dependencies.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # Reliability is clamped below 1 so two flatly contradicting "certain" sources
 # produce total-but-finite conflict (Dempster's rule is undefined at K = 1).
@@ -79,20 +79,26 @@ def _combine(m1: BeliefMass, m2: BeliefMass, *, yager: bool) -> tuple[BeliefMass
 def fuse(masses: list[BeliefMass]) -> tuple[BeliefMass, float, str]:
     """Fuse BPAs sequentially; returns (mass, max pairwise K, rule used).
 
+    Inputs are canonically sorted first: sequential combination under Yager is
+    not associative and the max-pairwise-K measurement depends on accumulation
+    order, so without sorting the same *multiset* of masses could pick a
+    different rule or interval depending on input order. After sorting the
+    result is a pure function of the multiset.
+
     A first Dempster pass measures conflict; if any pairwise K exceeds the
     threshold the fusion is redone under Yager so high conflict is *surfaced*
-    as unknown mass rather than hidden by renormalization. Both passes are
-    deterministic and order-independent in the rule choice (max K).
+    as unknown mass rather than hidden by renormalization.
     """
     if not masses:
         return BeliefMass(), 0.0, "single"
     if len(masses) == 1:
         return masses[0], 0.0, "single"
+    ordered = sorted(masses, key=lambda m: (m.true_mass, m.false_mass, m.unknown_mass))
 
     def _run(yager: bool) -> tuple[BeliefMass, float]:
-        fused = masses[0]
+        fused = ordered[0]
         max_k = 0.0
-        for m in masses[1:]:
+        for m in ordered[1:]:
             fused, k = _combine(fused, m, yager=yager)
             max_k = max(max_k, k)
         return fused, max_k
@@ -128,7 +134,7 @@ def fuse_disputed_fact(fact, ledger=None) -> list[BeliefInterval]:
     if len(sides) == 1:
         reliabilities = _side_reliabilities(fact, ledger.get if ledger else None)
         fused, k, rule = fuse([bpa(r, supports=True) for r in reliabilities])
-        return [_interval(fact.value, fused, k, rule, len(reliabilities), 0)]
+        return [_interval(fact.value, fused, k, rule, _distinct_sources(fact), 0)]
 
     intervals: list[BeliefInterval] = []
     for side in sides:
@@ -138,14 +144,35 @@ def fuse_disputed_fact(fact, ledger=None) -> list[BeliefInterval]:
             supports = other is side
             for r in _side_reliabilities(other, ledger.get if ledger else None):
                 masses.append(bpa(r, supports=supports))
-                if supports:
-                    supporting += 1
-                else:
-                    contradicting += 1
+            count = _distinct_sources(other)
+            if supports:
+                supporting += count
+            else:
+                contradicting += count
         fused, k, rule = fuse(masses)
         intervals.append(_interval(side.value, fused, k, rule, supporting, contradicting))
     intervals.sort(key=lambda i: i.belief, reverse=True)
     return intervals
+
+
+def _own_confidence(side) -> float:
+    """A side's recorded confidence; 0.5 only when truly absent (None counts
+    as absent, an explicit 0.0 does not -- `or` would fabricate 0.5 for it)."""
+    conf = getattr(side, "confidence", None)
+    return 0.5 if conf is None else float(conf)
+
+
+def _distinct_sources(side) -> int:
+    """Independent sources backing a side: distinct ref URLs, not span count.
+
+    Three spans cited from one page are one source; the interval's
+    supporting/contradicting counts must not let a single page outvote
+    a datasheet cited once.
+    """
+    refs = list(getattr(side, "evidence_refs", []) or [])
+    if not refs:
+        return 1  # the side itself (confidence stand-in) counts once
+    return len({getattr(r, "url", "") or getattr(r, "ledger_id", "") for r in refs})
 
 
 def _side_reliabilities(side, ledger_get) -> list[float]:
@@ -157,7 +184,7 @@ def _side_reliabilities(side, ledger_get) -> list[float]:
         if item is not None:
             out.append(float(item.reliability))
         else:
-            out.append(float(getattr(side, "confidence", 0.5)) or 0.5)
+            out.append(_own_confidence(side))
     if not out:  # evidence-free side: weight by its recorded confidence alone
-        out.append(float(getattr(side, "confidence", 0.5)) or 0.5)
+        out.append(_own_confidence(side))
     return out

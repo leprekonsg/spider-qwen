@@ -99,6 +99,56 @@ def test_fuse_disputed_fact_without_ledger_falls_back_to_confidence():
     assert all(0.0 <= i.belief <= i.plausibility <= 1.0 for i in intervals)
 
 
+def test_fusion_is_order_independent_for_the_same_multiset():
+    # Sequential Yager is not associative and max-K depends on accumulation
+    # order; fuse() must canonicalize so the multiset alone fixes the result.
+    # This trio sits near the Yager threshold, where ordering used to flip
+    # both the rule and the interval.
+    import itertools
+
+    trio = [bpa(0.7, supports=True), bpa(0.7, supports=True), bpa(0.9, supports=False)]
+    results = set()
+    for perm in itertools.permutations(trio):
+        fused, k, rule = fuse(list(perm))
+        results.add((round(fused.true_mass, 9), round(fused.false_mass, 9),
+                     round(fused.unknown_mass, 9), k, rule))
+    assert len(results) == 1, results
+
+
+def test_zero_confidence_side_is_not_inflated_to_half():
+    # confidence=0.0 is the DisputedAlternative default; `or 0.5` used to
+    # fabricate moderate reliability for it.
+    fact = SemanticFact(
+        entity_type="vendor", entity_name="Acme", field="price", value="120",
+        confidence=0.9, status="disputed",
+        disputed_alternatives=[DisputedAlternative(value="90", confidence=0.0)],
+    )
+    intervals = fuse_disputed_fact(fact)
+    zero_side = next(i for i in intervals if i.value == "90")
+    assert zero_side.belief == 0.0  # a worthless source contributes no belief
+
+
+def test_source_counts_are_distinct_sources_not_spans():
+    # Three spans cited from ONE page are one source; the count fields must
+    # not let a single page outvote a datasheet cited once.
+    ledger = EvidenceLedger("run_belief_sources")
+    same_page = [ledger.record(source_tool="mock", url="https://alibaba.com/item",
+                               snippet=f"span {i}") for i in range(3)]
+    fact = SemanticFact(
+        entity_type="vendor", entity_name="Acme", field="price", value="120",
+        confidence=0.9, status="disputed", evidence_refs=same_page,
+        disputed_alternatives=[
+            DisputedAlternative(value="90", confidence=0.6, evidence_refs=[
+                ledger.record(source_tool="mock", url="https://ti.com/quote",
+                              snippet="price SGD 90")]),
+        ],
+    )
+    intervals = fuse_disputed_fact(fact, ledger)
+    primary = next(i for i in intervals if i.value == "120")
+    assert primary.supporting_sources == 1  # one page, not three spans
+    assert primary.contradicting_sources == 1
+
+
 def test_undisputed_fact_returns_single_supported_interval():
     fact = SemanticFact(entity_type="vendor", entity_name="Acme", field="email",
                         value="sales@acme.sg", confidence=0.8)

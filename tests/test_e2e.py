@@ -182,8 +182,13 @@ def test_cli_memory_show_and_cross_run_recall(capsys, tmp_path, monkeypatch):
     assert all(r["evidence_refs"] for r in rows)
 
     # Second run recalls what the first learned (cross-run memory effect).
+    semantic_path = tmp_path / "memory" / "semantic.json"
+    ids_after_first = {f["fact_id"] for f in json.loads(semantic_path.read_text(encoding="utf-8"))}
     second = _run_cli(capsys, ["run", query, "--offline"])
     assert second["metrics"]["memory_recalls"] >= 1
+    # The second run must never clobber what the first persisted.
+    ids_after_second = {f["fact_id"] for f in json.loads(semantic_path.read_text(encoding="utf-8"))}
+    assert ids_after_first <= ids_after_second
 
 
 def test_cli_run_with_mock_qwen_json(capsys, tmp_path, monkeypatch):

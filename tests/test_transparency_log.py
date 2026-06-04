@@ -94,6 +94,24 @@ def test_proof_bounds_raise():
         log.consistency_proof(2, 9)
 
 
+def test_malformed_proof_elements_verify_false_not_crash():
+    # Proofs arrive from untrusted external input: a non-hex element, a short
+    # digest, or a bogus root must FAIL verification, never raise.
+    log = make_log()
+    n = len(LEAVES)
+    root = log.root_hash()
+    path = log.inclusion_proof(3)
+    assert not verify_inclusion(LEAVES[3], 3, n, ["zz" * 32], root)
+    assert not verify_inclusion(LEAVES[3], 3, n, ["abc123"], root)
+    assert not verify_inclusion(LEAVES[3], 3, n, path, "not-a-root")
+    proof = log.consistency_proof(5, n)
+    assert not verify_consistency(5, n, log.root_hash(5), root, ["zz" * 32])
+    assert not verify_consistency(5, n, "junk", root, proof)
+    assert not verify_consistency(5, n, log.root_hash(5), "junk", proof)
+    # Uppercase hex is the same digest, not a forgery.
+    assert verify_inclusion(LEAVES[3], 3, n, [p.upper() for p in path], root.upper())
+
+
 def _ledger_with_items(n: int = 4) -> EvidenceLedger:
     ledger = EvidenceLedger("run_tlog")
     for i in range(n):
@@ -140,6 +158,42 @@ def test_ledger_persist_includes_tree_head(tmp_path):
     assert len(reloaded) == 1
 
 
+def test_reload_and_repersist_preserves_original_commitment(tmp_path):
+    # The tree_head is a point-in-time commitment an external party may have
+    # recorded: load + persist of an UNCHANGED ledger must keep it verbatim.
+    import json
+
+    ledger = EvidenceLedger("run_tlog", state_dir=tmp_path)
+    ledger.record(source_tool="mock", url="https://example.com", snippet="s")
+    path = ledger.persist()
+    original = json.loads(path.read_text(encoding="utf-8"))["tree_head"]
+
+    reloaded = EvidenceLedger.load("run_tlog", tmp_path)
+    reloaded.persist()
+    after = json.loads(path.read_text(encoding="utf-8"))["tree_head"]
+    assert after == original  # timestamp included
+
+    # Appending an item legitimately advances the commitment.
+    reloaded.record(source_tool="mock", url="https://example.com/2", snippet="s2")
+    reloaded.persist()
+    advanced = json.loads(path.read_text(encoding="utf-8"))["tree_head"]
+    assert advanced["tree_size"] == 2
+    assert advanced["root_hash"] != original["root_hash"]
+
+
+def test_load_rejects_ledger_tampered_after_commitment(tmp_path):
+    import json
+
+    ledger = EvidenceLedger("run_tlog", state_dir=tmp_path)
+    ledger.record(source_tool="mock", url="https://example.com", snippet="s")
+    path = ledger.persist()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["items"][0]["chain_hash"] = "0" * 64  # retroactive edit
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="tree_head commitment"):
+        EvidenceLedger.load("run_tlog", tmp_path)
+
+
 def test_signing_requires_crypto_extra_or_signs_and_verifies():
     log = make_log(3)
     head = log.tree_head()
@@ -155,6 +209,31 @@ def test_signing_requires_crypto_extra_or_signs_and_verifies():
         assert "spider-qwen[crypto]" in str(exc)
         return
     sth = sign_tree_head(head, key)
-    assert verify_signed_tree_head(sth)
+    assert sth.schema_version  # persistent model: versioned like the rest
+    trusted = sth.public_key  # the anchor a verifier pins out-of-band
+    assert verify_signed_tree_head(sth, trusted)
     bad = sth.model_copy(update={"head": head.model_copy(update={"tree_size": 99})})
-    assert not verify_signed_tree_head(bad)
+    assert not verify_signed_tree_head(bad, trusted)
+
+
+def test_sth_signed_by_attacker_key_fails_against_trust_anchor():
+    # An attacker who rewrites the ledger can re-sign with a fresh keypair;
+    # the STH then self-validates against its own embedded key. Verification
+    # must therefore anchor on the EXPECTED key, not the embedded one.
+    try:
+        from spider_qwen.evidence.transparency import (
+            generate_signing_key,
+            sign_tree_head,
+            verify_signed_tree_head,
+        )
+
+        trusted_key = generate_signing_key()
+    except ImportError:
+        return  # covered by the hint assertion above when [crypto] is absent
+    attacker_key = generate_signing_key()
+    head = make_log(3).tree_head()
+    legit = sign_tree_head(head, trusted_key)
+    forged = sign_tree_head(head, attacker_key)  # internally consistent
+    assert verify_signed_tree_head(legit, legit.public_key)
+    assert not verify_signed_tree_head(forged, legit.public_key)
+    assert not verify_signed_tree_head(legit, "")  # no anchor -> no trust

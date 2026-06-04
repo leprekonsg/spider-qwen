@@ -27,18 +27,27 @@ from pydantic import BaseModel, Field
 Grade = Literal["high", "moderate", "low", "very_low"]
 
 _TIER_VALUE: dict[int, Grade] = {4: "high", 3: "moderate", 2: "low", 1: "very_low"}
+_GRADE_VALUE: dict[str, int] = {g: t for t, g in _TIER_VALUE.items()}
 
-# Starting tier by source class (T-2.4 classify_source vocabulary).
-_START_TIER: dict[str, int] = {
-    "manufacturer": 4,
-    "distributor": 4,
-    "government": 4,
-    "aggregator": 3,
-    "business": 3,
-    "broker": 2,
-    "unknown": 2,
-    "marketplace": 1,
-}
+
+def _start_tier(source_class: str) -> int:
+    """Starting tier derived from the T-2.4 reliability prior, so a source
+    class added in governance/source_reliability.py gets a tier here without
+    a second table to keep in sync (manufacturer/distributor/government 0.9+
+    -> High; aggregator/business 0.6+ -> Moderate; broker/unknown 0.4+ -> Low;
+    marketplace -> Very Low)."""
+    # Lazy import: governance/__init__ -> modes.contracts -> evidence.models
+    # would cycle at module load (same reason ledger.py imports lazily).
+    from ..governance.source_reliability import DEFAULT_RELIABILITY
+
+    r = DEFAULT_RELIABILITY.get(source_class, DEFAULT_RELIABILITY["unknown"])
+    if r >= 0.9:
+        return 4
+    if r >= 0.6:
+        return 3
+    if r >= 0.4:
+        return 2
+    return 1
 
 # DS interval width above which a claim is "imprecise".
 WIDE_INTERVAL = 0.3
@@ -61,7 +70,7 @@ def grade_claim(
     corroborating_spans: int = 1,
 ) -> GradeAssessment:
     """Grade one claim from its provenance and verification outcome."""
-    tier = _START_TIER.get(source_class, 2)
+    tier = _start_tier(source_class)
     reasons = [f"start: {source_class} source"]
 
     if grounding == "contradicted":
@@ -89,14 +98,17 @@ def grade_claim(
     tier = max(1, min(4, tier))
     return GradeAssessment(
         grade=_TIER_VALUE[tier],
-        start_tier=_TIER_VALUE[_START_TIER.get(source_class, 2)],
+        start_tier=_TIER_VALUE[_start_tier(source_class)],
         reasons=reasons,
     )
 
 
 def worst_grade(grades: list[str]) -> Grade:
-    """Candidate-level grade: the weakest of its claims' grades."""
-    order = {"high": 4, "moderate": 3, "low": 2, "very_low": 1}
+    """Candidate-level grade: the weakest of its claims' grades.
+
+    Fail closed: an unrecognized grade string scores as very_low.
+    """
     if not grades:
         return "very_low"
-    return min(grades, key=lambda g: order.get(g, 1))  # type: ignore[return-value]
+    known = [g if g in _GRADE_VALUE else "very_low" for g in grades]
+    return min(known, key=_GRADE_VALUE.__getitem__)  # type: ignore[return-value]

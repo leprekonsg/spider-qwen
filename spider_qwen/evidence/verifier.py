@@ -185,10 +185,25 @@ class VerificationSpine:
 
     def _source_class_for(self, ref) -> str:
         """T-2.4 source tier of the cited evidence row (lazy import: cycle)."""
-        from ..governance.source_reliability import classify_source, host_of
+        from ..governance.source_reliability import (
+            DEFAULT_RELIABILITY, classify_source, host_of,
+        )
 
         item = self.ledger.get(getattr(ref, "ledger_id", "")) if ref is not None else None
         if item is None:
+            return "unknown"
+        if item.source_tool == "semantic_memory":
+            # A recalled fact's provenance is the ORIGINAL evidence it was
+            # promoted from (metadata.source_evidence_refs), not the synthetic
+            # recall row -- grading the recall row would erase a manufacturer
+            # pedigree down to "unknown". Classification is URL-only here (the
+            # original page text lives in a previous run's ledger); take the
+            # most reliable class among the original sources.
+            sources = item.metadata.get("source_evidence_refs") or []
+            classes = [classify_source(host_of(s.get("url", "")))
+                       for s in sources if isinstance(s, dict) and s.get("url")]
+            if classes:
+                return max(classes, key=lambda c: DEFAULT_RELIABILITY.get(c, 0.0))
             return "unknown"
         # Extraction claim rows carry no page text; classify their source page.
         parent = self.ledger.get(item.metadata.get("parent_ledger_id") or "")
@@ -206,9 +221,18 @@ class VerificationSpine:
         return isinstance(meta.get("start_char"), int) and isinstance(meta.get("end_char"), int)
 
     def _corroborations(self, claim: AtomicClaim, subject: str, cited_premise: str) -> int:
-        """1 (the cited span) + other ledger spans that also support the claim."""
+        """1 (the cited span) + other ledger spans that also support the claim.
+
+        Stops at CORROBORATION_UPGRADE: the count only feeds the GRADE +1
+        threshold, so checking the remaining corpus (one entailment call per
+        page) would be cost without signal.
+        """
+        from ..verification.grade import CORROBORATION_UPGRADE
+
         count = 1
         for span in self._corpus(exclude=cited_premise):
+            if count >= CORROBORATION_UPGRADE:
+                break
             check = self.minicheck.check(
                 claim=claim.predicate, value=claim.object_value, evidence_span=span,
                 field=claim.field, subject=subject,

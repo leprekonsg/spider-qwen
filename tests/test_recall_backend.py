@@ -48,8 +48,10 @@ def test_falls_back_to_lexical_when_sqlite_vec_unavailable(tmp_path):
     assert backend.recall("Example Cleaning quotation", top_k=1)
 
 
-def test_falls_back_when_vector_backend_construction_raises(tmp_path, monkeypatch):
-    # Force "available", but make the vector backend blow up -> must fall back.
+def test_falls_back_when_vector_backend_construction_raises(tmp_path, monkeypatch, caplog):
+    # Force "available", but make the vector backend blow up -> must fall back
+    # AND say so: which backend serves recall changes ranking behavior, so a
+    # silent fallback is a silent failure.
     monkeypatch.setattr(recall_mod, "sqlite_vec_available", lambda: True)
 
     class _Boom:
@@ -57,6 +59,35 @@ def test_falls_back_when_vector_backend_construction_raises(tmp_path, monkeypatc
             raise RuntimeError("extension load failed")
 
     monkeypatch.setattr(recall_mod, "VectorRecallBackend", _Boom)
-    backend = build_recall_backend(_memory(tmp_path), embedder=lambda t: [1.0, 0.0])
+    with caplog.at_level("WARNING", logger="spider_qwen.memory.recall"):
+        backend = build_recall_backend(_memory(tmp_path), embedder=lambda t: [1.0, 0.0])
     assert backend.name == "lexical"
+    assert any("falling back to lexical" in r.message for r in caplog.records)
     assert backend.recall("Example Cleaning quotation", top_k=1)
+
+
+def test_vector_backend_applies_citation_multiplier(tmp_path):
+    # Parity with the lexical path: switching backends must not silently drop
+    # the ledger-supervised citation boost. Runs only where sqlite-vec is
+    # installed; the scoring rule itself is what this asserts.
+    import pytest
+
+    pytest.importorskip("sqlite_vec")
+    from spider_qwen.memory.recall import VectorRecallBackend
+
+    mem = _memory(tmp_path)
+    cited = mem.upsert(SemanticFact(
+        entity_type="vendor", entity_name="Example Catering", field="quote_channel",
+        value="rfq@catering.sg", confidence=0.9,
+        evidence_refs=[EvidenceRef(ledger_id="ev_2", url="https://catering.sg",
+                                   snippet_hash="h", retrieved_at=utc_now_iso())],
+    ))
+    for _ in range(3):
+        mem.record_citation(cited.fact_id)
+    # Identical embeddings -> identical distance -> the citation boost alone
+    # must decide the ordering.
+    backend = VectorRecallBackend(mem, lambda text: [1.0, 0.0], dim=2)
+    hits = backend.recall("example quote channel", top_k=5)
+    assert hits and hits[0].fact.fact_id == cited.fact_id
+    others = [h for h in hits if h.fact.fact_id != cited.fact_id]
+    assert others and hits[0].score > others[0].score
