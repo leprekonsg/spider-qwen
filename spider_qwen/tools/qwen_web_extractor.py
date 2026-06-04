@@ -36,7 +36,7 @@ class QwenWebExtractor:
             "QWEN_BASE_URL",
             "https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1",
         )
-        self.model = model or os.getenv("QWEN_WEB_EXTRACTOR_MODEL", "qwen3-max-2026-01-23")
+        self.model = model or os.getenv("QWEN_WEB_EXTRACTOR_MODEL", "qwen3.7-max")
         self._client = None
 
     @property

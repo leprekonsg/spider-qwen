@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from .. import SCHEMA_VERSION
+from ..evidence.belief import UNCERTAINTY_TAU, fuse_disputed_fact
 from ..evidence.models import EvidenceRef
 from ..modes.contracts import PricingStatus
 
@@ -141,6 +142,42 @@ def _risk_signals_from_candidates(candidates: list) -> list[RiskSignal]:
                 entity=c.vendor_name,
                 evidence_refs=list(getattr(c, "evidence_refs", [])),
             ))
+    return signals
+
+
+def disputed_fact_signals(facts, ledger=None, *, tau: float | None = None) -> list[RiskSignal]:
+    """S3 RiskSignals for disputed facts whose fused [Bel, Pl] gap is wide.
+
+    Each disputed fact is fused with Dempster-Shafer (evidence/belief.py); a
+    signal is emitted when the best value's uncertainty (Pl - Bel) reaches
+    ``tau`` (default UNCERTAINTY_TAU) or the fusion fell back to Yager's rule
+    -- the rule only engages above YAGER_CONFLICT_THRESHOLD conflict, which is
+    itself the warning. Signals carry every side's evidence refs.
+    """
+    threshold = UNCERTAINTY_TAU if tau is None else tau
+    signals: list[RiskSignal] = []
+    for fact in facts:
+        if getattr(fact, "status", "") != "disputed":
+            continue
+        intervals = fuse_disputed_fact(fact, ledger)
+        top = intervals[0]
+        if top.uncertainty < threshold and top.rule != "yager":
+            continue
+        competing = ", ".join(i.value for i in intervals[1:]) or "none"
+        refs = list(getattr(fact, "evidence_refs", []) or [])
+        for alt in getattr(fact, "disputed_alternatives", []) or []:
+            refs.extend(getattr(alt, "evidence_refs", []) or [])
+        signals.append(RiskSignal(
+            signal_type="belief_uncertainty",
+            severity="high" if top.rule == "yager" else "medium",
+            description=(
+                f"Disputed {fact.field} for {fact.entity_name}: best value "
+                f"'{top.value}' has [Bel, Pl] = [{top.belief}, {top.plausibility}] "
+                f"(uncertainty {top.uncertainty}, rule {top.rule}); competing: {competing}"
+            ),
+            entity=fact.entity_name,
+            evidence_refs=_dedupe_refs(refs),
+        ))
     return signals
 
 

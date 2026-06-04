@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .. import SCHEMA_VERSION
+from ..evidence.belief import BeliefInterval
 from ..evidence.models import EvidenceRef
 from ..modes.contracts import QuoteChannel
 
@@ -37,3 +38,8 @@ class RFQDraft(BaseModel):
     assumptions_and_limits: list[str] = Field(default_factory=list)
     vendor: RFQVendor
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    # Trust surface: the GRADE tier the verification spine assigned to this
+    # candidate's claims (None when verification is off) and the DS [Bel, Pl]
+    # interval fused over the quote channel's sources (None without a channel).
+    evidence_grade: str | None = None
+    belief_interval: BeliefInterval | None = None

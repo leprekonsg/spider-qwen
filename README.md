@@ -206,10 +206,12 @@ Selected via env or injection; both abstracted behind protocols.
 |---|---|---|
 | `SPIDER_QWEN_SEARCH_PROVIDER` | `tinyfish` · `qwen_mcp` · `mock` | `tinyfish` |
 | `SPIDER_QWEN_FETCH_PROVIDER` | `tinyfish` · `qwen_web_extractor` · `mock` | `tinyfish` |
-| `QWEN_ROUTER_MODEL` | verified DashScope model id | `qwen3-max-2026-01-23` |
+| `QWEN_ROUTER_MODEL` | verified DashScope model id | `qwen3.7-max` |
 | `QWEN_JSON_EXTRACTOR_MODEL` | verified DashScope model id | `qwen-flash` |
 | `QWEN_STRUCTURED_EXTRACTION_ENABLED` | `0` · `1` | `0` |
 | `QWEN_ROUTER_FALLBACK_ENABLED` | `0` · `1` | `0` |
+| `QWEN_NLI_ENABLED` | `0` · `1` | `0` |
+| `QWEN_NLI_MODEL` | verified DashScope model id | `qwen-flash` |
 
 Qwen-assisted paths are optional and mocked in offline mode. Regex extractors
 remain the deterministic default. Qwen JSON extraction runs over already-fetched
