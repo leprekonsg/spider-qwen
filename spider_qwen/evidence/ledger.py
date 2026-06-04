@@ -67,6 +67,10 @@ class EvidenceLedger:
         # unchanged ledger must keep the original commitment (timestamp), not
         # silently replace it with a recomputed one.
         self._loaded_tree_head: dict[str, Any] | None = None
+        # Its Ed25519 signature, when one was persisted. Proof bundles attach
+        # this so external verifiers check against the PUBLISHED signed head,
+        # never a freshly recomputed (or freshly signed) one.
+        self._loaded_signed_tree_head: dict[str, Any] | None = None
 
     def record(
         self,
@@ -227,10 +231,54 @@ class EvidenceLedger:
                 payload["tree_head"] = head.model_dump()
                 self._loaded_tree_head = payload["tree_head"]
             signed = _signed_tree_head_from_env(payload["tree_head"])
+            if signed is None and self._loaded_signed_tree_head is not None \
+                    and self._loaded_signed_tree_head.get("head") == payload["tree_head"]:
+                # Key no longer in the env but the head is unchanged: keep the
+                # still-valid published signature instead of silently dropping it.
+                signed = self._loaded_signed_tree_head
             if signed is not None:
                 payload["signed_tree_head"] = signed
+            self._loaded_signed_tree_head = signed
         target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return target
+
+    def published_tree_head(self) -> dict[str, Any] | None:
+        """The persisted commitment this ledger carries (None before persist)."""
+        return self._loaded_tree_head
+
+    def published_signed_tree_head(self) -> dict[str, Any] | None:
+        """The persisted Ed25519-signed commitment, when one was written."""
+        return self._loaded_signed_tree_head
+
+    def citation_proof_bundles(self, ledger_ids: list[str]) -> list[dict[str, Any]]:
+        """RFC 6962 citation proofs bound to the PUBLISHED commitment.
+
+        Each bundle carries what an external verifier needs (leaf data, leaf
+        index, audit path, tree head) plus ``signed_tree_head`` when the
+        persisted commitment was signed. The proof's tree head IS the persisted
+        one (original timestamp), so the persisted signature stays valid for
+        it -- never a recomputed head, which a fresh ephemeral signature could
+        appear to legitimize.
+        """
+        from .transparency import MerkleLog, TreeHead
+
+        log = MerkleLog.from_ledger(self)
+        head = log.tree_head()
+        signed: dict[str, Any] | None = None
+        published = self._loaded_tree_head
+        if published and published.get("root_hash") == head.root_hash \
+                and published.get("tree_size") == head.tree_size:
+            head = TreeHead.model_validate(published)
+            signed = self._loaded_signed_tree_head
+        bundles: list[dict[str, Any]] = []
+        for ledger_id in ledger_ids:
+            proof = log.citation_proof(self, ledger_id)
+            proof.tree_head = head
+            bundle = proof.model_dump(mode="json")
+            if signed is not None:
+                bundle["signed_tree_head"] = signed
+            bundles.append(bundle)
+        return bundles
 
     @classmethod
     def load(cls, run_id: str, state_dir: str | Path) -> "EvidenceLedger":
@@ -259,6 +307,7 @@ class EvidenceLedger:
                         "verify` or restore the file from backup."
                     )
             ledger._loaded_tree_head = head
+            ledger._loaded_signed_tree_head = payload.get("signed_tree_head")
         return ledger
 
 

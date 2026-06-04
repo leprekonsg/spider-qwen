@@ -303,6 +303,26 @@ def test_ledger_persist_signs_tree_head_when_env_key_is_configured(tmp_path, mon
     assert not verify_signed_tree_head(sth, "00" * 32)
 
 
+def test_repersist_without_env_key_keeps_published_signature(tmp_path, monkeypatch):
+    pytest.importorskip("cryptography")
+    from spider_qwen.evidence.transparency import generate_signing_key
+    import json
+
+    monkeypatch.setenv("SPIDER_QWEN_STH_SIGNING_KEY", generate_signing_key().hex())
+    ledger = EvidenceLedger("run_keep_sig", state_dir=tmp_path)
+    ledger.record(source_tool="mock", url="https://example.com", snippet="s")
+    path = ledger.persist()
+    signed = json.loads(path.read_text(encoding="utf-8"))["signed_tree_head"]
+
+    # Key gone from the env, items unchanged: re-persisting (e.g. a resumed
+    # verify run) must keep the still-valid published signature, not drop it.
+    monkeypatch.delenv("SPIDER_QWEN_STH_SIGNING_KEY")
+    reloaded = EvidenceLedger.load("run_keep_sig", tmp_path)
+    reloaded.persist()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["signed_tree_head"] == signed
+
+
 def test_malformed_sth_signing_key_fails_loud(monkeypatch):
     from spider_qwen.evidence.ledger import sth_signing_key_from_env
 

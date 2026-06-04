@@ -103,6 +103,7 @@ class Controller:
         page_judge: object | None = None,
         verify: bool | None = None,
         minicheck: object | None = None,
+        conformal: object | None = None,
         qwen_router: object | None = None,
         memory_mcp: SemanticMemoryMcpAdapter | None = None,
         state_dir: str | Path | None = None,
@@ -157,6 +158,15 @@ class Controller:
             from ..verification.qwen_nli import QwenNliScorer
 
             self.minicheck = MiniCheck(model=QwenNliScorer(model=self.policy.qwen_nli_model()))
+        # Conformal emission gate over verifier scores. Calibrated (via env
+        # calibration file or injection) -> abstentions block candidates.
+        # Uncalibrated -> never gates; its "guarantee unavailable" rationale is
+        # surfaced in run metrics instead of fabricating a coverage claim.
+        self.conformal = conformal
+        if self.conformal is None and self.verify_claims:
+            from ..verification.conformal import abstainer_from_env
+
+            self.conformal = abstainer_from_env()
         self.memory_mcp = memory_mcp
         if self.memory_mcp is None and self.state_dir is not None:
             # ONE SemanticMemory instance serves recall, promotion, and citation
@@ -954,7 +964,7 @@ class Controller:
         """Verify each candidate's claims; drop those with unsupported critical claims."""
         spine = VerificationSpine(ledger, minicheck=self.minicheck or MiniCheck())
         kept = []
-        verified_claims = unsupported_claims = blocked = 0
+        verified_claims = unsupported_claims = blocked = abstained = 0
         # GSAR decision + GRADE per kept candidate: computing these and then
         # dropping them would make the trust signals invisible end to end.
         assessments: dict[str, dict[str, str]] = {}
@@ -969,6 +979,20 @@ class Controller:
                                   input_count=len(cv.claims), output_count=0,
                                   detail=cv.model_dump(mode="json"))
                 continue
+            # Conformal emission gate: a CALIBRATED abstention blocks the
+            # candidate (its verifier score falls below the split-conformal
+            # threshold). Uncalibrated decisions never gate -- no guarantee
+            # exists -- and the rationale surfaces in metrics below.
+            if self.conformal is not None:
+                decision = self.conformal.decide(cv.verifier_score)
+                if decision.calibrated and decision.abstain:
+                    abstained += 1
+                    if tracer is not None:
+                        tracer.record(step="conformal_gate", tool="conformal_abstainer",
+                                      status="blocked", input_count=len(cv.claims), output_count=0,
+                                      detail={"vendor": cv.vendor_name,
+                                              **decision.model_dump(mode="json")})
+                    continue
             assessments[cv.vendor_name] = {"decision": cv.decision, "grade": cv.grade}
             if tracer is not None:
                 tracer.record(step="verify_claims", tool="minicheck_verifier", status="success",
@@ -979,6 +1003,15 @@ class Controller:
         metrics = {"claims_verified": verified_claims, "claims_unsupported": unsupported_claims,
                    "candidates_blocked_unverified": blocked,
                    "verification_assessments": assessments}
+        if self.conformal is not None:
+            metrics["conformal"] = {
+                "calibrated": self.conformal.threshold is not None,
+                "threshold": self.conformal.threshold,
+                "alpha": self.conformal.alpha,
+                "candidates_abstained": abstained,
+                "rationale": "; ".join(self.conformal.reasons)
+                or f"calibrated on {self.conformal.calibration_size} examples",
+            }
         return kept, metrics
 
     # --- validation / stop ------------------------------------------------
@@ -1162,6 +1195,18 @@ class Controller:
         if self.persist:
             self._persist_semantic(validated, result.run_id, review_store)
             ctx.ledger.persist()
+            # Judge-verifiable citations: every final evidence ref ships its
+            # inclusion proof against the commitment that persist() just
+            # published (+ its signature when STH signing is configured).
+            # Refs into OTHER runs' ledgers (recalled memory provenance) are
+            # provable via `evidence prove <that run>`, not this run's log.
+            seen: set[str] = set()
+            ids = []
+            for ref in result.evidence_refs:
+                if ref.ledger_id not in seen and ctx.ledger.get(ref.ledger_id) is not None:
+                    seen.add(ref.ledger_id)
+                    ids.append(ref.ledger_id)
+            result.citation_proofs = ctx.ledger.citation_proof_bundles(ids)
             self._persist_supplier_graph(ctx.ledger)
             ctx.tracer.persist() if ctx.tracer else None
             audit.persist()

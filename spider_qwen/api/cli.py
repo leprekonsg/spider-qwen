@@ -75,8 +75,12 @@ def _cmd_classify(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     try:
-        # Fail a malformed STH signing key now, not at end-of-run persist.
+        # Fail a malformed STH signing key or conformal calibration file now,
+        # not at end-of-run persist / mid-run gating.
         sth_signing_key_from_env()
+        from ..verification.conformal import abstainer_from_env
+
+        abstainer_from_env()
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -136,13 +140,20 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
 def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None) -> int:
     """RFC 6962 citation proof for one ledger row, plus a tamper demonstration.
 
-    Emits the inclusion proof an external party can verify without the ledger,
-    verifies it, then flips one hex digit of the leaf and shows the same proof
-    fail -- the transparency log made visible. With the crypto extra installed
-    the tree head is also Ed25519-signed and checked against the right and a
-    wrong trust anchor.
+    The proof is bound to the run's PERSISTED tree-head commitment, including
+    its persisted Ed25519 signature when STH signing was configured at run
+    time -- never a freshly recomputed or freshly signed head, which would not
+    prove anything about what was published. Then one hex digit of the leaf is
+    flipped to show the same proof fail.
     """
-    from ..evidence.transparency import MerkleLog, verify_citation
+    from ..evidence.transparency import CitationProof, verify_citation
+
+    try:
+        # Fail a malformed signing key before emitting a half-verified proof.
+        sth_signing_key_from_env()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     items = ledger.items()
     target = items[0] if ledger_id is None else next(
@@ -153,46 +164,71 @@ def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None) -> int:
               f"Use 'spider-qwen evidence show {ledger.run_id}' to list rows.", file=sys.stderr)
         return 2
 
-    log = MerkleLog.from_ledger(ledger)
-    proof = log.citation_proof(ledger, target.ledger_id)
+    bundle = ledger.citation_proof_bundles([target.ledger_id])[0]
+    sth_dict = bundle.pop("signed_tree_head", None)
+    proof = CitationProof.model_validate(bundle)
     ok = verify_citation(proof)
 
     # Tamper beat: one flipped hex digit in the committed leaf must break the proof.
     flipped = ("0" if proof.leaf_data[0] != "0" else "1") + proof.leaf_data[1:]
     tampered_ok = verify_citation(proof.model_copy(update={"leaf_data": flipped}))
 
+    sth_report = _signed_tree_head_report(sth_dict)
     out: dict = {
         "run_id": ledger.run_id,
         "ledger_id": target.ledger_id,
         "url": target.url,
-        "citation_proof": proof.model_dump(mode="json"),
+        "citation_proof": bundle,
         "proof_verified": ok,
+        "tree_head_published": ledger.published_tree_head() is not None,
         "tamper_demo": {
             "description": "same proof with one hex digit of the leaf flipped",
             "proof_verified": tampered_ok,
         },
+        "signed_tree_head": sth_report,
     }
-    try:
-        from ..evidence.transparency import (
-            generate_signing_key,
-            sign_tree_head,
-            verify_signed_tree_head,
-        )
-
-        # Demo keypair (ephemeral). In production the verifier pins the public
-        # key out of band; verifying against the STH's embedded key would let
-        # an attacker re-sign a rewritten ledger and self-validate.
-        sth = sign_tree_head(proof.tree_head, generate_signing_key())
-        out["signed_tree_head"] = {
-            "sth": sth.model_dump(mode="json"),
-            "verified_against_trust_anchor": verify_signed_tree_head(sth, sth.public_key),
-            "verified_against_attacker_key": verify_signed_tree_head(sth, "00" * 32),
-        }
-    except ImportError as exc:
-        out["signed_tree_head"] = {"unavailable": str(exc)}
-
     print(json.dumps(out, indent=2))
-    return 0 if ok and not tampered_ok else 1
+    sth_ok = sth_report.get("verified_against_trust_anchor", True) is not False
+    return 0 if ok and not tampered_ok and sth_ok else 1
+
+
+def _signed_tree_head_report(sth_dict: dict | None) -> dict:
+    """Report the persisted STH, verified against the operator's trust anchor.
+
+    The anchor is the public key derived from SPIDER_QWEN_STH_SIGNING_KEY (the
+    operator holds the signing key, so they hold the anchor). External
+    verifiers must pin the log's public key out of band; the key embedded in
+    the STH is informational only.
+    """
+    if sth_dict is None:
+        return {
+            "unavailable": "no signed tree head was persisted for this run. Set "
+            "SPIDER_QWEN_STH_SIGNING_KEY (with the crypto extra installed) "
+            "before the run to sign its commitment."
+        }
+    report: dict = {"sth": sth_dict}
+    try:
+        from ..evidence.transparency import SignedTreeHead, verify_signed_tree_head
+
+        sth = SignedTreeHead.model_validate(sth_dict)
+        key = sth_signing_key_from_env()
+        if key is None:
+            report["trust_anchor"] = (
+                "not configured: set SPIDER_QWEN_STH_SIGNING_KEY to verify as the "
+                "operator; external verifiers must pin the log's public key out of band."
+            )
+        else:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+            anchor = Ed25519PrivateKey.from_private_bytes(key).public_key().public_bytes(
+                encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw,
+            ).hex()
+            report["verified_against_trust_anchor"] = verify_signed_tree_head(sth, anchor)
+        report["verified_against_attacker_key"] = verify_signed_tree_head(sth, "00" * 32)
+    except ImportError as exc:
+        report["verification_unavailable"] = str(exc)
+    return report
 
 
 def _cmd_memory(args: argparse.Namespace) -> int:

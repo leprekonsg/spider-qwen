@@ -32,5 +32,9 @@ class RunResult(BaseModel):
     pricing_status_summary: dict[str, int] = Field(default_factory=dict)
     rfq_drafts: list[dict[str, Any]] = Field(default_factory=list)
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    # RFC 6962 inclusion proofs for the final citations, bound to the run's
+    # persisted tree-head commitment (+ signed_tree_head when STH signing is
+    # configured). Empty when the run does not persist (no commitment exists).
+    citation_proofs: list[dict[str, Any]] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
     budget: dict[str, Any] = Field(default_factory=dict)

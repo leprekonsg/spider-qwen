@@ -7,7 +7,10 @@ states the missing prerequisite instead of fabricating a coverage claim.
 
 from __future__ import annotations
 
+import json
 import math
+import os
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -104,6 +107,35 @@ class ConformalAbstainer(BaseModel):
                 f"{'below' if abstain else 'meets'} calibrated threshold {self.threshold:.3f}"
             ),
         )
+
+
+def abstainer_from_env() -> ConformalAbstainer:
+    """Build the run's abstainer from SPIDER_QWEN_CONFORMAL_CALIBRATION.
+
+    The env var names a JSON file of hand-graded examples:
+    ``{"alpha": 0.1, "examples": [{"verifier_score": 0.9, "prediction_correct": true}, ...]}``.
+    Unset: an uncalibrated abstainer whose decisions state that no guarantee is
+    available (it never gates). A malformed file raises ValueError naming the
+    file and the expected shape -- misconfiguration must not silently degrade
+    to "no guarantee".
+    """
+    path = os.getenv("SPIDER_QWEN_CONFORMAL_CALIBRATION", "").strip()
+    if not path:
+        return ConformalAbstainer(reasons=[
+            "no calibration set configured (set SPIDER_QWEN_CONFORMAL_CALIBRATION "
+            "to a JSON file of hand-graded examples); conformal guarantee unavailable"
+        ])
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        examples = [CalibrationExample.model_validate(e) for e in payload["examples"]]
+        alpha = float(payload.get("alpha", 0.1))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(
+            f"SPIDER_QWEN_CONFORMAL_CALIBRATION={path!r} could not be loaded: {exc}. "
+            'Expected a JSON file like {"alpha": 0.1, "examples": '
+            '[{"verifier_score": 0.9, "prediction_correct": true}, ...]}'
+        ) from exc
+    return ConformalAbstainer.fit(examples, alpha=alpha)
 
 
 def _clamp(value: float) -> float:

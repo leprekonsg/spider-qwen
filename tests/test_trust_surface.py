@@ -314,22 +314,59 @@ def _persisted_run(tmp_path) -> EvidenceLedger:
     return ledger
 
 
-def test_evidence_prove_emits_verifiable_proof_and_tamper_failure(tmp_path, monkeypatch, capsys):
+def test_evidence_prove_binds_proof_to_persisted_commitment(tmp_path, monkeypatch, capsys):
     from spider_qwen.api.cli import main
 
-    _persisted_run(tmp_path)
+    ledger = _persisted_run(tmp_path)
+    monkeypatch.delenv("SPIDER_QWEN_STH_SIGNING_KEY", raising=False)
     monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
     assert main(["evidence", "prove", "run_prove"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["proof_verified"] is True
     assert out["tamper_demo"]["proof_verified"] is False
-    assert out["citation_proof"]["tree_head"]["tree_size"] == 3
+    assert out["tree_head_published"] is True
+    # The proof's head IS the persisted commitment (same timestamp), not a
+    # recomputed one -- otherwise a persisted signature could never cover it.
+    persisted = json.loads(ledger.path().read_text(encoding="utf-8"))
+    assert out["citation_proof"]["tree_head"] == persisted["tree_head"]
+    # No key at run time -> no persisted STH; absence is stated, never silent.
+    assert "unavailable" in out["signed_tree_head"]
+
+
+def test_evidence_prove_verifies_persisted_sth_against_operator_anchor(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("cryptography")
+    from spider_qwen.api.cli import main
+    from spider_qwen.evidence.transparency import generate_signing_key
+
+    monkeypatch.setenv("SPIDER_QWEN_STH_SIGNING_KEY", generate_signing_key().hex())
+    _persisted_run(tmp_path)  # persists WITH a signed tree head
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    assert main(["evidence", "prove", "run_prove"]) == 0
+    out = json.loads(capsys.readouterr().out)
     sth = out["signed_tree_head"]
-    if "sth" in sth:  # crypto extra installed
-        assert sth["verified_against_trust_anchor"] is True
-        assert sth["verified_against_attacker_key"] is False
-    else:
-        assert "unavailable" in sth  # absence is stated, never silent
+    # The PERSISTED signature is emitted and verified against the trust anchor
+    # derived from the operator's signing key -- not an ephemeral demo key.
+    assert sth["sth"]["head"] == out["citation_proof"]["tree_head"]
+    assert sth["verified_against_trust_anchor"] is True
+    assert sth["verified_against_attacker_key"] is False
+
+
+def test_run_result_ships_citation_proofs_bound_to_persisted_head(tmp_path):
+    import asyncio
+
+    from spider_qwen.agent.controller import Controller
+    from spider_qwen.evidence.transparency import CitationProof, verify_citation
+
+    controller = Controller(offline=True, state_dir=tmp_path)
+    result = asyncio.run(controller.run("office cleaning services Singapore", mode="auto"))
+    assert result.evidence_refs
+    assert result.citation_proofs  # every final citation ships a proof bundle
+    ledger_path = tmp_path / "evidence" / f"{result.run_id}.ledger.json"
+    persisted = json.loads(ledger_path.read_text(encoding="utf-8"))
+    for bundle in result.citation_proofs:
+        proof = CitationProof.model_validate(bundle)
+        assert verify_citation(proof)  # externally verifiable, no ledger access
+        assert bundle["tree_head"] == persisted["tree_head"]
 
 
 def test_evidence_prove_unknown_ledger_id_is_actionable(tmp_path, monkeypatch, capsys):

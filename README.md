@@ -216,6 +216,7 @@ Selected via env or injection; both abstracted behind protocols.
 | `SPIDER_QWEN_VERIFICATION_ENABLED` | `0` · `1` | `0` |
 | `QWEN_NLI_ENABLED` | `0` · `1` | `0` |
 | `QWEN_NLI_MODEL` | verified DashScope model id | `qwen-flash` |
+| `SPIDER_QWEN_CONFORMAL_CALIBRATION` | path to hand-graded calibration JSON | unset (gate never blocks; metrics state no guarantee) |
 
 Qwen-assisted paths are optional and mocked in offline mode. Regex extractors
 remain the deterministic default. Qwen JSON extraction runs over already-fetched
