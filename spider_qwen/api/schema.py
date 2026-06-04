@@ -24,6 +24,11 @@ class RunResult(BaseModel):
     stop_reason: str
     classification: Classification
     validated_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    # T-1.1: four-slot serendipity view (primary_answer + s1/s2/s3 + score).
+    serendipity: dict[str, Any] | None = None
+    # T-8.2: opt-in (--serendipity) discovery sidecar -- S1/S2/S3 populated from
+    # real components (graph/Wayback/signals/DMSMS). None unless requested.
+    serendipity_discovery: dict[str, Any] | None = None
     pricing_status_summary: dict[str, int] = Field(default_factory=dict)
     rfq_drafts: list[dict[str, Any]] = Field(default_factory=list)
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)

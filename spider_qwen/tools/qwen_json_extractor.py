@@ -73,6 +73,7 @@ class QwenJsonExtractor:
         base_url: str | None = None,
         model: str | None = None,
         client: Any | None = None,
+        max_retries: int = 2,
     ) -> None:
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "")
         self.base_url = base_url or os.getenv(
@@ -81,6 +82,16 @@ class QwenJsonExtractor:
         )
         self.model = model or os.getenv("QWEN_JSON_EXTRACTOR_MODEL", "qwen-flash")
         self._client = client
+        self.max_retries = max(0, int(max_retries))
+        # Retry telemetry: T-2.1 acceptance is "malformed retry rate drops to ~0".
+        self.calls = 0  # extract() invocations that reached the model
+        self.retries = 0  # re-prompts triggered by malformed/non-conforming output
+        self.malformed_final = 0  # extractions still invalid after all retries
+        self.last_attempts = 0  # model calls used by the most recent extract()
+
+    def retry_rate(self) -> float:
+        """Fraction of model-reaching extractions still malformed after retries."""
+        return round(self.malformed_final / self.calls, 4) if self.calls else 0.0
 
     @property
     def is_available(self) -> bool:
@@ -103,6 +114,8 @@ class QwenJsonExtractor:
     def extract(self, *, text: str, page_url: str, query: str) -> QwenPageExtraction:
         if not text:
             return QwenPageExtraction()
+        self.calls += 1
+        self.last_attempts = 0
         client = self._ensure_client()
         skill_prompt = load_skill_prompt("procurement-quote-channel")
         schema_json = json.dumps(QwenPageExtraction.model_json_schema())
@@ -131,21 +144,47 @@ class QwenJsonExtractor:
                 ),
             },
         ]
-        try:
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                response_format={"type": "json_object"},
-                extra_body={"enable_thinking": False},
-            )
-        except Exception as exc:  # pragma: no cover - network path
-            raise QwenJsonExtractorError(f"Qwen JSON extraction failed for {page_url}: {exc}") from exc
+        # Schema-constrained extraction: on non-conforming output, re-prompt with
+        # the validation error so the malformed retry rate drops to ~0 (T-2.1).
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            self.last_attempts += 1
+            try:
+                response = client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    extra_body={"enable_thinking": False},
+                )
+            except Exception as exc:  # pragma: no cover - network path
+                # Transport failure is not a schema problem; do not retry-loop here.
+                raise QwenJsonExtractorError(f"Qwen JSON extraction failed for {page_url}: {exc}") from exc
 
-        raw = _completion_content(response)
-        try:
-            return QwenPageExtraction.model_validate_json(raw)
-        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-            raise QwenJsonExtractorError(f"Qwen JSON extraction returned invalid schema: {exc}") from exc
+            raw = _completion_content(response)
+            try:
+                return QwenPageExtraction.model_validate_json(raw)
+            except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+                last_exc = exc
+                if attempt < self.max_retries:
+                    self.retries += 1
+                    messages = messages + [
+                        {"role": "assistant", "content": raw[:2000]},
+                        {
+                            "role": "user",
+                            "content": (
+                                "That response was not valid JSON for the schema. "
+                                f"Error: {exc}. Return ONLY a single valid JSON object that "
+                                "conforms to the schema above. No prose, no code fences."
+                            ),
+                        },
+                    ]
+                    continue
+
+        self.malformed_final += 1
+        raise QwenJsonExtractorError(
+            f"Qwen JSON extraction returned invalid schema after {self.last_attempts} "
+            f"attempts for {page_url}: {last_exc}"
+        )
 
 
 class MockQwenJsonExtractor:

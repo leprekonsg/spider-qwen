@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from .fetch_service import _looks_like_obsolete_part_topic
 from .provider_types import SearchResult, SearchResultSet
 from .tinyfish_client import TinyFishClient, from_env as tinyfish_from_env
 
@@ -26,6 +27,7 @@ class SearchProviderError(Exception):
 class TinyFishSearchProvider:
     provider_name = "tinyfish"
     search_source_tool = "tinyfish_search"
+    rate_limited = True  # consumes the live TinyFish free-tier search quota
 
     def __init__(self, client: TinyFishClient | None = None) -> None:
         self.client = client or tinyfish_from_env()
@@ -68,6 +70,7 @@ class QwenMcpSearchProvider:
 
     provider_name = "qwen_mcp"
     search_source_tool = "mcp_search"
+    rate_limited = True  # consumes the live Qwen MCP / Model Studio quota
 
     def __init__(
         self,
@@ -86,11 +89,25 @@ class QwenMcpSearchProvider:
         return await self.backend(query, location, language, limit)
 
 
+def _mock_slug(query: str) -> str:
+    """URL slug for a synthesized mock page: the full slugified query, NOT truncated.
+
+    The fetch-side mock re-derives the page topic from this URL path, so dropping
+    characters here (an MPN, or an obsolescence/product keyword past some cutoff)
+    would silently flip the obsolete-part / product topic detection and empty the
+    S1/S3 discovery slots for any query whose key tokens fall past the cutoff.
+    Keeping the whole query is the simplest way to keep the search-side and
+    fetch-side topic classification consistent.
+    """
+    return "".join(c if c.isalnum() else "-" for c in query.lower()).strip("-")
+
+
 class MockSearchProvider:
     """Deterministic offline provider. Returns fixtures by query, else synthesizes."""
 
     provider_name = "mock"
     search_source_tool = "mock"
+    rate_limited = False  # offline fixtures hit no external quota; never throttle
 
     def __init__(self, fixtures: dict[str, list[dict]] | None = None) -> None:
         self.fixtures = fixtures or {}
@@ -100,15 +117,31 @@ class MockSearchProvider:
     ) -> SearchResultSet:
         raw = self.fixtures.get(query)
         if raw is None:
-            slug = "".join(c if c.isalnum() else "-" for c in query.lower()).strip("-")[:40]
-            raw = [
-                {
-                    "url": f"https://example-vendor-{i}.sg/{slug}",
-                    "title": f"Vendor {i} - {query}",
-                    "snippet": f"Provider {i} for {query}. Request a quotation via our contact page.",
-                }
-                for i in range(1, min(limit, 5) + 1)
-            ]
+            slug = _mock_slug(query)
+            if _looks_like_obsolete_part_topic(query):
+                # T-8.2: seed an obsolete-part run with a datasheet page (cross-refs +
+                # lifecycle) and a broker page, so the --serendipity sidecar has real
+                # S1 (graph) and S2 (long-tail/broker) material offline.
+                raw = [
+                    {"url": f"https://datasheet-archive.example/{slug}",
+                     "title": f"Datasheet & cross-reference - {query}",
+                     "snippet": f"Obsolete-part cross-reference and lifecycle data for {query}."},
+                    {"url": f"https://rochester-electronics.example/{slug}",
+                     "title": f"Broker stock - {query}",
+                     "snippet": f"Long-tail / last-time-buy broker stock for {query}."},
+                    {"url": f"https://example-vendor-1.sg/{slug}",
+                     "title": f"Vendor 1 - {query}",
+                     "snippet": f"Provider 1 for {query}. Request a quotation via our contact page."},
+                ]
+            else:
+                raw = [
+                    {
+                        "url": f"https://example-vendor-{i}.sg/{slug}",
+                        "title": f"Vendor {i} - {query}",
+                        "snippet": f"Provider {i} for {query}. Request a quotation via our contact page.",
+                    }
+                    for i in range(1, min(limit, 5) + 1)
+                ]
         results = [
             SearchResult(
                 url=item["url"],

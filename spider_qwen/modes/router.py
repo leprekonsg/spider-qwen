@@ -20,6 +20,10 @@ class RoutePlan:
     produces_rfq: bool = False
     # Candidate fields that must be evidence-backed to count toward completeness.
     required_evidence_fields: tuple[str, ...] = field(default_factory=tuple)
+    # T-3.3: modes that invoke GRAM-lite Serendipity Mode (width-first discovery).
+    # Substitute discovery rides the product serendipity slots; revalidation
+    # re-derives known facts -- both benefit from width-first trajectories.
+    serendipity_mode: bool = False
 
 
 _ROUTES: dict[ProcurementMode, RoutePlan] = {
@@ -30,6 +34,7 @@ _ROUTES: dict[ProcurementMode, RoutePlan] = {
         ranker="product",
         produces_rfq=False,
         required_evidence_fields=("vendor_name", "pricing_status", "product_url"),
+        serendipity_mode=True,  # product substitute discovery
     ),
     ProcurementMode.SERVICE_QUOTE_REQUIRED: RoutePlan(
         mode=ProcurementMode.SERVICE_QUOTE_REQUIRED,
@@ -47,6 +52,17 @@ _ROUTES: dict[ProcurementMode, RoutePlan] = {
         produces_rfq=False,
         required_evidence_fields=("vendor_name", "contact"),
     ),
+    # T-R.4: electronics substitution rides the product extraction/ranking path
+    # (reuses the product budget) but produces a substitute shortlist, not a price.
+    ProcurementMode.ELECTRONICS_SUBSTITUTION: RoutePlan(
+        mode=ProcurementMode.ELECTRONICS_SUBSTITUTION,
+        budget_key="product_exact_price",
+        extractors=("vendor_metadata", "pricing", "contact"),
+        ranker="product",
+        produces_rfq=False,
+        required_evidence_fields=("vendor_name", "product_url"),
+        serendipity_mode=True,  # substitute discovery is width-first
+    ),
     # Revalidation reuses the contact/quote extraction path against a known target.
     ProcurementMode.REVALIDATION: RoutePlan(
         mode=ProcurementMode.REVALIDATION,
@@ -55,6 +71,7 @@ _ROUTES: dict[ProcurementMode, RoutePlan] = {
         ranker="contact",
         produces_rfq=False,
         required_evidence_fields=("vendor_name",),
+        serendipity_mode=True,  # revalidation re-derives known facts width-first
     ),
 }
 

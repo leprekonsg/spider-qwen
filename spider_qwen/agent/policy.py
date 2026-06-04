@@ -15,13 +15,101 @@ import yaml
 
 from .budget import Budget
 from ..modes.contracts import ProcurementMode
+from ..observability.metrics import RouteDecision
 
 _DEFAULT_PATH = Path(__file__).resolve().parent.parent / "governance" / "policy_config.yaml"
+
+# Env override per model role: SPIDER_QWEN_MODEL_<ROLE>.
+_MODEL_ENV = {
+    "planner": "SPIDER_QWEN_MODEL_PLANNER",
+    "extraction": "SPIDER_QWEN_MODEL_EXTRACTION",
+    "extraction_fallback": "SPIDER_QWEN_MODEL_EXTRACTION_FALLBACK",
+    "embeddings": "SPIDER_QWEN_MODEL_EMBEDDINGS",
+    "ocr": "SPIDER_QWEN_MODEL_OCR",
+}
+
+# T-7.3 cost router. Cheap, high-volume steps -> flash; planning/reasoning ->
+# max. The high_risk_procurement tag escalates any step to max.
+_TASK_TIER = {
+    "classification": "flash",
+    "extraction": "flash",
+    "extraction_fallback": "flash",
+    "judge": "flash",
+    "reflection": "flash",
+    "query_expansion": "flash",
+    "decision": "flash",
+    "planning": "max",
+    "reasoning": "max",
+}
+_TIER_ROLE = {"flash": "extraction", "max": "planner"}
+
+# Illustrative USD per 1K tokens; override per model via policy_config.yaml
+# `pricing:`. Flash is far cheaper than max, which is what makes the router pay.
+DEFAULT_MODEL_PRICING = {
+    "qwen3.7-max": {"input": 0.0024, "output": 0.0096},
+    "qwen3.5-flash": {"input": 0.0003, "output": 0.0006},
+    "qwen-flash": {"input": 0.0002, "output": 0.0004},
+    "text-embedding-v4": {"input": 0.00007, "output": 0.0},
+    "qwen-vl-ocr-2025-11-20": {"input": 0.0010, "output": 0.0010},
+}
 
 
 class Policy:
     def __init__(self, data: dict[str, Any]) -> None:
         self.data = data
+
+    # --- model roles ------------------------------------------------------
+    @property
+    def models(self) -> dict[str, str]:
+        return dict(self.data.get("models", {}))
+
+    def model_for(self, role: str) -> str:
+        """Resolve the Qwen model string for a role (planner|extraction|...).
+
+        Precedence: env SPIDER_QWEN_MODEL_<ROLE> > models.<role> in config.
+        Raises KeyError with an actionable message when the role is unconfigured.
+        """
+        env = _MODEL_ENV.get(role)
+        if env:
+            override = os.getenv(env)
+            if override:
+                return override
+        models = self.data.get("models", {})
+        value = models.get(role)
+        if value:
+            return str(value)
+        hint = f" or set {env}" if env else ""
+        raise KeyError(
+            f"No Qwen model configured for role '{role}'. "
+            f"Add 'models.{role}: <model>' to policy_config.yaml{hint}."
+        )
+
+    # --- cost router (T-7.3) ----------------------------------------------
+    def route_task(self, task: str, *, high_risk: bool = False) -> RouteDecision:
+        """Pick the model tier for a logical step.
+
+        extraction/classification/judge -> flash; planning/reasoning -> max; an
+        unknown step defaults to flash. The high_risk_procurement tag escalates
+        any step to max.
+        """
+        base = _TASK_TIER.get(task, "flash")
+        tier = "max" if (high_risk or base == "max") else "flash"
+        role = _TIER_ROLE[tier]
+        try:
+            model = self.model_for(role)
+        except KeyError:
+            model = ""  # routing decision still stands when no model is configured
+        return RouteDecision(
+            task=task, tier=tier, role=role, model=model,
+            escalated=high_risk and base != "max",
+        )
+
+    def model_pricing(self) -> dict[str, dict[str, float]]:
+        """Per-model {input, output} USD/1K-token table; yaml overrides defaults."""
+        merged = {k: dict(v) for k, v in DEFAULT_MODEL_PRICING.items()}
+        for model, price in (self.data.get("pricing", {}) or {}).items():
+            merged[str(model)] = {**merged.get(str(model), {}), **{k: float(v) for k, v in (price or {}).items()}}
+        return merged
 
     @property
     def schema_version(self) -> str:
@@ -70,16 +158,41 @@ class Policy:
         return bool(self.data.get("privacy", {}).get("review_gate_enabled", {}).get(privacy_class, False))
 
     def qwen_router_model(self) -> str:
-        return os.getenv("QWEN_ROUTER_MODEL") or str(self.data.get("qwen", {}).get("router_model", "qwen3-max-2026-01-23"))
+        # env > legacy qwen.router_model > canonical models.planner.
+        return (
+            os.getenv("QWEN_ROUTER_MODEL")
+            or str(self.data.get("qwen", {}).get("router_model") or "")
+            or self.model_for("planner")
+        )
 
     def qwen_json_extractor_model(self) -> str:
-        return os.getenv("QWEN_JSON_EXTRACTOR_MODEL") or str(self.data.get("qwen", {}).get("json_extractor_model", "qwen-flash"))
+        # env > legacy qwen.json_extractor_model > canonical models.extraction.
+        return (
+            os.getenv("QWEN_JSON_EXTRACTOR_MODEL")
+            or str(self.data.get("qwen", {}).get("json_extractor_model") or "")
+            or self.model_for("extraction")
+        )
 
     def qwen_structured_extraction_enabled(self) -> bool:
         return _env_bool("QWEN_STRUCTURED_EXTRACTION_ENABLED", self.data.get("qwen", {}).get("structured_extraction_enabled", False))
 
     def qwen_router_fallback_enabled(self) -> bool:
         return _env_bool("QWEN_ROUTER_FALLBACK_ENABLED", self.data.get("qwen", {}).get("router_fallback_enabled", False))
+
+    def qwen_page_judge_enabled(self) -> bool:
+        return _env_bool("QWEN_PAGE_JUDGE_ENABLED", self.data.get("qwen", {}).get("page_judge_enabled", False))
+
+    def verification_enabled(self) -> bool:
+        # T-2.2 verification spine. Off by default; the deterministic gatekeeper
+        # blocks candidates whose critical claims are not grounded in evidence.
+        return _env_bool("SPIDER_QWEN_VERIFICATION_ENABLED", self.data.get("verification", {}).get("enabled", False))
+
+    def source_reliability(self) -> dict[str, float]:
+        # T-2.4 per-source reliability priors; yaml overrides the code defaults.
+        from ..governance.source_reliability import DEFAULT_RELIABILITY
+
+        overrides = self.data.get("source_reliability", {}) or {}
+        return {**DEFAULT_RELIABILITY, **{k: float(v) for k, v in overrides.items()}}
 
     def qwen_router_confidence_threshold(self) -> float:
         return float(os.getenv("QWEN_ROUTER_CONFIDENCE_THRESHOLD") or self.data.get("qwen", {}).get("router_confidence_threshold", 0.65))

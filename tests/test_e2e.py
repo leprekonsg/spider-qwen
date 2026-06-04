@@ -90,11 +90,12 @@ def test_cli_run_product_no_rfq(capsys, monkeypatch, tmp_path):
 
 def test_benchmark_service_harness():
     summary = run_gold_set(GOLD_SET, offline=True)
-    assert summary["cases"] == 80
+    assert summary["cases"] == 100
     assert summary["per_mode"]["service_quote_required"]["cases"] == 20
     assert summary["per_mode"]["product_exact_price"]["cases"] == 20
     assert summary["per_mode"]["contact_enrichment_only"]["cases"] == 20
     assert summary["per_mode"]["revalidation"]["cases"] == 20
+    assert summary["per_mode"]["electronics_substitution"]["cases"] == 20  # T-8.1 obsolete-part S1/S2/S3
     assert summary["mode_classification_accuracy"] >= 0.8
     assert summary["quote_channel_precision"] >= 0.9
     assert summary["rfq_draft_completeness"] >= 0.9
@@ -196,6 +197,30 @@ def test_cli_run_with_mock_qwen_json(capsys, tmp_path, monkeypatch):
     verify = _run_cli(capsys, ["evidence", "verify", result["run_id"]])
     assert verify["issues"] == []
     assert verify["checked_claims"] >= 1
+
+
+def test_cli_run_reason_uses_reasoning_spine(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    result = _run_cli(
+        capsys,
+        ["run", "office cleaning Singapore", "--mode", "service_quote_required", "--offline", "--reason"],
+    )
+    # --reason routes through run_reasoning, so the payload is a ReasoningResult
+    # (winner bundle + why-it-won explanation), not a RunResult.
+    assert result["mode"] == "service_quote_required"
+    assert result["winner"] is not None
+    assert "won" in result["explanation"].lower()
+    assert result["within_budget"] is True
+    assert result["winner"]["trajectory"]["strategy"]
+    assert result["winner"]["evidence_refs"], "winner bundle must carry ledger evidence"
+
+
+def test_cli_run_default_is_not_reasoning(capsys, tmp_path, monkeypatch):
+    # Without --reason the default run() pipeline is used (RunResult shape).
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    result = _run_cli(capsys, ["run", "office cleaning Singapore", "--offline"])
+    assert "winner" not in result
+    assert "rfq_drafts" in result
 
 
 def test_cli_evidence_rejects_path_traversal_id(capsys, tmp_path, monkeypatch):

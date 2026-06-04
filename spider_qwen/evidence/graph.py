@@ -32,6 +32,23 @@ def render_supplier_graph(ledger: EvidenceLedger) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_property_graph(store) -> str:
+    """Render a GraphStore (T-3.1 LPG) as Mermaid; duck-typed on the store API."""
+    lines = ["graph LR"]
+    seen: set[str] = set()
+    for edge in store.edges():
+        for nid in (edge["src"], edge["dst"]):
+            if nid in seen:
+                continue
+            node = store.get_node(nid)
+            label = (node["props"].get("surface") if node else None) or nid
+            lines.append(f'  {_node_id(nid)}["{_escape(str(label))}"]')
+            seen.add(nid)
+        rel = edge["rel"] + (f" ({edge['grade']})" if edge.get("grade") else "")
+        lines.append(f'  {_node_id(edge["src"])} -->|{_escape(rel)}| {_node_id(edge["dst"])}')
+    return "\n".join(lines) + "\n"
+
+
 def _host(url: str) -> str:
     host = urlparse(url or "").netloc or url
     return host[4:] if host.startswith("www.") else host

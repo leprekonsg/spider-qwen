@@ -3,10 +3,14 @@
   spider-qwen classify "office cleaning Singapore"
   spider-qwen run "office cleaning Singapore" --mode auto
   spider-qwen run "500 ergonomic chairs Singapore" --mode product_exact_price
+  spider-qwen run "NE5532 substitute" --reason     # multi-trajectory reasoning spine
   spider-qwen evidence show <run_id>
   spider-qwen benchmark --gold-set spider_qwen/benchmarks/gold_set.json
 
 Use --offline to run with deterministic mock providers (no API keys needed).
+Use --reason to explore several strategy trajectories with bounded recursive
+repair and pick the winner via the deterministic Process Reward Model (returns a
+ReasoningResult with a why-it-won explanation instead of the standard RunResult).
 """
 
 from __future__ import annotations
@@ -24,7 +28,10 @@ from ..evidence.models import EvidenceRef, utc_now_iso
 from ..evidence.verifier import verify_ledger
 from ..evidence.graph import render_supplier_graph
 from ..governance.review_events import ReviewStatusTransitionError, ReviewStore
-from ..memory.decay import apply_decay, is_stale
+from ..memory.decay import apply_decay, is_stale, memory_stability_days
+from ..memory.episodic import EpisodicMemory
+from ..memory.notes import NoteStore
+from ..memory.reflections import ReflectionEngine
 from ..memory.revalidation import Revalidator
 from ..memory.semantic import SemanticMemory
 from ..modes.classifier import ModeClassifier
@@ -68,7 +75,15 @@ def _cmd_classify(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     controller = _build_controller(args)
-    result = asyncio.run(controller.run(args.query, mode=args.mode, target_country=args.country))
+    if getattr(args, "reason", False):
+        # Opt-in multi-trajectory reasoning spine; emits a ReasoningResult.
+        result = asyncio.run(controller.run_reasoning(args.query, mode=args.mode, target_country=args.country))
+    else:
+        result = asyncio.run(controller.run(
+            args.query, mode=args.mode, target_country=args.country,
+            high_risk=getattr(args, "high_risk", False),
+            serendipity=getattr(args, "serendipity", False),
+        ))
     print(json.dumps(result.model_dump(mode="json"), indent=2))
     return 0
 
@@ -87,8 +102,13 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
         return 1
     if args.evidence_command == "verify":
         result = verify_ledger(ledger)
-        print(json.dumps(result.model_dump(), indent=2))
-        return 0 if result.ok else 1
+        chain = ledger.verify_chain()  # T-2.4: re-walk the Merkle hash chain
+        out = result.model_dump()
+        out["chain_checked"] = chain.checked
+        out["chain_ok"] = chain.ok
+        out["chain_issues"] = [i.model_dump() for i in chain.issues]
+        print(json.dumps(out, indent=2))
+        return 0 if (result.ok and chain.ok) else 1
     if args.evidence_command == "graph":
         print(render_supplier_graph(ledger))
         return 0
@@ -106,11 +126,24 @@ def _cmd_memory(args: argparse.Namespace) -> int:
                 {
                     **fact.model_dump(mode="json"),
                     "decayed_confidence": round(apply_decay(fact), 4),
+                    "stability_days": round(memory_stability_days(fact), 2),
                     "is_stale": is_stale(fact),
                     "ttl_status": fact.status,
                 }
             )
         print(json.dumps(rows, indent=2))
+        return 0
+    if args.memory_command == "reflect":
+        reflections = ReflectionEngine().reflect(
+            memory.all(), EpisodicMemory(_state_dir()).all()
+        )
+        print(json.dumps([r.model_dump(mode="json") for r in reflections], indent=2))
+        return 0
+    if args.memory_command == "notes":
+        # Read-only view: build Zettelkasten notes from the current facts.
+        store = NoteStore(state_dir=None)
+        notes = [store.add_from_fact(f) for f in memory.all()]
+        print(json.dumps([n.model_dump(mode="json") for n in notes], indent=2))
         return 0
     if args.memory_command == "revalidate":
         if not args.fact_id:
@@ -138,7 +171,7 @@ def _cmd_memory(args: argparse.Namespace) -> int:
         )
         print(json.dumps(refreshed.model_dump(mode="json") if refreshed else None, indent=2))
         return 0
-    print("usage: spider-qwen memory [show|revalidate]", file=sys.stderr)
+    print("usage: spider-qwen memory [show|revalidate|reflect|notes]", file=sys.stderr)
     return 2
 
 
@@ -167,6 +200,37 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_skills(args: argparse.Namespace) -> int:
+    from ..skills.registry import SkillRegistry
+
+    reg = SkillRegistry.load()
+    if args.skills_command == "list":
+        print(json.dumps([s.model_dump(mode="json") for s in reg.all()], indent=2))
+        return 0
+    if args.skills_command == "match":
+        if not args.query:
+            print('usage: spider-qwen skills match "<query>"', file=sys.stderr)
+            return 2
+        matches = reg.match(args.query)
+        print(json.dumps(
+            [{"name": m.skill.name, "score": m.score, "description": m.skill.description} for m in matches],
+            indent=2,
+        ))
+        return 0
+    if args.skills_command == "show":
+        if not args.query:
+            print("usage: spider-qwen skills show <name>", file=sys.stderr)
+            return 2
+        skill = reg.get(args.query)
+        if skill is None:
+            print(f"No skill named '{args.query}' under .qwen/skills", file=sys.stderr)
+            return 1
+        print(json.dumps(skill.model_dump(mode="json"), indent=2))
+        return 0
+    print("usage: spider-qwen skills [list|match|show] [query]", file=sys.stderr)
+    return 2
+
+
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     from ..benchmarks.evaluate_service_mode import run_gold_set
 
@@ -187,10 +251,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("query")
     p_run.add_argument(
         "--mode", default="auto",
-        choices=["auto", "product_exact_price", "service_quote_required", "contact_enrichment_only", "revalidation"],
+        choices=["auto", "product_exact_price", "service_quote_required", "contact_enrichment_only",
+                 "revalidation", "electronics_substitution"],
     )
     p_run.add_argument("--country", default=None, help="Target country (e.g. Singapore)")
     p_run.add_argument("--offline", action="store_true", help="Use deterministic mock providers")
+    p_run.add_argument("--reason", action="store_true",
+                       help="Use the multi-trajectory reasoning spine (PPRM winner selection); emits a ReasoningResult")
+    p_run.add_argument("--high-risk", action="store_true", default=False,
+                       help="Tag the run high_risk_procurement: the cost router forces max for the decision step")
+    p_run.add_argument("--serendipity", action="store_true", default=False,
+                       help="Discovery sidecar: populate S1/S2/S3 from real components (graph/Wayback/signals/DMSMS); default run is unchanged")
     p_run.add_argument("--qwen-json", action="store_true", help="Enable mocked Qwen JSON extraction when used with --offline")
     p_run.add_argument("--require-review", action="store_true", default=None, help="Persist HITL review gates for this run")
     p_run.set_defaults(func=_cmd_run)
@@ -201,7 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ev.set_defaults(func=_cmd_evidence)
 
     p_mem = sub.add_parser("memory", help="Inspect or revalidate semantic memory")
-    p_mem.add_argument("memory_command", choices=["show", "revalidate"])
+    p_mem.add_argument("memory_command", choices=["show", "revalidate", "reflect", "notes"])
     p_mem.add_argument("fact_id", nargs="?")
     p_mem.add_argument("--value", default=None)
     p_mem.add_argument("--confidence", type=float, default=0.85)
@@ -216,6 +287,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("event_id", nargs="?")
     p_review.add_argument("--status", choices=["all", "pending", "approved", "rejected"], default="pending")
     p_review.set_defaults(func=_cmd_review)
+
+    p_skills = sub.add_parser("skills", help="List, match, or show project Qwen Agent Skills")
+    p_skills.add_argument("skills_command", choices=["list", "match", "show"])
+    p_skills.add_argument("query", nargs="?", help="Query for 'match' or skill name for 'show'")
+    p_skills.set_defaults(func=_cmd_skills)
 
     p_bench = sub.add_parser("benchmark", help="Run the gold-set benchmark")
     p_bench.add_argument("--gold-set", required=True)

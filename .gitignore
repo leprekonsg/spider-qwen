@@ -26,6 +26,7 @@ ENV/
 
 # Test / coverage
 .pytest_cache/
+tmppytest-cache/
 .coverage
 .coverage.*
 htmlcov/
@@ -48,11 +49,14 @@ reports/
 CLAUDE.md
 AGENTS.md
 .claude/
-.qwen/
 .playwright-mcp/
 .cursor/
 .aider*
 .github/copilot-instructions.md
+
+# Agent build/planning notes (local working docs, not project deliverables)
+SPIDER_QWEN_BUILD_PLAN.md
+docs/BUILD_LOG.md
 
 # Editors / OS
 .idea/
@@ -60,3 +64,4 @@ AGENTS.md
 *.swp
 .DS_Store
 Thumbs.db
+/video
