@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from spider_qwen.evidence.belief import (
     YAGER_CONFLICT_THRESHOLD,
     BeliefMass,
@@ -100,10 +102,10 @@ def test_fuse_disputed_fact_without_ledger_falls_back_to_confidence():
 
 
 def test_fusion_is_order_independent_for_the_same_multiset():
-    # Sequential Yager is not associative and max-K depends on accumulation
-    # order; fuse() must canonicalize so the multiset alone fixes the result.
-    # This trio sits near the Yager threshold, where ordering used to flip
-    # both the rule and the interval.
+    # The n-ary conjunctive pass is a product over sources, so the multiset
+    # alone fixes the result by construction (no canonicalization step). This
+    # trio sits near the Yager threshold, where the old sequential fold let
+    # ordering flip both the rule and the interval.
     import itertools
 
     trio = [bpa(0.7, supports=True), bpa(0.7, supports=True), bpa(0.9, supports=False)]
@@ -113,6 +115,61 @@ def test_fusion_is_order_independent_for_the_same_multiset():
         results.add((round(fused.true_mass, 9), round(fused.false_mass, 9),
                      round(fused.unknown_mass, 9), k, rule))
     assert len(results) == 1, results
+
+
+def test_multi_source_high_conflict_surfaces_unknown_not_certainty():
+    # Two near-certain contradicting sources plus one supporter. The old
+    # sequential Yager fold re-exposed the parked conflict mass to the third
+    # source (unknown intersect {T} = {T}) and reported Bel(T)=0.892 --
+    # near-certainty fabricated from a flat contradiction. Batch n-ary Yager
+    # keeps it in unknown. Hand computation: p_T=0.01, p_F=0.001, p_U=1e-5,
+    # q(T)=0.00999, q(F)=0.00099, q(empty)=0.98901 -> m(unknown)=0.98902.
+    fused, k, rule = fuse([bpa(0.99, supports=True), bpa(0.99, supports=False),
+                           bpa(0.9, supports=True)])
+    assert rule == "yager"
+    assert math.isclose(k, 0.98901, abs_tol=1e-9)
+    assert math.isclose(fused.true_mass, 0.00999, abs_tol=1e-9)
+    assert math.isclose(fused.false_mass, 0.00099, abs_tol=1e-9)
+    assert math.isclose(fused.unknown_mass, 0.98902, abs_tol=1e-9)
+    assert fused.unknown_mass > 0.9  # conflict became ignorance, not belief
+
+
+def test_yager_trigger_uses_total_not_max_pairwise_conflict():
+    # No single pair of these sources conflicts above the threshold (max
+    # pairwise K = 0.63), but jointly q(empty) = 0.819: Dempster
+    # renormalization would hide real three-way disagreement.
+    trio = [bpa(0.7, supports=True), bpa(0.7, supports=True), bpa(0.9, supports=False)]
+    fused, k, rule = fuse(trio)
+    assert rule == "yager"
+    assert math.isclose(k, 0.819, abs_tol=1e-9)
+
+
+def test_fused_mass_is_a_valid_bpa_across_reliability_grid():
+    # Deterministic sweep: whatever the rule, the fused output must itself be
+    # a valid BPA (no negative mass, sums to 1) with Bel <= Pl, so a wrong
+    # combination can never pass silently as a plausible-looking interval.
+    rels = [0.1, 0.5, 0.8, 0.99]
+    for r1 in rels:
+        for r2 in rels:
+            for r3 in rels:
+                fused, k, rule = fuse([bpa(r1, supports=True), bpa(r2, supports=False),
+                                       bpa(r3, supports=True)])
+                assert min(fused.true_mass, fused.false_mass, fused.unknown_mass) >= 0.0
+                assert math.isclose(
+                    fused.true_mass + fused.false_mass + fused.unknown_mass,
+                    1.0, abs_tol=1e-9)
+                assert 0.0 <= k <= 1.0
+                assert rule in ("dempster", "yager")
+
+
+def test_malformed_bpa_fails_loud_not_silent():
+    # Garbage in must raise with the offending masses named, never propagate
+    # a silently wrong [Bel, Pl] interval into RFQ drafts or risk signals.
+    with pytest.raises(ValueError, match="invalid BPA"):
+        fuse([BeliefMass(true_mass=0.9, false_mass=0.9, unknown_mass=0.1),
+              bpa(0.5, supports=True)])
+    with pytest.raises(ValueError, match="invalid BPA"):
+        fuse([BeliefMass(true_mass=-0.1, false_mass=0.6, unknown_mass=0.5)])
 
 
 def test_zero_confidence_side_is_not_inflated_to_half():

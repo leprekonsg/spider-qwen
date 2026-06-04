@@ -23,14 +23,15 @@ from pydantic import BaseModel
 # Reliability is clamped below 1 so two flatly contradicting "certain" sources
 # produce total-but-finite conflict (Dempster's rule is undefined at K = 1).
 _MAX_RELIABILITY = 0.99
-# Above this total conflict, Dempster renormalization becomes misleading
-# (Zadeh's paradox); switch to Yager and surface the conflict as unknown mass.
+# Above this total conjunctive conflict q(empty), Dempster renormalization
+# becomes misleading (Zadeh's paradox); switch to Yager and surface the
+# conflict as unknown mass.
 YAGER_CONFLICT_THRESHOLD = 0.8
 # A fused interval whose Pl - Bel gap exceeds this tau has more than half its
 # mass uncommitted: "we genuinely do not know". Such disputes must surface as
 # proactive S3 risk signals instead of sitting silently in memory. Yager-rule
 # fusions flag regardless of the gap -- the rule only engages above
-# YAGER_CONFLICT_THRESHOLD pairwise conflict, which is itself the warning.
+# YAGER_CONFLICT_THRESHOLD total conflict, which is itself the warning.
 UNCERTAINTY_TAU = 0.5
 
 
@@ -48,7 +49,7 @@ class BeliefInterval(BaseModel):
     value: str
     belief: float
     plausibility: float
-    conflict: float  # max pairwise conflict K observed during fusion
+    conflict: float  # total conjunctive conflict q(empty) across all sources
     rule: str  # dempster | yager | single
     supporting_sources: int = 0
     contradicting_sources: int = 0
@@ -67,53 +68,62 @@ def bpa(reliability: float, *, supports: bool) -> BeliefMass:
     return BeliefMass(false_mass=r, unknown_mass=round(1.0 - r, 6))
 
 
-def _combine(m1: BeliefMass, m2: BeliefMass, *, yager: bool) -> tuple[BeliefMass, float]:
-    """Combine two BPAs; returns (fused mass, pairwise conflict K)."""
-    k = m1.true_mass * m2.false_mass + m1.false_mass * m2.true_mass
-    t = m1.true_mass * m2.true_mass + m1.true_mass * m2.unknown_mass + m1.unknown_mass * m2.true_mass
-    f = m1.false_mass * m2.false_mass + m1.false_mass * m2.unknown_mass + m1.unknown_mass * m2.false_mass
-    u = m1.unknown_mass * m2.unknown_mass
-    if yager:
-        # Yager: conflict mass joins the unknown set instead of renormalizing.
-        return BeliefMass(true_mass=t, false_mass=f, unknown_mass=u + k), k
-    norm = 1.0 - k
-    if norm <= 0.0:  # total conflict: Dempster undefined, all mass to unknown
-        return BeliefMass(unknown_mass=1.0), k
-    return BeliefMass(true_mass=t / norm, false_mass=f / norm, unknown_mass=u / norm), k
+def _conjunctive(masses: list[BeliefMass]) -> tuple[float, float, float, float]:
+    """N-ary unnormalized conjunctive combination over the frame {true, false}.
+
+    Closed form for the two-element frame: a joint assignment lands on {T}
+    exactly when every source contributes {T} or unknown (minus the all-unknown
+    case), symmetrically for {F}; the remainder is the total conflict q(empty).
+    Products commute, so the result is a pure function of the multiset -- no
+    canonicalization step needed.
+    """
+    p_true = p_false = p_unknown = 1.0
+    for m in masses:
+        p_true *= m.true_mass + m.unknown_mass
+        p_false *= m.false_mass + m.unknown_mass
+        p_unknown *= m.unknown_mass
+    q_true = max(0.0, p_true - p_unknown)  # clamp float dust, never semantics
+    q_false = max(0.0, p_false - p_unknown)
+    conflict = max(0.0, 1.0 - q_true - q_false - p_unknown)
+    return q_true, q_false, p_unknown, conflict
 
 
 def fuse(masses: list[BeliefMass]) -> tuple[BeliefMass, float, str]:
-    """Fuse BPAs sequentially; returns (mass, max pairwise K, rule used).
+    """Fuse all BPAs in one batch; returns (mass, total conflict, rule used).
 
-    Inputs are canonically sorted first: sequential combination under Yager is
-    not associative and the max-pairwise-K measurement depends on accumulation
-    order, so without sorting the same *multiset* of masses could pick a
-    different rule or interval depending on input order. After sorting the
-    result is a pure function of the multiset.
+    Dempster's rule is associative, but Yager's is only quasi-associative: the
+    conflict mass must move to unknown ONCE, after combining every source. A
+    sequential pairwise fold re-exposes the parked conflict to the next source
+    (unknown intersect {T} = {T}), which can turn a flat contradiction into
+    near-certainty. Both rules therefore share one n-ary conjunctive pass and
+    differ only in where the final conflict mass goes: Dempster renormalizes
+    it away (fine while conflict is low), Yager surfaces it as unknown.
 
-    A first Dempster pass measures conflict; if any pairwise K exceeds the
-    threshold the fusion is redone under Yager so high conflict is *surfaced*
-    as unknown mass rather than hidden by renormalization.
+    Inputs are validated loudly: a malformed BPA must fail here, not propagate
+    a silently wrong [Bel, Pl] interval into RFQ drafts and risk signals.
     """
+    for m in masses:
+        floor = min(m.true_mass, m.false_mass, m.unknown_mass)
+        total = m.true_mass + m.false_mass + m.unknown_mass
+        if floor < 0.0 or abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"invalid BPA (true={m.true_mass}, false={m.false_mass}, "
+                f"unknown={m.unknown_mass}): masses must be non-negative and sum to 1"
+            )
     if not masses:
         return BeliefMass(), 0.0, "single"
     if len(masses) == 1:
         return masses[0], 0.0, "single"
-    ordered = sorted(masses, key=lambda m: (m.true_mass, m.false_mass, m.unknown_mass))
-
-    def _run(yager: bool) -> tuple[BeliefMass, float]:
-        fused = ordered[0]
-        max_k = 0.0
-        for m in ordered[1:]:
-            fused, k = _combine(fused, m, yager=yager)
-            max_k = max(max_k, k)
-        return fused, max_k
-
-    fused, max_k = _run(yager=False)
-    if max_k > YAGER_CONFLICT_THRESHOLD:
-        fused, max_k = _run(yager=True)
-        return fused, round(max_k, 6), "yager"
-    return fused, round(max_k, 6), "dempster"
+    q_true, q_false, q_unknown, conflict = _conjunctive(masses)
+    if conflict > YAGER_CONFLICT_THRESHOLD:
+        fused = BeliefMass(true_mass=q_true, false_mass=q_false,
+                           unknown_mass=q_unknown + conflict)
+        return fused, round(conflict, 6), "yager"
+    # conflict <= threshold < 1 here, so the Dempster denominator is positive.
+    norm = 1.0 - conflict
+    fused = BeliefMass(true_mass=q_true / norm, false_mass=q_false / norm,
+                       unknown_mass=q_unknown / norm)
+    return fused, round(conflict, 6), "dempster"
 
 
 def _interval(value: str, fused: BeliefMass, conflict: float, rule: str,
