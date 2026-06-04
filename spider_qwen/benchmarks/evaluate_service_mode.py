@@ -17,17 +17,9 @@ from ..modes.classifier import ModeClassifier
 
 
 def _build_controller(offline: bool) -> Controller:
-    if offline:
-        from ..tools.search_service import MockSearchProvider
-        from ..tools.fetch_service import MockFetchProvider
-
-        return Controller(
-            search_provider=MockSearchProvider(),
-            fetch_provider=MockFetchProvider(),
-            state_dir=None,
-            persist=False,
-        )
-    return Controller(persist=False)
+    # offline=True is the controller-level guarantee: mock search/fetch AND no
+    # env-driven live Qwen wiring (router, NLI, JSON extractor).
+    return Controller(state_dir=None, persist=False, offline=offline)
 
 
 async def _run_case(controller: Controller, case: dict[str, Any]) -> dict[str, Any]:

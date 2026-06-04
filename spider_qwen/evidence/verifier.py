@@ -299,11 +299,15 @@ class VerificationSpine:
         item = self.ledger.get(getattr(ref, "ledger_id", "")) if ref is not None else None
         if item is None or "claim_id" not in item.metadata:
             return  # only annotate genuine claim rows, not page-level evidence
-        item.metadata["verified"] = verification.verified
-        item.metadata["verifier_score"] = verification.verifier_score
-        item.metadata["verifier_stage"] = verification.stage
-        item.metadata["grounding"] = verification.grounding
-        item.metadata["grade"] = verification.grade
+        # annotate() owns the chain consequences: marks it stale for one lazy
+        # reseal, and refuses if a tree_head commitment was already published.
+        self.ledger.annotate(item.ledger_id, {
+            "verified": verification.verified,
+            "verifier_score": verification.verifier_score,
+            "verifier_stage": verification.stage,
+            "grounding": verification.grounding,
+            "grade": verification.grade,
+        })
 
 
 def _join(title: str | None, text: str) -> str:

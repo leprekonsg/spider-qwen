@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 from ..agent.controller import Controller
-from ..evidence.ledger import EvidenceLedger
+from ..evidence.ledger import EvidenceLedger, sth_signing_key_from_env
 from ..evidence.models import EvidenceRef, utc_now_iso
 from ..evidence.verifier import verify_ledger
 from ..evidence.graph import render_supplier_graph
@@ -43,28 +43,27 @@ def _state_dir() -> str:
 
 
 def _build_controller(args: argparse.Namespace) -> Controller:
-    search_provider = fetch_provider = None
+    # offline=True is the controller-level guarantee: mock search/fetch AND no
+    # live Qwen client (router, NLI, extractor), even when --judged-demo
+    # enables their flags and an API key is in the env. Only the --qwen-json
+    # arg (no env flag) needs explicit wiring here.
+    offline = getattr(args, "offline", False)
     qwen_json_extractor = None
-    if getattr(args, "offline", False):
-        from ..tools.search_service import MockSearchProvider
-        from ..tools.fetch_service import MockFetchProvider
-
-        search_provider = MockSearchProvider()
-        fetch_provider = MockFetchProvider()
-        if getattr(args, "qwen_json", False) or _env_true("QWEN_STRUCTURED_EXTRACTION_ENABLED"):
+    if getattr(args, "qwen_json", False):
+        if offline:
             from ..tools.qwen_json_extractor import MockQwenJsonExtractor
 
             qwen_json_extractor = MockQwenJsonExtractor()
-    elif getattr(args, "qwen_json", False):
-        from ..tools.qwen_json_extractor import QwenJsonExtractor
+        else:
+            from ..tools.qwen_json_extractor import QwenJsonExtractor
 
-        qwen_json_extractor = QwenJsonExtractor()
+            qwen_json_extractor = QwenJsonExtractor()
     return Controller(
-        search_provider=search_provider,
-        fetch_provider=fetch_provider,
         qwen_json_extractor=qwen_json_extractor,
         state_dir=_state_dir(),
+        verify=True if getattr(args, "judged_demo", False) else None,
         require_review=getattr(args, "require_review", None),
+        offline=offline,
     )
 
 
@@ -75,16 +74,31 @@ def _cmd_classify(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    controller = _build_controller(args)
-    if getattr(args, "reason", False):
-        # Opt-in multi-trajectory reasoning spine; emits a ReasoningResult.
-        result = asyncio.run(controller.run_reasoning(args.query, mode=args.mode, target_country=args.country))
-    else:
-        result = asyncio.run(controller.run(
-            args.query, mode=args.mode, target_country=args.country,
-            high_risk=getattr(args, "high_risk", False),
-            serendipity=getattr(args, "serendipity", False),
-        ))
+    try:
+        # Fail a malformed STH signing key now, not at end-of-run persist.
+        sth_signing_key_from_env()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    prior_env = None
+    if getattr(args, "judged_demo", False):
+        prior_env = _apply_judged_demo_profile(args)
+    # The profile env stays in place for the WHOLE run, not just controller
+    # construction: a policy flag read lazily mid-run must see the same values.
+    try:
+        controller = _build_controller(args)
+        if getattr(args, "reason", False):
+            # Opt-in multi-trajectory reasoning spine; emits a ReasoningResult.
+            result = asyncio.run(controller.run_reasoning(args.query, mode=args.mode, target_country=args.country))
+        else:
+            result = asyncio.run(controller.run(
+                args.query, mode=args.mode, target_country=args.country,
+                high_risk=getattr(args, "high_risk", False),
+                serendipity=getattr(args, "serendipity", False),
+            ))
+    finally:
+        if prior_env is not None:
+            _restore_env(prior_env)
     print(json.dumps(result.model_dump(mode="json"), indent=2))
     return 0
 
@@ -328,6 +342,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--serendipity", action="store_true", default=False,
                        help="Discovery sidecar: populate S1/S2/S3 from real components (graph/Wayback/signals/DMSMS); default run is unchanged")
     p_run.add_argument("--qwen-json", action="store_true", help="Enable mocked Qwen JSON extraction when used with --offline")
+    p_run.add_argument("--judged-demo", action="store_true", default=False,
+                       help="Enable the opt-in judged-demo profile: Qwen extraction, verification/trust surfaces, and S1/S2/S3 sidecar")
     p_run.add_argument("--require-review", action="store_true", default=None, help="Persist HITL review gates for this run")
     p_run.set_defaults(func=_cmd_run)
 
@@ -369,6 +385,39 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _env_true(name: str) -> bool:
     return os.getenv(name, "").lower() in {"1", "true", "yes", "on"}
+
+
+def _apply_judged_demo_profile(args: argparse.Namespace) -> dict[str, str | None]:
+    """Opt into demo-facing Qwen/trust features without changing v1 defaults."""
+    args.qwen_json = True
+    args.serendipity = True
+    names = {
+        "QWEN_STRUCTURED_EXTRACTION_ENABLED": "1",
+        "QWEN_ROUTER_FALLBACK_ENABLED": "1",
+        "QWEN_PAGE_JUDGE_ENABLED": "1",
+        "SPIDER_QWEN_VERIFICATION_ENABLED": "1",
+        "QWEN_NLI_ENABLED": "1",
+    }
+    prior = {name: os.environ.get(name) for name in names}
+    for name, value in names.items():
+        os.environ.setdefault(name, value)
+        # setdefault: an explicitly exported value wins over the profile. Say
+        # so -- a judged demo silently degraded to regex is worse than noise.
+        if not _env_true(name):
+            print(
+                f"judged-demo: {name}={os.environ[name]!r} from the environment "
+                "overrides the profile; this surface stays disabled.",
+                file=sys.stderr,
+            )
+    return prior
+
+
+def _restore_env(prior: dict[str, str | None]) -> None:
+    for name, value in prior.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -19,6 +19,7 @@ Ed25519 tree-head signing is optional and activates only when the
 from __future__ import annotations
 
 import hashlib
+import hmac
 import re
 
 from pydantic import BaseModel, Field
@@ -103,6 +104,52 @@ class CitationProof(BaseModel):
     tree_head: TreeHead
 
 
+class RedactedLeafOpening(BaseModel):
+    """Optional opening for a salted leaf commitment.
+
+    The Merkle proof can publish only ``commitment`` as ``leaf_data``. A verifier
+    who later receives this opening can confirm which original chain hash it
+    represented without exposing every leaf in the public proof stream.
+    """
+
+    schema_version: str = SCHEMA_VERSION
+    leaf_data: str
+    salt: str
+    commitment: str
+
+
+def leaf_salt(master_salt: str, leaf_index: int) -> str:
+    """Per-leaf salt derived from one master salt: HMAC-SHA256(master, index).
+
+    One shared salt would make redaction one-shot -- the first opening reveals
+    the salt for every leaf, letting anyone who later learns another row's
+    chain hash confirm its membership. Deriving per leaf keeps unopened leaves
+    blinded after any number of openings.
+    """
+    return hmac.new(master_salt.encode("utf-8"), str(leaf_index).encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def redact_leaf_data(leaf_data: str, salt: str) -> str:
+    """Commit to a leaf as SHA-256(salt || 0x00 || leaf_data).
+
+    The 0x00 separator (never part of either string) makes the encoding
+    unambiguous: without it, ("ab", "c...") and ("abc", "...") would commit
+    identically.
+    """
+    return hashlib.sha256(
+        salt.encode("utf-8") + b"\x00" + leaf_data.encode("utf-8")
+    ).hexdigest()
+
+
+def verify_redacted_leaf(opening: RedactedLeafOpening) -> bool:
+    """Check an opening against its commitment. Inputs are untrusted: an
+    opening whose leaf is not a chain-hash digest is invalid, never an error."""
+    if _digest_or_none(opening.leaf_data) is None or not opening.salt:
+        return False
+    return redact_leaf_data(opening.leaf_data, opening.salt) == opening.commitment
+
+
 class MerkleLog:
     """Append-only RFC 6962 Merkle tree over evidence chain hashes."""
 
@@ -111,9 +158,21 @@ class MerkleLog:
         self._leaves: list[str] = list(leaves or [])
 
     @classmethod
-    def from_ledger(cls, ledger) -> "MerkleLog":
-        """Build the log from an EvidenceLedger's per-item chain hashes."""
-        return cls(ledger.run_id, [item.chain_hash for item in ledger.items()])
+    def from_ledger(cls, ledger, *, redact_salt: str | None = None) -> "MerkleLog":
+        """Build the log from an EvidenceLedger's per-item chain hashes.
+
+        ``redact_salt`` is a master salt; each leaf is committed under its own
+        derived ``leaf_salt(redact_salt, index)`` so opening one leaf does not
+        unblind the rest.
+        """
+        seal = getattr(ledger, "_seal_chain", None)
+        if callable(seal):
+            seal()  # chain hashes must bind final row content before commitment
+        leaves = [item.chain_hash for item in ledger.items()]
+        if redact_salt is not None:
+            leaves = [redact_leaf_data(leaf, leaf_salt(redact_salt, i))
+                      for i, leaf in enumerate(leaves)]
+        return cls(ledger.run_id, leaves)
 
     def append(self, leaf_data: str) -> int:
         self._leaves.append(leaf_data)
@@ -188,7 +247,7 @@ class MerkleLog:
                 return CitationProof(
                     ledger_id=ledger_id,
                     leaf_index=index,
-                    leaf_data=item.chain_hash,
+                    leaf_data=self._leaves[index],
                     audit_path=self.inclusion_proof(index),
                     tree_head=self.tree_head(),
                 )

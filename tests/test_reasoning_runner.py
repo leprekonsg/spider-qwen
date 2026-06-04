@@ -34,6 +34,9 @@ def test_runner_runs_multiple_trajectories_and_selects_winner():
     assert "won" in res.explanation.lower()
     assert res.winner.trajectory.strategy.value in res.explanation
     assert res.within_budget is True
+    assert res.smc is not None
+    assert res.smc.particles
+    assert res.smc.winner_probability > 0.0
 
 
 def test_round2_repair_triggers_on_gap_and_merges_improvement():
@@ -110,3 +113,21 @@ def test_repair_does_not_silently_clear_unresolved_disputes():
     assert res.winner.disputed_count == 1           # dispute not silently cleared
     assert res.winner.conflict_penalty == 0.4       # stays consistent with the dispute
     assert res.disputed is True
+
+
+def test_smc_posterior_abstains_when_rewards_are_tied():
+    def executor(traj: ReasoningTrajectory) -> TrajectoryBundle:
+        return TrajectoryBundle(
+            trajectory=traj,
+            metrics=BundleMetrics(service_match=0.5, quote_channel=0.5, geo=0.5),
+            searches_used=1,
+            fetches_used=1,
+        )
+
+    res = asyncio.run(TrajectoryRunner().run("office cleaning", "service_quote_required", executor=executor))
+    assert res.smc is not None
+    assert res.smc.abstain is True
+    assert res.smc.effective_sample_size > 1.0
+    # The abstain signal is acted on, not just computed: the explanation
+    # qualifies the winner instead of declaring an unqualified victory.
+    assert "provisional" in res.explanation

@@ -7,6 +7,7 @@ Downstream outputs carry EvidenceRef pointers (ledger_id) back into the ledger.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,9 @@ class EvidenceLedger:
         self._state_dir = Path(state_dir) if state_dir else None
         self._reliability_priors = reliability_priors
         self._chain_tip = ""  # chain_hash of the most recently appended row
+        # True after annotate(): chain hashes no longer bind row content and
+        # must be resealed (once, lazily) before the next chain reader.
+        self._chain_stale = False
         # The tree_head this ledger was loaded with, if any: re-persisting an
         # unchanged ledger must keep the original commitment (timestamp), not
         # silently replace it with a recomputed one.
@@ -100,6 +104,7 @@ class EvidenceLedger:
             reliability=reliability,
             metadata=metadata or {},
         )
+        self._seal_chain()  # the tip must bind final content before linking to it
         item.parent_hash = self._chain_tip
         item.chain_hash = _chain_hash(item.content_digest(), self._chain_tip)
         self._chain_tip = item.chain_hash
@@ -122,10 +127,11 @@ class EvidenceLedger:
         """RFC 6962 Merkle log over the chain hashes (externally verifiable proofs)."""
         from .transparency import MerkleLog
 
-        return MerkleLog.from_ledger(self)
+        return MerkleLog.from_ledger(self)  # from_ledger seals a stale chain first
 
     def verify_chain(self) -> ChainVerificationResult:
         """Re-walk the Merkle chain; any tampered or mis-linked row is reported."""
+        self._seal_chain()
         result = ChainVerificationResult(run_id=self.run_id)
         parent = ""
         for item in self._items.values():
@@ -144,6 +150,50 @@ class EvidenceLedger:
             parent = item.chain_hash
         return result
 
+    def annotate(self, ledger_id: str, updates: dict[str, Any]) -> None:
+        """Annotate a row's metadata before the tree head is published.
+
+        Verification writes verdict metadata onto claim rows after extraction;
+        those annotations are part of the persisted evidence record, so the
+        chain must bind the final row content. Mutating rows in place marks
+        the chain stale; it is resealed once, lazily, by the next chain reader
+        instead of per write.
+
+        Rows covered by a published tree_head commitment (index < its
+        tree_size) are refused: rewriting them would replace what an external
+        party may already hold -- append a new row instead. Rows appended
+        AFTER the commitment are fair game; resealing leaves the committed
+        prefix's hashes unchanged (same content, same parents), so the prior
+        commitment stays a consistent prefix of the next one.
+        """
+        item = self._items.get(ledger_id)
+        if item is None:
+            raise KeyError(f"ledger_id {ledger_id} not found in ledger {self.run_id}")
+        if self._loaded_tree_head is not None:
+            committed = int(self._loaded_tree_head.get("tree_size") or 0)
+            index = list(self._items).index(ledger_id)
+            if index < committed:
+                raise ValueError(
+                    f"Row {ledger_id} (index {index}) is covered by the published "
+                    f"tree_head commitment of ledger {self.run_id} (tree_size "
+                    f"{committed}); annotating it would rewrite the chain and "
+                    "replace the commitment. Append a new evidence row instead."
+                )
+        item.metadata.update(updates)
+        self._chain_stale = True
+
+    def _seal_chain(self) -> None:
+        """Re-link hashes once after annotate() calls. No-op when not stale."""
+        if not self._chain_stale:
+            return
+        parent = ""
+        for item in self._items.values():
+            item.parent_hash = parent
+            item.chain_hash = _chain_hash(item.content_digest(), parent)
+            parent = item.chain_hash
+        self._chain_tip = parent
+        self._chain_stale = False
+
     def __len__(self) -> int:
         return len(self._items)
 
@@ -156,6 +206,7 @@ class EvidenceLedger:
         target = self.path()
         if target is None:
             return None
+        self._seal_chain()
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "run_id": self.run_id,
@@ -175,6 +226,9 @@ class EvidenceLedger:
             else:
                 payload["tree_head"] = head.model_dump()
                 self._loaded_tree_head = payload["tree_head"]
+            signed = _signed_tree_head_from_env(payload["tree_head"])
+            if signed is not None:
+                payload["signed_tree_head"] = signed
         target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return target
 
@@ -206,3 +260,42 @@ class EvidenceLedger:
                     )
             ledger._loaded_tree_head = head
         return ledger
+
+
+def sth_signing_key_from_env() -> bytes | None:
+    """Validate SPIDER_QWEN_STH_SIGNING_KEY; key bytes, or None when unset.
+
+    Raises ValueError on a malformed key or missing crypto extra. The CLI calls
+    this at startup so a bad key fails before any budget is spent, not at
+    end-of-run persist; persist() calls it again at signing time.
+    """
+    private_key_hex = os.getenv("SPIDER_QWEN_STH_SIGNING_KEY", "").strip()
+    if not private_key_hex:
+        return None
+    try:
+        private_key = bytes.fromhex(private_key_hex)
+    except ValueError as exc:
+        raise ValueError(
+            "SPIDER_QWEN_STH_SIGNING_KEY must be a 32-byte Ed25519 private key encoded as hex."
+        ) from exc
+    if len(private_key) != 32:
+        raise ValueError(
+            "SPIDER_QWEN_STH_SIGNING_KEY must decode to exactly 32 bytes."
+        )
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519  # noqa: F401
+    except ImportError as exc:
+        raise ValueError(
+            "SPIDER_QWEN_STH_SIGNING_KEY is set but signing is unavailable. "
+            "Install with: pip install 'spider-qwen[crypto]'"
+        ) from exc
+    return private_key
+
+
+def _signed_tree_head_from_env(head_payload: dict[str, Any]) -> dict[str, Any] | None:
+    private_key = sth_signing_key_from_env()
+    if private_key is None:
+        return None
+    from .transparency import TreeHead, sign_tree_head
+
+    return sign_tree_head(TreeHead.model_validate(head_payload), private_key).model_dump(mode="json")

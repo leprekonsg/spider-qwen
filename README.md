@@ -122,6 +122,8 @@ Opt-in modes (default `run` output is unchanged):
 spider-qwen run "find a replacement for an obsolete Hirose DF13-6P-1.25DSA, deliver to Singapore in 14 days" --offline --serendipity
 # Multi-trajectory reasoning spine (PPRM winner selection -> ReasoningResult)
 spider-qwen run "NE5532 substitute" --offline --reason
+# Judged demo profile: Qwen extraction + verification/trust surfaces + S1/S2/S3
+spider-qwen run "office cleaning Singapore" --offline --judged-demo
 # Cost router: high-risk forces the decision step to the max-tier model
 spider-qwen run "obsolete connector substitute" --offline --high-risk
 ```
@@ -210,12 +212,15 @@ Selected via env or injection; both abstracted behind protocols.
 | `QWEN_JSON_EXTRACTOR_MODEL` | verified DashScope model id | `qwen-flash` |
 | `QWEN_STRUCTURED_EXTRACTION_ENABLED` | `0` · `1` | `0` |
 | `QWEN_ROUTER_FALLBACK_ENABLED` | `0` · `1` | `0` |
+| `QWEN_PAGE_JUDGE_ENABLED` | `0` · `1` | `0` |
+| `SPIDER_QWEN_VERIFICATION_ENABLED` | `0` · `1` | `0` |
 | `QWEN_NLI_ENABLED` | `0` · `1` | `0` |
 | `QWEN_NLI_MODEL` | verified DashScope model id | `qwen-flash` |
 
 Qwen-assisted paths are optional and mocked in offline mode. Regex extractors
 remain the deterministic default. Qwen JSON extraction runs over already-fetched
-text and falls back cleanly on provider or schema errors.
+text and falls back cleanly on provider or schema errors. `--judged-demo`
+enables the opt-in Qwen/trust profile for demos without changing normal defaults.
 
 ## Benchmarks
 
@@ -344,13 +349,17 @@ Known limits:
 
 - Live providers can underperform on bot-walled sites; demos should use `--offline`.
 - Claim spans exist when the claim is present in fetched text; link-only evidence remains ledger-backed without text offsets.
-- Qwen model IDs should be re-verified before live demos.
+- Qwen model IDs should be re-verified before live demos; `--judged-demo --offline`
+  is the reproducible local demo path.
 - Browser automation, form submission, code interpreter, and non-Qwen LLMs are intentionally out of scope.
 - No demo video is bundled in this repository; the hero-query commands above reproduce the end-to-end run offline.
 
 v2 roadmap:
 
-- Wire the discovery sidecar (S1/S2/S3) into the default pipeline after demo + benchmark hardening (today it is opt-in via `--serendipity`).
+- Default-pipeline S1/S2/S3 remains opt-in (`--serendipity` or `--judged-demo`)
+  until demo + benchmark hardening is complete.
+- Conformal abstention requires a hand-graded calibration set; the shipped
+  abstainer refuses to claim a guarantee when uncalibrated.
 - The MCP **client** half (consume Google Drive / filesystem MCP) and the DashScope Responses-API `tools=[{type:mcp}]` wiring (the server half ships today).
 - External agent benchmarks (BFCL V4, tau-bench, LOCOMO) once their datasets + live access are wired.
 - Live per-call token metering into the cost dashboard, and the EOL forecaster sidecar (T-6.2).

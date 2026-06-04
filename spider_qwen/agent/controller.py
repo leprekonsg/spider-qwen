@@ -26,7 +26,7 @@ from ..evidence.ledger import EvidenceLedger
 from ..evidence.graph import render_supplier_graph
 from ..evidence.models import EvidenceRef, sha256_hex
 from ..evidence.verifier import VerificationSpine
-from ..verification.minicheck import MiniCheck
+from ..verification.minicheck import MiniCheck, value_grounded
 from ..extraction.contact import ContactExtractor
 from ..extraction.dedupe import dedupe_candidates
 from ..extraction.pricing import PricingExtractor, PricingResult
@@ -108,20 +108,38 @@ class Controller:
         state_dir: str | Path | None = None,
         persist: bool = True,
         require_review: bool | None = None,
+        offline: bool = False,
     ) -> None:
         self.policy = policy or load_policy()
-        self.search_provider = search_provider or build_search_provider()
-        self.fetch_provider = fetch_provider or build_fetch_provider()
+        # offline=True is a guarantee, not a hint: NO live client is ever
+        # constructed here -- search/fetch providers included -- even when
+        # policy/env flags enable one and an API key is present. Injected
+        # providers/scorers are still honored.
+        self.offline = bool(offline)
+        if self.offline:
+            from ..tools.fetch_service import MockFetchProvider
+            from ..tools.search_service import MockSearchProvider
+
+            self.search_provider = search_provider or MockSearchProvider()
+            self.fetch_provider = fetch_provider or MockFetchProvider()
+        else:
+            self.search_provider = search_provider or build_search_provider()
+            self.fetch_provider = fetch_provider or build_fetch_provider()
         self.state_dir = Path(state_dir) if state_dir else None
         self.persist = persist and self.state_dir is not None
         self.require_review = self.policy.hitl_require_review() if require_review is None else require_review
         self.classifier = ModeClassifier()
         self.qwen_router = qwen_router
-        if self.qwen_router is None and self.policy.qwen_router_fallback_enabled():
+        if self.qwen_router is None and self.policy.qwen_router_fallback_enabled() and not self.offline:
             self.qwen_router = QwenModeRouter(model=self.policy.qwen_router_model())
         self.qwen_json_extractor = qwen_json_extractor
         if self.qwen_json_extractor is None and self.policy.qwen_structured_extraction_enabled():
-            self.qwen_json_extractor = QwenJsonExtractor(model=self.policy.qwen_json_extractor_model())
+            if self.offline:
+                from ..tools.qwen_json_extractor import MockQwenJsonExtractor
+
+                self.qwen_json_extractor = MockQwenJsonExtractor()
+            else:
+                self.qwen_json_extractor = QwenJsonExtractor(model=self.policy.qwen_json_extractor_model())
         # T-2.1: page judge gate. Opt-in (off by default) so the offline pipeline
         # is unchanged unless a judge is injected or the policy flag enables it.
         self.page_judge = page_judge
@@ -131,10 +149,11 @@ class Controller:
         # pipeline is unchanged unless enabled here or via policy.
         self.verify_claims = self.policy.verification_enabled() if verify is None else verify
         self.minicheck = minicheck
-        if self.minicheck is None and self.policy.qwen_nli_enabled():
+        if self.minicheck is None and self.policy.qwen_nli_enabled() and not self.offline:
             # Qwen scores (claim, span) entailment through MiniCheck's model
             # seam; the seam clamps the score, re-applies the co-location
             # guard, and falls back to the heuristic on any model failure.
+            # Offline: stays None -> the spine uses the deterministic heuristic.
             from ..verification.qwen_nli import QwenNliScorer
 
             self.minicheck = MiniCheck(model=QwenNliScorer(model=self.policy.qwen_nli_model()))
@@ -845,6 +864,13 @@ class Controller:
                 for q in qwen.quote_channels
             )
         best = self._extractors["quote_channel"].best(qc_matches)
+        if self.verify_claims:
+            # Same groundedness the verification spine applies later, so a
+            # normalizable value (e.g. "S$ 129" vs "S$129") is not deprioritized.
+            grounded = [
+                m for m in qc_matches if value_grounded(m.value or "", page.text or "")
+            ]
+            best = self._extractors["quote_channel"].best(grounded) or best
         quote_channel = None
         quote_ref = None
         if best and refs:

@@ -35,8 +35,6 @@ def create_app():
         ) from exc
 
     from ..agent.controller import Controller
-    from ..tools.fetch_service import MockFetchProvider
-    from ..tools.search_service import MockSearchProvider
     from ..modes.classifier import ModeClassifier
 
     app = FastAPI(title="spider-qwen", version="0.1.0")
@@ -63,11 +61,9 @@ def create_app():
                 detail="Live providers are disabled. Set SPIDER_QWEN_ALLOW_LIVE=1 on the server to enable.",
             )
         offline = req.offline or not allow_live
-        controller = Controller(
-            state_dir=state_dir,
-            search_provider=MockSearchProvider() if offline else None,
-            fetch_provider=MockFetchProvider() if offline else None,
-        )
+        # offline=True is the controller-level guarantee: mock search/fetch AND
+        # no env-driven live Qwen wiring (router, NLI, JSON extractor).
+        controller = Controller(state_dir=state_dir, offline=offline)
         result = await controller.run(req.query, mode=req.mode, target_country=req.country)
         return result.model_dump(mode="json")
 

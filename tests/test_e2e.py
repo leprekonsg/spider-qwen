@@ -9,6 +9,7 @@ and audit logs are persisted, and the benchmark harness reports metrics.
 from __future__ import annotations
 
 import json
+import os
 
 from spider_qwen.api.cli import main
 from spider_qwen.benchmarks.evaluate_service_mode import run_gold_set
@@ -202,6 +203,89 @@ def test_cli_run_with_mock_qwen_json(capsys, tmp_path, monkeypatch):
     verify = _run_cli(capsys, ["evidence", "verify", result["run_id"]])
     assert verify["issues"] == []
     assert verify["checked_claims"] >= 1
+
+
+def test_cli_judged_demo_profile_enables_trust_surfaces(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    for name in (
+        "QWEN_STRUCTURED_EXTRACTION_ENABLED",
+        "QWEN_ROUTER_FALLBACK_ENABLED",
+        "QWEN_PAGE_JUDGE_ENABLED",
+        "SPIDER_QWEN_VERIFICATION_ENABLED",
+        "QWEN_NLI_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    result = _run_cli(capsys, [
+        "run", "office cleaning Singapore", "--mode", "service_quote_required",
+        "--offline", "--judged-demo",
+    ])
+    assert result["rfq_drafts"]
+    assert result["serendipity"]["s3_risk_signals"] is not None
+    assert result["metrics"]["verification_assessments"]
+    draft = result["rfq_drafts"][0]
+    assert draft["evidence_grade"] in {"high", "moderate", "low", "very_low"}
+    assert draft["belief_interval"] is not None
+    verify = _run_cli(capsys, ["evidence", "verify", result["run_id"]])
+    assert verify["chain_ok"] is True
+    assert "SPIDER_QWEN_VERIFICATION_ENABLED" not in os.environ
+
+
+def test_offline_judged_demo_builds_no_live_qwen_clients(tmp_path, monkeypatch):
+    # The dangerous combination: --offline --judged-demo with a real API key in
+    # the env. offline is a guarantee -- the profile's flags must wire mocks or
+    # heuristics, never a live DashScope client.
+    import argparse
+
+    from spider_qwen.api.cli import _apply_judged_demo_profile, _build_controller, _restore_env
+    from spider_qwen.tools.qwen_json_extractor import MockQwenJsonExtractor
+
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test-not-a-real-key")
+    monkeypatch.delenv("TINYFISH_API_KEY", raising=False)  # offline needs no keys at all
+    for name in (
+        "QWEN_STRUCTURED_EXTRACTION_ENABLED",
+        "QWEN_ROUTER_FALLBACK_ENABLED",
+        "QWEN_PAGE_JUDGE_ENABLED",
+        "SPIDER_QWEN_VERIFICATION_ENABLED",
+        "QWEN_NLI_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    args = argparse.Namespace(offline=True, judged_demo=True, qwen_json=False,
+                              serendipity=False, require_review=None)
+    prior = _apply_judged_demo_profile(args)
+    try:
+        controller = _build_controller(args)
+    finally:
+        _restore_env(prior)
+
+    assert controller.offline is True
+    assert controller.qwen_router is None  # no live router fallback
+    assert controller.minicheck is None  # spine stays on the deterministic heuristic
+    assert isinstance(controller.qwen_json_extractor, MockQwenJsonExtractor)
+    assert controller.page_judge is not None and controller.page_judge.llm is None
+    assert controller.verify_claims is True  # the trust surface itself stays on
+
+
+def test_controller_offline_is_self_sufficient(monkeypatch):
+    # Direct construction, no injected providers, no keys: offline=True must
+    # default to mock search/fetch instead of raising TinyFishError, and must
+    # ignore env-driven live Qwen wiring.
+    from spider_qwen.agent.controller import Controller
+    from spider_qwen.tools.fetch_service import MockFetchProvider
+    from spider_qwen.tools.search_service import MockSearchProvider
+
+    monkeypatch.delenv("TINYFISH_API_KEY", raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test-not-a-real-key")
+    monkeypatch.setenv("QWEN_ROUTER_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("QWEN_NLI_ENABLED", "1")
+
+    controller = Controller(offline=True, state_dir=None, persist=False)
+    assert isinstance(controller.search_provider, MockSearchProvider)
+    assert isinstance(controller.fetch_provider, MockFetchProvider)
+    assert controller.qwen_router is None
+    assert controller.minicheck is None
 
 
 def test_cli_run_reason_uses_reasoning_spine(capsys, tmp_path, monkeypatch):

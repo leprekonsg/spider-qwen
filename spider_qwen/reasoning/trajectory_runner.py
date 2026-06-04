@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from .. import SCHEMA_VERSION
 from .process_reward import ProcessReward
 from .recursive_refiner import build_repair_queries, find_evidence_gaps
+from .smc import SmcSummary, infer_trajectory_posterior
 from .trajectory import (
     BundleMetrics,
     ReasoningBudget,
@@ -62,6 +63,7 @@ class ReasoningResult(BaseModel):
     total_fetches: int = 0
     within_budget: bool = True
     disputed: bool = False
+    smc: SmcSummary | None = None
 
 
 def _merge(base: TrajectoryBundle, repair: TrajectoryBundle) -> TrajectoryBundle:
@@ -169,8 +171,17 @@ class TrajectoryRunner:
         ranked = self.reward.score_all(bundles)
         winner = ranked[0] if ranked else None
         within = total_s <= self.budget.search_ceiling and total_f <= self.budget.fetch_ceiling
+        smc = infer_trajectory_posterior(ranked)
+        explanation = _explain(ranked)
+        if smc.abstain and winner is not None:
+            # A diffuse posterior means the strategy choice is not robust; the
+            # winner still surfaces (best evidence available) but qualified.
+            explanation += (
+                f" Trajectory posterior is diffuse ({smc.rationale});"
+                " treat the winning strategy as provisional."
+            )
         return ReasoningResult(
-            query=query, mode=mode, winner=winner, bundles=ranked, explanation=_explain(ranked),
+            query=query, mode=mode, winner=winner, bundles=ranked, explanation=explanation,
             total_searches=total_s, total_fetches=total_f, within_budget=within,
-            disputed=bool(winner and winner.disputed_count > 0),
+            disputed=bool(winner and winner.disputed_count > 0), smc=smc,
         )

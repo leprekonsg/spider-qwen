@@ -10,11 +10,15 @@ from spider_qwen.evidence.ledger import EvidenceLedger
 from spider_qwen.evidence.transparency import (
     CitationProof,
     MerkleLog,
+    RedactedLeafOpening,
     TreeHead,
     leaf_hash,
+    leaf_salt,
+    redact_leaf_data,
     verify_citation,
     verify_consistency,
     verify_inclusion,
+    verify_redacted_leaf,
 )
 
 # Generation (recursive, RFC 6962 section 2.1) and verification (iterative,
@@ -143,6 +147,38 @@ def test_merkle_log_and_linear_chain_bind_the_same_digests():
     assert ledger.verify_chain().ok
 
 
+def test_redacted_merkle_log_commits_to_salted_leaf_without_exposing_chain_hash():
+    ledger = _ledger_with_items()
+    target = ledger.items()[1]
+    log = MerkleLog.from_ledger(ledger, redact_salt="demo-salt")
+    proof = log.citation_proof(ledger, target.ledger_id)
+    salt = leaf_salt("demo-salt", 1)  # per-leaf: opening leaf 1 unblinds only leaf 1
+    commitment = redact_leaf_data(target.chain_hash, salt)
+
+    assert proof.leaf_data == commitment
+    assert proof.leaf_data != target.chain_hash
+    # Sibling leaves commit under different derived salts.
+    assert leaf_salt("demo-salt", 0) != salt
+    assert verify_citation(proof)
+    assert verify_redacted_leaf(RedactedLeafOpening(
+        leaf_data=target.chain_hash,
+        salt=salt,
+        commitment=proof.leaf_data,
+    ))
+    assert not verify_redacted_leaf(RedactedLeafOpening(
+        leaf_data=target.chain_hash,
+        salt="wrong-salt",
+        commitment=proof.leaf_data,
+    ))
+    # Untrusted opening: a leaf that is not a chain-hash digest is invalid,
+    # never an error (and cannot equivocate via ambiguous concatenation).
+    assert not verify_redacted_leaf(RedactedLeafOpening(
+        leaf_data="not-a-digest",
+        salt=salt,
+        commitment=redact_leaf_data("not-a-digest", salt),
+    ))
+
+
 def test_ledger_persist_includes_tree_head(tmp_path):
     ledger = EvidenceLedger("run_tlog", state_dir=tmp_path)
     ledger.record(source_tool="mock", url="https://example.com", snippet="s")
@@ -220,16 +256,14 @@ def test_sth_signed_by_attacker_key_fails_against_trust_anchor():
     # An attacker who rewrites the ledger can re-sign with a fresh keypair;
     # the STH then self-validates against its own embedded key. Verification
     # must therefore anchor on the EXPECTED key, not the embedded one.
-    try:
-        from spider_qwen.evidence.transparency import (
-            generate_signing_key,
-            sign_tree_head,
-            verify_signed_tree_head,
-        )
+    pytest.importorskip("cryptography")  # visible SKIP, never a silent green pass
+    from spider_qwen.evidence.transparency import (
+        generate_signing_key,
+        sign_tree_head,
+        verify_signed_tree_head,
+    )
 
-        trusted_key = generate_signing_key()
-    except ImportError:
-        return  # covered by the hint assertion above when [crypto] is absent
+    trusted_key = generate_signing_key()
     attacker_key = generate_signing_key()
     head = make_log(3).tree_head()
     legit = sign_tree_head(head, trusted_key)
@@ -237,3 +271,46 @@ def test_sth_signed_by_attacker_key_fails_against_trust_anchor():
     assert verify_signed_tree_head(legit, legit.public_key)
     assert not verify_signed_tree_head(forged, legit.public_key)
     assert not verify_signed_tree_head(legit, "")  # no anchor -> no trust
+
+
+def test_ledger_persist_signs_tree_head_when_env_key_is_configured(tmp_path, monkeypatch):
+    pytest.importorskip("cryptography")  # visible SKIP, never a silent green pass
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from spider_qwen.evidence.transparency import (
+        generate_signing_key,
+        verify_signed_tree_head,
+        SignedTreeHead,
+    )
+    import json
+
+    key = generate_signing_key()
+    monkeypatch.setenv("SPIDER_QWEN_STH_SIGNING_KEY", key.hex())
+    ledger = EvidenceLedger("run_signed", state_dir=tmp_path)
+    ledger.record(source_tool="mock", url="https://example.com", snippet="s")
+    path = ledger.persist()
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    sth = SignedTreeHead.model_validate(payload["signed_tree_head"])
+    assert sth.head.root_hash == payload["tree_head"]["root_hash"]
+    # Trust-anchor semantics: derive the expected public key from the private
+    # key we configured, independently of the (informational) embedded one.
+    anchor = Ed25519PrivateKey.from_private_bytes(key).public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw,
+    ).hex()
+    assert verify_signed_tree_head(sth, anchor)
+    assert not verify_signed_tree_head(sth, "00" * 32)
+
+
+def test_malformed_sth_signing_key_fails_loud(monkeypatch):
+    from spider_qwen.evidence.ledger import sth_signing_key_from_env
+
+    monkeypatch.setenv("SPIDER_QWEN_STH_SIGNING_KEY", "not-hex")
+    with pytest.raises(ValueError, match="encoded as hex"):
+        sth_signing_key_from_env()
+    monkeypatch.setenv("SPIDER_QWEN_STH_SIGNING_KEY", "abcd")
+    with pytest.raises(ValueError, match="exactly 32 bytes"):
+        sth_signing_key_from_env()
+    monkeypatch.delenv("SPIDER_QWEN_STH_SIGNING_KEY")
+    assert sth_signing_key_from_env() is None

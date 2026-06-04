@@ -119,6 +119,18 @@ def _relation_grounded(subject: str, norm_value: str, premise: str) -> bool:
     return False
 
 
+def value_grounded(value: str, premise: str) -> bool:
+    """Is the value present in the premise, under MiniCheck normalization?
+
+    Public seam so callers pre-filtering on groundedness (e.g. preferring a
+    span-grounded quote channel) use the SAME notion the verification spine
+    applies later -- a raw substring check would diverge on currency symbols
+    and whitespace.
+    """
+    norm_value = _norm(value)
+    return bool(norm_value) and _value_grounded(norm_value, premise or "")
+
+
 def _value_grounded(norm_value: str, premise: str) -> bool:
     """Is the (normalized) claim value present in the premise?
 
