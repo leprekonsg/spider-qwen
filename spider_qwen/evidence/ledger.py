@@ -114,6 +114,12 @@ class EvidenceLedger:
     def deduped_items(self) -> list[EvidenceItem]:
         return dedupe_items(self.items())
 
+    def transparency_log(self):
+        """RFC 6962 Merkle log over the chain hashes (externally verifiable proofs)."""
+        from .transparency import MerkleLog
+
+        return MerkleLog.from_ledger(self)
+
     def verify_chain(self) -> ChainVerificationResult:
         """Re-walk the Merkle chain; any tampered or mis-linked row is reported."""
         result = ChainVerificationResult(run_id=self.run_id)
@@ -151,6 +157,10 @@ class EvidenceLedger:
             "run_id": self.run_id,
             "items": [item.model_dump() for item in self._items.values()],
         }
+        if self._items:
+            # Published commitment: external parties verify citation inclusion
+            # proofs against this head without trusting the ledger file.
+            payload["tree_head"] = self.transparency_log().tree_head().model_dump()
         target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return target
 

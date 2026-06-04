@@ -38,6 +38,7 @@ from ..governance.review_events import ReviewStore
 from ..memory.episodic import EpisodicMemory, EpisodicRecord
 from ..memory.mcp import SemanticMemoryMcpAdapter
 from ..memory.promotion import should_promote_contact
+from ..memory.citation_rank import record_citations
 from ..memory.recall import rfq_eligible
 from ..memory.semantic import MemoryRecall, SemanticFact, SemanticMemory
 from ..memory.working import WorkingMemory
@@ -287,6 +288,15 @@ class Controller:
                                 "candidates_blocked_unverified": 0}
         if self.verify_claims:
             validated, verification_metrics = self._verify_candidates(ledger, validated, tracer)
+
+        # Synthesis A: ledger-supervised citation counts. A validated candidate
+        # whose evidence chain includes a recalled semantic_memory row actually
+        # *used* that fact, so its citation_count grows and the recall ranker
+        # boosts it next session (memory/citation_rank.py).
+        if memory_recalls and self.memory_mcp is not None and hasattr(self.memory_mcp, "memory"):
+            cited = record_citations(self.memory_mcp.memory, ledger, validated)
+            if cited:
+                audit.record("memory_citations_recorded", count=cited)
 
         stop_reason = self._stop_reason(chosen, validated, candidates, tracker, budget)
 

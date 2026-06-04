@@ -28,6 +28,9 @@ server = ["fastapi>=0.115", "uvicorn>=0.29", "starlette>=1.0.1"]
 # T-7.1: expose spider-qwen as an MCP stdio server. Optional -- handlers are
 # dependency-free; only the FastMCP adapter (spider_qwen.mcp.server) needs this.
 mcp = ["mcp>=1.2"]
+# Ed25519 signing of transparency-log tree heads (evidence/transparency.py).
+# Merkle proofs themselves are dependency-free; only STH signing needs this.
+crypto = ["cryptography>=42"]
 dev = ["pytest>=8.0", "pygments>=2.7"]
 
 [project.scripts]
