@@ -88,6 +88,52 @@ def test_consistency_same_size_requires_equal_roots_and_empty_proof():
     assert not verify_consistency(6, 6, log.root_hash(6), log.root_hash(6), ["junk"])
 
 
+def test_consistency_rejects_truncated_or_padded_proof():
+    # The verifier's branch sequence -- hence the only acceptable path length
+    # -- is fixed by (first, second) alone, so a shortened or extended proof
+    # must fail on structure regardless of element content. Sweep every pair:
+    # drop each single element, then every proper prefix (k=0 also locks the
+    # power-of-two branch, which self-seeds the walk with the first root and
+    # must still reject an empty proof), then a well-formed-digest extension.
+    log = make_log()
+    filler = leaf_hash("not-in-any-proof")  # valid hex: only the length is wrong
+    for first in range(1, len(LEAVES) + 1):
+        for second in range(first + 1, len(LEAVES) + 1):
+            proof = log.consistency_proof(first, second)
+            roots = (log.root_hash(first), log.root_hash(second))
+            for i in range(len(proof)):
+                assert not verify_consistency(
+                    first, second, *roots, proof[:i] + proof[i + 1 :]
+                ), (first, second, i)
+            for k in range(len(proof)):
+                assert not verify_consistency(
+                    first, second, *roots, proof[:k]
+                ), (first, second, k)
+            assert not verify_consistency(
+                first, second, *roots, proof + [filler]
+            ), (first, second)
+
+
+def test_consistency_rejects_first_size_greater_than_second():
+    # "The log shrank" is never a valid consistency claim. The size guard is
+    # load-bearing, not redundant: without it, a power-of-two first with an
+    # empty proof and equal roots self-seeds the walk and verifies -- an
+    # equivocated root presented at two sizes would prove its own consistency.
+    log = make_log(8)
+    proof = log.consistency_proof(5, 8)
+    root4, root5, root8 = log.root_hash(4), log.root_hash(5), log.root_hash(8)
+    assert verify_consistency(5, 8, root5, root8, proof)  # forward sanity
+    assert not verify_consistency(8, 5, root8, root5, proof)
+    assert not verify_consistency(8, 5, root5, root8, proof)
+    assert not verify_consistency(4, 2, root4, root4, [])  # the forgery shape
+    # Degenerate first sizes fail closed, never raise.
+    assert not verify_consistency(0, 8, root8, root8, [])
+    assert not verify_consistency(-1, 8, root8, root8, proof)
+    # The generator refuses to produce a backwards proof at all.
+    with pytest.raises(ValueError, match="consistency range"):
+        log.consistency_proof(6, 3)
+
+
 def test_proof_bounds_raise():
     log = make_log(4)
     with pytest.raises(ValueError):
