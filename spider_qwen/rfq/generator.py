@@ -10,6 +10,7 @@ professional English: short, direct, polite.
 
 from __future__ import annotations
 
+from ..evidence.belief import BeliefInterval
 from ..evidence.models import EvidenceRef
 from ..modes.contracts import QuoteChannelType, ServiceCandidate
 from .checklist import RFQChecklistBuilder, compute_checklist_completeness
@@ -31,6 +32,8 @@ class RFQGenerator:
         query: str,
         candidate: ServiceCandidate,
         target_country: str | None = None,
+        evidence_grade: str | None = None,
+        belief_interval: BeliefInterval | None = None,
     ) -> RFQDraft:
         vendor = RFQVendor(
             vendor_name=candidate.vendor_name,
@@ -48,6 +51,17 @@ class RFQGenerator:
         ]
         refs: list[EvidenceRef] = list(candidate.evidence_refs)
 
+        # Trust surface: how confident the buyer should be in this draft's
+        # grounding, stated rather than implied.
+        if evidence_grade is not None:
+            assumptions.append(f"Evidence grade (GRADE): {evidence_grade}.")
+        if belief_interval is not None:
+            assumptions.append(
+                f"Quote channel belief interval [Bel, Pl] = "
+                f"[{belief_interval.belief}, {belief_interval.plausibility}]"
+                f" (uncertainty {belief_interval.uncertainty})."
+            )
+
         # Hard stop 1: no evidenced quote channel -> do not write a polished RFQ.
         if candidate.quote_channel is None:
             assumptions.append("No quote channel was evidenced; polished RFQ withheld.")
@@ -59,6 +73,8 @@ class RFQGenerator:
                 assumptions_and_limits=assumptions,
                 vendor=vendor,
                 evidence_refs=refs,
+                evidence_grade=evidence_grade,
+                belief_interval=belief_interval,
             )
 
         # Hard stop 2: insufficient grounding -> incomplete.
@@ -77,6 +93,8 @@ class RFQGenerator:
             assumptions_and_limits=assumptions,
             vendor=vendor,
             evidence_refs=refs,
+            evidence_grade=evidence_grade,
+            belief_interval=belief_interval,
         )
 
     def _render_email(self, query: str, candidate: ServiceCandidate) -> str:

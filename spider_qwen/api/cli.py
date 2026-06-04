@@ -5,6 +5,7 @@
   spider-qwen run "500 ergonomic chairs Singapore" --mode product_exact_price
   spider-qwen run "NE5532 substitute" --reason     # multi-trajectory reasoning spine
   spider-qwen evidence show <run_id>
+  spider-qwen evidence prove <run_id>   # RFC 6962 citation proof + tamper demo
   spider-qwen benchmark --gold-set spider_qwen/benchmarks/gold_set.json
 
 Use --offline to run with deterministic mock providers (no API keys needed).
@@ -89,8 +90,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_evidence(args: argparse.Namespace) -> int:
-    if args.evidence_command not in {"show", "verify", "graph"}:
-        print("usage: spider-qwen evidence [show|verify|graph] <run_id>", file=sys.stderr)
+    if args.evidence_command not in {"show", "verify", "graph", "prove"}:
+        print("usage: spider-qwen evidence [show|verify|graph|prove] <run_id>", file=sys.stderr)
         return 2
     try:
         ledger = EvidenceLedger.load(args.run_id, _state_dir())
@@ -112,8 +113,72 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
     if args.evidence_command == "graph":
         print(render_supplier_graph(ledger))
         return 0
+    if args.evidence_command == "prove":
+        return _evidence_prove(ledger, getattr(args, "ledger_id", None))
     print(json.dumps([item.model_dump() for item in ledger.items()], indent=2))
     return 0
+
+
+def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None) -> int:
+    """RFC 6962 citation proof for one ledger row, plus a tamper demonstration.
+
+    Emits the inclusion proof an external party can verify without the ledger,
+    verifies it, then flips one hex digit of the leaf and shows the same proof
+    fail -- the transparency log made visible. With the crypto extra installed
+    the tree head is also Ed25519-signed and checked against the right and a
+    wrong trust anchor.
+    """
+    from ..evidence.transparency import MerkleLog, verify_citation
+
+    items = ledger.items()
+    target = items[0] if ledger_id is None else next(
+        (i for i in items if i.ledger_id == ledger_id), None
+    )
+    if target is None:
+        print(f"ledger_id '{ledger_id}' not found in run '{ledger.run_id}'. "
+              f"Use 'spider-qwen evidence show {ledger.run_id}' to list rows.", file=sys.stderr)
+        return 2
+
+    log = MerkleLog.from_ledger(ledger)
+    proof = log.citation_proof(ledger, target.ledger_id)
+    ok = verify_citation(proof)
+
+    # Tamper beat: one flipped hex digit in the committed leaf must break the proof.
+    flipped = ("0" if proof.leaf_data[0] != "0" else "1") + proof.leaf_data[1:]
+    tampered_ok = verify_citation(proof.model_copy(update={"leaf_data": flipped}))
+
+    out: dict = {
+        "run_id": ledger.run_id,
+        "ledger_id": target.ledger_id,
+        "url": target.url,
+        "citation_proof": proof.model_dump(mode="json"),
+        "proof_verified": ok,
+        "tamper_demo": {
+            "description": "same proof with one hex digit of the leaf flipped",
+            "proof_verified": tampered_ok,
+        },
+    }
+    try:
+        from ..evidence.transparency import (
+            generate_signing_key,
+            sign_tree_head,
+            verify_signed_tree_head,
+        )
+
+        # Demo keypair (ephemeral). In production the verifier pins the public
+        # key out of band; verifying against the STH's embedded key would let
+        # an attacker re-sign a rewritten ledger and self-validate.
+        sth = sign_tree_head(proof.tree_head, generate_signing_key())
+        out["signed_tree_head"] = {
+            "sth": sth.model_dump(mode="json"),
+            "verified_against_trust_anchor": verify_signed_tree_head(sth, sth.public_key),
+            "verified_against_attacker_key": verify_signed_tree_head(sth, "00" * 32),
+        }
+    except ImportError as exc:
+        out["signed_tree_head"] = {"unavailable": str(exc)}
+
+    print(json.dumps(out, indent=2))
+    return 0 if ok and not tampered_ok else 1
 
 
 def _cmd_memory(args: argparse.Namespace) -> int:
@@ -267,8 +332,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=_cmd_run)
 
     p_ev = sub.add_parser("evidence", help="Inspect the evidence ledger of a run")
-    p_ev.add_argument("evidence_command", choices=["show", "verify", "graph"])
+    p_ev.add_argument("evidence_command", choices=["show", "verify", "graph", "prove"])
     p_ev.add_argument("run_id")
+    p_ev.add_argument("--ledger-id", default=None,
+                      help="prove: which row to prove (default: first row)")
     p_ev.set_defaults(func=_cmd_evidence)
 
     p_mem = sub.add_parser("memory", help="Inspect or revalidate semantic memory")

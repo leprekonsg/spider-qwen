@@ -182,6 +182,18 @@ class Policy:
     def qwen_page_judge_enabled(self) -> bool:
         return _env_bool("QWEN_PAGE_JUDGE_ENABLED", self.data.get("qwen", {}).get("page_judge_enabled", False))
 
+    def qwen_nli_enabled(self) -> bool:
+        # T-2.2 seam: Qwen scores (claim, span) entailment inside MiniCheck.
+        # Off by default; the deterministic heuristic keeps final authority.
+        return _env_bool("QWEN_NLI_ENABLED", self.data.get("qwen", {}).get("nli_enabled", False))
+
+    def qwen_nli_model(self) -> str:
+        return (
+            os.getenv("QWEN_NLI_MODEL")
+            or str(self.data.get("qwen", {}).get("nli_model") or "")
+            or "qwen-flash"
+        )
+
     def verification_enabled(self) -> bool:
         # T-2.2 verification spine. Off by default; the deterministic gatekeeper
         # blocks candidates whose critical claims are not grounded in evidence.

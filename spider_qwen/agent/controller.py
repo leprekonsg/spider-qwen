@@ -59,7 +59,8 @@ from ..observability.tracing import Tracer
 from ..ranking.contact_ranker import ContactRanker
 from ..ranking.geo_strategy import SEA_COUNTRIES, GeoStrategy, build_query_templates
 from ..ranking.product_ranker import ProductRanker
-from ..ranking.serendipity import build_serendipity_result
+from ..evidence.belief import quote_channel_interval
+from ..ranking.serendipity import build_serendipity_result, disputed_fact_signals
 from ..ranking.service_ranker import ServiceRanker
 from ..serendipity.corrective import corrective_queries, evaluate_retrieval
 from ..serendipity.query_rewrite import merge_gather_queries
@@ -130,6 +131,13 @@ class Controller:
         # pipeline is unchanged unless enabled here or via policy.
         self.verify_claims = self.policy.verification_enabled() if verify is None else verify
         self.minicheck = minicheck
+        if self.minicheck is None and self.policy.qwen_nli_enabled():
+            # Qwen scores (claim, span) entailment through MiniCheck's model
+            # seam; the seam clamps the score, re-applies the co-location
+            # guard, and falls back to the heuristic on any model failure.
+            from ..verification.qwen_nli import QwenNliScorer
+
+            self.minicheck = MiniCheck(model=QwenNliScorer(model=self.policy.qwen_nli_model()))
         self.memory_mcp = memory_mcp
         if self.memory_mcp is None and self.state_dir is not None:
             # ONE SemanticMemory instance serves recall, promotion, and citation
@@ -323,11 +331,20 @@ class Controller:
         stop_reason = self._stop_reason(chosen, validated, candidates, tracker, budget)
 
         # T-1.1: reshape the ranked candidates into the four-slot serendipity view.
-        serendipity_result = build_serendipity_result(ranked, mode=chosen.value)
+        # Disputed memory facts about this run's vendors whose fused [Bel, Pl]
+        # gap exceeds UNCERTAINTY_TAU surface as explicit S3 risk signals.
+        serendipity_result = build_serendipity_result(
+            ranked, mode=chosen.value,
+            extra_risk_signals=self._disputed_belief_signals(ledger, ranked, audit),
+        )
 
         rfq_drafts: list[dict] = []
         if route.produces_rfq:
-            rfq_drafts = self._build_rfqs(query, validated, target_country, metrics, audit, run_id, review_store)
+            rfq_drafts = self._build_rfqs(
+                query, validated, target_country, metrics, audit, run_id, review_store,
+                ledger=ledger,
+                assessments=verification_metrics["verification_assessments"],
+            )
 
         metrics.search_calls_total = tracker.search_calls
         metrics.fetch_urls_total = tracker.fetch_urls
@@ -974,16 +991,27 @@ class Controller:
         audit: AuditLog,
         run_id: str,
         review_store: ReviewStore | None,
+        *,
+        ledger: EvidenceLedger | None = None,
+        assessments: dict[str, dict[str, str]] | None = None,
     ) -> list[dict]:
         generator = RFQGenerator(
             tone=self.policy.rfq_tone,
             minimum_completeness=self.policy.minimum_checklist_completeness,
         )
+        assessments = assessments or {}
         drafts: list[dict] = []
         for cand in validated:
             if not isinstance(cand, ServiceCandidate):
                 continue
-            draft = generator.generate(query=query, candidate=cand, target_country=target_country)
+            draft = generator.generate(
+                query=query, candidate=cand, target_country=target_country,
+                # Trust surface on the draft itself: the spine's GRADE for this
+                # candidate (None when verification is off) and the DS interval
+                # fused over the quote channel's source reliabilities.
+                evidence_grade=(assessments.get(cand.vendor_name) or {}).get("grade"),
+                belief_interval=quote_channel_interval(cand, ledger),
+            )
             metrics.rfq_drafts_total += 1
             if draft.status == "incomplete":
                 metrics.rfq_incomplete_total += 1
@@ -1111,6 +1139,31 @@ class Controller:
             self._persist_supplier_graph(ctx.ledger)
             ctx.tracer.persist() if ctx.tracer else None
             audit.persist()
+
+    def _disputed_belief_signals(self, ledger: EvidenceLedger, ranked: list, audit: AuditLog):
+        """S3 signals for disputed memory facts about this run's vendors.
+
+        DS fusion (evidence/belief.py) turns each dispute into a [Bel, Pl]
+        interval; wide gaps (or Yager-rule fusions) become RiskSignals so the
+        uncertainty is surfaced in the run output instead of sitting silently
+        in semantic memory. Scope: facts whose entity matches a ranked vendor
+        -- unrelated disputes are not this run's risks. Every emitted signal
+        is audited (never silent).
+        """
+        memory = self._semantic_memory()
+        if memory is None or not ranked:
+            return []
+        disputed = [
+            f for f in memory.all()
+            if f.status == "disputed" and any(
+                _same_vendor(getattr(c, "vendor_name", ""), f.entity_name) for c in ranked
+            )
+        ]
+        signals = disputed_fact_signals(disputed, ledger)
+        if signals:
+            audit.record("belief_uncertainty_flagged", count=len(signals),
+                         entities=[s.entity for s in signals])
+        return signals
 
     def _semantic_memory(self) -> SemanticMemory | None:
         """The single shared SemanticMemory instance (never a second one over

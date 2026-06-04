@@ -26,6 +26,12 @@ _MAX_RELIABILITY = 0.99
 # Above this total conflict, Dempster renormalization becomes misleading
 # (Zadeh's paradox); switch to Yager and surface the conflict as unknown mass.
 YAGER_CONFLICT_THRESHOLD = 0.8
+# A fused interval whose Pl - Bel gap exceeds this tau has more than half its
+# mass uncommitted: "we genuinely do not know". Such disputes must surface as
+# proactive S3 risk signals instead of sitting silently in memory. Yager-rule
+# fusions flag regardless of the gap -- the rule only engages above
+# YAGER_CONFLICT_THRESHOLD pairwise conflict, which is itself the warning.
+UNCERTAINTY_TAU = 0.5
 
 
 class BeliefMass(BaseModel):
@@ -153,6 +159,30 @@ def fuse_disputed_fact(fact, ledger=None) -> list[BeliefInterval]:
         intervals.append(_interval(side.value, fused, k, rule, supporting, contradicting))
     intervals.sort(key=lambda i: i.belief, reverse=True)
     return intervals
+
+
+class _ClaimSide:
+    """Duck-typed single side for fusing one undisputed claim's sources."""
+
+    def __init__(self, value: str, confidence: float | None, evidence_refs: list) -> None:
+        self.value = value
+        self.confidence = confidence
+        self.evidence_refs = evidence_refs
+
+
+def quote_channel_interval(candidate, ledger=None) -> BeliefInterval | None:
+    """[Bel, Pl] for a candidate's quote-channel claim, from its sources.
+
+    Single-sided by construction: disputed facts never reach an RFQ draft
+    (controller guardrail), so the interval expresses source commitment --
+    Bel is the fused reliability mass, Pl - Bel the uncommitted remainder.
+    """
+    qc = getattr(candidate, "quote_channel", None)
+    if qc is None or not getattr(qc, "value", ""):
+        return None
+    ref = getattr(qc, "evidence_ref", None)
+    side = _ClaimSide(qc.value, getattr(qc, "confidence", None), [ref] if ref else [])
+    return fuse_disputed_fact(side, ledger)[0]
 
 
 def _own_confidence(side) -> float:
