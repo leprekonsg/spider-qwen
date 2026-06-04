@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field
 from .ledger import EvidenceLedger
 from .models import sha256_hex
 from ..verification.atomic import AtomicClaim, decompose
+from ..verification.grade import grade_claim, worst_grade
+from ..verification.grounding import classify_grounding, worst_decision
 from ..verification.minicheck import MiniCheck
 from ..verification.safe import SafeReverifier
 
@@ -96,6 +98,10 @@ class ClaimVerification(BaseModel):
     critical: bool
     stage: str  # minicheck | minicheck+safe
     rationale: str = ""
+    # GSAR typed grounding: grounded | complementary | contradicted | ungrounded
+    grounding: str = ""
+    decision: str = ""  # proceed | regenerate | replan
+    grade: str = ""  # GRADE: high | moderate | low | very_low
 
 
 class CandidateVerification(BaseModel):
@@ -104,6 +110,8 @@ class CandidateVerification(BaseModel):
     verifier_score: float
     claims: list[ClaimVerification] = Field(default_factory=list)
     unsupported_critical: list[str] = Field(default_factory=list)
+    decision: str = "proceed"  # worst per-claim decision (proceed/regenerate/replan)
+    grade: str = ""  # worst grade among verified claims
 
 
 class VerificationSpine:
@@ -127,19 +135,24 @@ class VerificationSpine:
         results = [self._verify_claim(candidate, claim) for claim in decompose(candidate)]
         unsupported_critical = [r.claim_id for r in results if r.critical and not r.verified]
         score = round(min((r.verifier_score for r in results), default=1.0), 4)
+        verified_grades = [r.grade for r in results if r.verified and r.grade]
         return CandidateVerification(
             vendor_name=getattr(candidate, "vendor_name", "") or "",
             verified=not unsupported_critical, verifier_score=score,
             claims=results, unsupported_critical=unsupported_critical,
+            decision=worst_decision([r.decision for r in results]),
+            grade=worst_grade(verified_grades) if verified_grades else "very_low",
         )
 
     def _verify_claim(self, candidate: Any, claim: AtomicClaim) -> ClaimVerification:
         ref = self._ref_for_claim(candidate, claim)
         premise = self._premise_from_ref(ref)
+        subject = self._minicheck_subject(claim)
         result = self.minicheck.check(
             claim=claim.predicate, value=claim.object_value, evidence_span=premise,
-            field=claim.field, subject=self._minicheck_subject(claim),
+            field=claim.field, subject=subject,
         )
+        cited_supported = result.supported
         stage = "minicheck"
         if not result.supported:
             corpus = self._corpus(exclude=premise)
@@ -147,14 +160,86 @@ class VerificationSpine:
             if reverified.score > result.score:
                 result = reverified
             stage = "minicheck+safe"
+        grounding = classify_grounding(
+            supported_on_cited=cited_supported,
+            supported_on_corpus=(not cited_supported) and result.supported,
+            subject=subject, value=claim.object_value, cited_span=premise,
+        )
+        graded = grade_claim(
+            source_class=self._source_class_for(ref),
+            exact_span=self._has_exact_span(ref),
+            grounding=grounding.label,
+            corroborating_spans=self._corroborations(claim, subject, premise)
+            if grounding.label == "grounded" else 1,
+        )
         verification = ClaimVerification(
             claim_id=claim.claim_id, field=claim.field, subject=claim.subject,
             predicate=claim.predicate, verified=result.supported,
             verifier_score=result.score, critical=claim.critical, stage=stage,
             rationale=result.rationale,
+            grounding=grounding.label, decision=grounding.decision,
+            grade=graded.grade,
         )
         self._write_back(ref, verification)
         return verification
+
+    def _source_class_for(self, ref) -> str:
+        """T-2.4 source tier of the cited evidence row (lazy import: cycle)."""
+        from ..governance.source_reliability import (
+            DEFAULT_RELIABILITY, classify_source, host_of,
+        )
+
+        item = self.ledger.get(getattr(ref, "ledger_id", "")) if ref is not None else None
+        if item is None:
+            return "unknown"
+        if item.source_tool == "semantic_memory":
+            # A recalled fact's provenance is the ORIGINAL evidence it was
+            # promoted from (metadata.source_evidence_refs), not the synthetic
+            # recall row -- grading the recall row would erase a manufacturer
+            # pedigree down to "unknown". Classification is URL-only here (the
+            # original page text lives in a previous run's ledger); take the
+            # most reliable class among the original sources.
+            sources = item.metadata.get("source_evidence_refs") or []
+            classes = [classify_source(host_of(s.get("url", "")))
+                       for s in sources if isinstance(s, dict) and s.get("url")]
+            if classes:
+                return max(classes, key=lambda c: DEFAULT_RELIABILITY.get(c, 0.0))
+            return "unknown"
+        # Extraction claim rows carry no page text; classify their source page.
+        parent = self.ledger.get(item.metadata.get("parent_ledger_id") or "")
+        if parent is not None:
+            item = parent
+        return classify_source(host_of(item.final_url or item.url),
+                               text=item.text or "", title=item.title or "")
+
+    def _has_exact_span(self, ref) -> bool:
+        """True when the claim row carries verified character-span offsets."""
+        item = self.ledger.get(getattr(ref, "ledger_id", "")) if ref is not None else None
+        if item is None:
+            return False
+        meta = item.metadata
+        return isinstance(meta.get("start_char"), int) and isinstance(meta.get("end_char"), int)
+
+    def _corroborations(self, claim: AtomicClaim, subject: str, cited_premise: str) -> int:
+        """1 (the cited span) + other ledger spans that also support the claim.
+
+        Stops at CORROBORATION_UPGRADE: the count only feeds the GRADE +1
+        threshold, so checking the remaining corpus (one entailment call per
+        page) would be cost without signal.
+        """
+        from ..verification.grade import CORROBORATION_UPGRADE
+
+        count = 1
+        for span in self._corpus(exclude=cited_premise):
+            if count >= CORROBORATION_UPGRADE:
+                break
+            check = self.minicheck.check(
+                claim=claim.predicate, value=claim.object_value, evidence_span=span,
+                field=claim.field, subject=subject,
+            )
+            if check.supported:
+                count += 1
+        return count
 
     @staticmethod
     def _minicheck_subject(claim: AtomicClaim) -> str:
@@ -217,6 +302,8 @@ class VerificationSpine:
         item.metadata["verified"] = verification.verified
         item.metadata["verifier_score"] = verification.verifier_score
         item.metadata["verifier_stage"] = verification.stage
+        item.metadata["grounding"] = verification.grounding
+        item.metadata["grade"] = verification.grade
 
 
 def _join(title: str | None, text: str) -> str:

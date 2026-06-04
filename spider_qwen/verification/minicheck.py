@@ -37,7 +37,12 @@ _TOKEN = re.compile(r"[a-z0-9@.+]+")
 # or year). Decimals compare by value so "129" still matches "129.00".
 _NUMERIC = re.compile(r"^\d+(?:\.\d+)?$")
 _NUMBER_IN_TEXT = re.compile(r"\d+(?:\.\d+)?")
-_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]?")
+# Sentence boundary: terminal punctuation FOLLOWED BY whitespace (or newline).
+# A bare "." is not a boundary -- emails (sales@acme.sg), domains, and decimal
+# prices (129.50) contain dots, and splitting inside them made it impossible
+# for such values to ever co-occur with the vendor "in one sentence", silently
+# failing every email-valued relation claim.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
 # Generic business tokens must not alone "ground" a vendor name in SAFE corpus scans.
@@ -89,7 +94,7 @@ def _subject_in_sentence(tokens: list[str], sentence: str) -> bool:
 
 
 def _sentences(premise: str) -> list[str]:
-    parts = [s.strip() for s in _SENTENCE_RE.findall(premise or "") if s.strip()]
+    parts = [s.strip() for s in _SENTENCE_SPLIT.split(premise or "") if s and s.strip()]
     return parts if parts else [premise or ""]
 
 

@@ -38,6 +38,7 @@ from ..governance.review_events import ReviewStore
 from ..memory.episodic import EpisodicMemory, EpisodicRecord
 from ..memory.mcp import SemanticMemoryMcpAdapter
 from ..memory.promotion import should_promote_contact
+from ..memory.citation_rank import record_citations
 from ..memory.recall import rfq_eligible
 from ..memory.semantic import MemoryRecall, SemanticFact, SemanticMemory
 from ..memory.working import WorkingMemory
@@ -131,7 +132,18 @@ class Controller:
         self.minicheck = minicheck
         self.memory_mcp = memory_mcp
         if self.memory_mcp is None and self.state_dir is not None:
-            self.memory_mcp = SemanticMemoryMcpAdapter(self.state_dir)
+            # ONE SemanticMemory instance serves recall, promotion, and citation
+            # crediting. Two instances over the same semantic.json clobber each
+            # other across runs: whichever persists last rewrites the file from
+            # its own (possibly stale) in-memory dict, silently dropping the
+            # other's promotions and citation counts.
+            self.memory_mcp = SemanticMemoryMcpAdapter(
+                self.state_dir,
+                memory=SemanticMemory(
+                    self.state_dir,
+                    require_evidence=self.policy.semantic_promotion_requires_evidence,
+                ),
+            )
         self.router = ModeRouter()
         self.planner = Planner()
         # T-1.4: LLM-Compiler + free-tier token buckets (5 search/min, 25 fetch/min).
@@ -284,9 +296,29 @@ class Controller:
         # entailed by their cited evidence; write verified/verifier_score onto the
         # claim ledger rows. Opt-in, so the default offline pipeline is unchanged.
         verification_metrics = {"claims_verified": 0, "claims_unsupported": 0,
-                                "candidates_blocked_unverified": 0}
+                                "candidates_blocked_unverified": 0,
+                                "verification_assessments": {}}
         if self.verify_claims:
             validated, verification_metrics = self._verify_candidates(ledger, validated, tracer)
+
+        # Synthesis A: ledger-supervised citation counts. A VERIFIED candidate
+        # whose evidence chain includes a recalled semantic_memory row actually
+        # *used* that fact, so its citation_count grows and the recall ranker
+        # boosts it next session (memory/citation_rank.py). Crediting requires
+        # the verification spine: without it, a recalled fact that itself made
+        # the candidate validate (quote_channel fill -> completeness 0.75)
+        # would self-reinforce with no external check -- a closed loop. The
+        # spine breaks the loop by forcing recalled rows through SAFE corpus
+        # re-grounding against the CURRENT run's fetched pages.
+        if memory_recalls and self.memory_mcp is not None and hasattr(self.memory_mcp, "memory"):
+            if self.verify_claims:
+                cited = record_citations(self.memory_mcp.memory, ledger, validated)
+                if cited:
+                    audit.record("memory_citations_recorded", count=cited)
+            else:
+                # Not silent: the audit trail says why no counts moved.
+                audit.record("memory_citations_skipped",
+                             reason="claim verification disabled")
 
         stop_reason = self._stop_reason(chosen, validated, candidates, tracker, budget)
 
@@ -677,6 +709,10 @@ class Controller:
         return recalls
 
     def _apply_memory_recalls(self, ctx: ExecutionContext, candidates: list, recalls: list[MemoryRecall]) -> list:
+        # SCOPE (v1): only quote_channel facts on ServiceCandidates are attached
+        # here, and this is the ONLY writer of semantic_memory ledger rows -- so
+        # citation crediting (memory/citation_rank.py) can reach no other fact
+        # field or mode yet. Widening recall coverage means widening this method.
         if not recalls:
             return candidates
         # Guardrail (defense-in-depth): disputed facts must not reach an RFQ draft.
@@ -876,6 +912,9 @@ class Controller:
         spine = VerificationSpine(ledger, minicheck=self.minicheck or MiniCheck())
         kept = []
         verified_claims = unsupported_claims = blocked = 0
+        # GSAR decision + GRADE per kept candidate: computing these and then
+        # dropping them would make the trust signals invisible end to end.
+        assessments: dict[str, dict[str, str]] = {}
         for cand in validated:
             cv = spine.verify_candidate(cand)
             verified_claims += sum(1 for c in cv.claims if c.verified)
@@ -887,13 +926,16 @@ class Controller:
                                   input_count=len(cv.claims), output_count=0,
                                   detail=cv.model_dump(mode="json"))
                 continue
+            assessments[cv.vendor_name] = {"decision": cv.decision, "grade": cv.grade}
             if tracer is not None:
                 tracer.record(step="verify_claims", tool="minicheck_verifier", status="success",
                               input_count=len(cv.claims), output_count=len(cv.claims),
-                              detail={"vendor": cv.vendor_name, "verifier_score": cv.verifier_score})
+                              detail={"vendor": cv.vendor_name, "verifier_score": cv.verifier_score,
+                                      "decision": cv.decision, "grade": cv.grade})
             kept.append(cand)
         metrics = {"claims_verified": verified_claims, "claims_unsupported": unsupported_claims,
-                   "candidates_blocked_unverified": blocked}
+                   "candidates_blocked_unverified": blocked,
+                   "verification_assessments": assessments}
         return kept, metrics
 
     # --- validation / stop ------------------------------------------------
@@ -1070,6 +1112,19 @@ class Controller:
             ctx.tracer.persist() if ctx.tracer else None
             audit.persist()
 
+    def _semantic_memory(self) -> SemanticMemory | None:
+        """The single shared SemanticMemory instance (never a second one over
+        the same semantic.json -- see __init__: parallel instances clobber
+        each other's persisted facts)."""
+        if self.memory_mcp is not None and hasattr(self.memory_mcp, "memory"):
+            return self.memory_mcp.memory
+        if self.state_dir is None:
+            return None
+        return SemanticMemory(
+            self.state_dir,
+            require_evidence=self.policy.semantic_promotion_requires_evidence,
+        )
+
     def _persist_supplier_graph(self, ledger: EvidenceLedger) -> None:
         if self.state_dir is None:
             return
@@ -1080,10 +1135,9 @@ class Controller:
     def _persist_semantic(self, validated, run_id: str, review_store: ReviewStore | None) -> None:
         if self.state_dir is None:
             return
-        memory = SemanticMemory(
-            self.state_dir,
-            require_evidence=self.policy.semantic_promotion_requires_evidence,
-        )
+        memory = self._semantic_memory()
+        if memory is None:
+            return
         for cand in validated:
             if isinstance(cand, ContactCandidate):
                 domain_match = bool(cand.validation_signals.get("domain_match"))

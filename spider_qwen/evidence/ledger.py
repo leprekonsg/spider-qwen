@@ -59,6 +59,10 @@ class EvidenceLedger:
         self._state_dir = Path(state_dir) if state_dir else None
         self._reliability_priors = reliability_priors
         self._chain_tip = ""  # chain_hash of the most recently appended row
+        # The tree_head this ledger was loaded with, if any: re-persisting an
+        # unchanged ledger must keep the original commitment (timestamp), not
+        # silently replace it with a recomputed one.
+        self._loaded_tree_head: dict[str, Any] | None = None
 
     def record(
         self,
@@ -114,6 +118,12 @@ class EvidenceLedger:
     def deduped_items(self) -> list[EvidenceItem]:
         return dedupe_items(self.items())
 
+    def transparency_log(self):
+        """RFC 6962 Merkle log over the chain hashes (externally verifiable proofs)."""
+        from .transparency import MerkleLog
+
+        return MerkleLog.from_ledger(self)
+
     def verify_chain(self) -> ChainVerificationResult:
         """Re-walk the Merkle chain; any tampered or mis-linked row is reported."""
         result = ChainVerificationResult(run_id=self.run_id)
@@ -151,6 +161,20 @@ class EvidenceLedger:
             "run_id": self.run_id,
             "items": [item.model_dump() for item in self._items.values()],
         }
+        if self._items:
+            # Published commitment: external parties verify citation inclusion
+            # proofs against this head without trusting the ledger file. If the
+            # items are unchanged since load, keep the ORIGINAL commitment --
+            # rewriting its timestamp would silently replace what an external
+            # party may already have recorded.
+            head = self.transparency_log().tree_head()
+            prior = self._loaded_tree_head
+            if prior and prior.get("root_hash") == head.root_hash \
+                    and prior.get("tree_size") == head.tree_size:
+                payload["tree_head"] = prior
+            else:
+                payload["tree_head"] = head.model_dump()
+                self._loaded_tree_head = payload["tree_head"]
         target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return target
 
@@ -166,4 +190,19 @@ class EvidenceLedger:
             if ledger._items:
                 # Continue the chain from the last appended row.
                 ledger._chain_tip = next(reversed(ledger._items.values())).chain_hash
+            head = payload.get("tree_head")
+            if head and ledger._items:
+                # The persisted commitment must match the items it covers;
+                # a mismatch means the file was edited after publication.
+                recomputed = ledger.transparency_log().tree_head()
+                if (head.get("run_id") != ledger.run_id
+                        or head.get("tree_size") != recomputed.tree_size
+                        or head.get("root_hash") != recomputed.root_hash):
+                    raise ValueError(
+                        f"Evidence ledger {target} does not match its published "
+                        "tree_head commitment: the file was modified after the "
+                        "commitment was written. Re-run `spider-qwen evidence "
+                        "verify` or restore the file from backup."
+                    )
+            ledger._loaded_tree_head = head
         return ledger

@@ -453,3 +453,28 @@ def test_controller_without_verification_keeps_injected_claim():
     prices = [c.get("price") for c in result.validated_candidates]
     assert 999.0 in prices  # unverified -> fabricated price reaches output
     assert 129.0 in prices  # the grounded candidate also survives (asymmetry guard)
+
+
+# --- sentence boundaries vs dotted values ----------------------------------
+
+def test_email_value_grounds_with_vendor_despite_dots_in_value():
+    # A bare "." is not a sentence boundary: emails and domains contain dots,
+    # and splitting inside them made email-valued relation claims (quote
+    # channels) impossible to verify -- silently failing every one.
+    page = ("Example Cleaning Pte Ltd accepts quotation requests at "
+            "sales@example-cleaning.sg. Call us today.")
+    res = MiniCheck().check(
+        claim="Example Cleaning Pte Ltd accepts quotes at sales@example-cleaning.sg",
+        value="sales@example-cleaning.sg", evidence_span=page,
+        field="quote_channel", subject="Example Cleaning Pte Ltd",
+    )
+    assert res.supported, res.rationale
+
+
+def test_decimal_price_grounds_in_one_sentence():
+    page = "Acme Pte Ltd charges S$129.50 per unit. MOQ 50 units."
+    res = MiniCheck().check(
+        claim="Acme Pte Ltd charges 129.50", value="129.50", evidence_span=page,
+        field="price", subject="Acme Pte Ltd",
+    )
+    assert res.supported, res.rationale

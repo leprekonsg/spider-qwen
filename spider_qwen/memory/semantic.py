@@ -41,6 +41,9 @@ class SemanticFact(BaseModel):
     # MemoryBank re-access counter: each corroborating observation grows the
     # fact's decay stability (spaced repetition). See memory/decay.py (T-4.1).
     reinforcement_count: int = 0
+    # Ledger-supervised usage counter: incremented when a validated candidate
+    # actually cites this fact's recalled row (memory/citation_rank.py).
+    citation_count: int = 0
 
     def key(self) -> str:
         return f"{self.entity_type}:{self.entity_name.lower()}:{self.field}"
@@ -151,6 +154,15 @@ class SemanticMemory:
             self._persist()
         return changed
 
+    def record_citation(self, fact_id: str) -> bool:
+        """Credit one ledger-verified use of a fact (citation_rank ranker signal)."""
+        fact = self._facts.get(fact_id)
+        if fact is None:
+            return False
+        fact.citation_count += 1
+        self._persist()
+        return True
+
     def recall(
         self,
         query: str,
@@ -159,6 +171,7 @@ class SemanticMemory:
         context_budget_chars: int = 1200,
     ) -> list[MemoryRecall]:
         """Return active facts that fit a simple limited-context budget."""
+        from .citation_rank import citation_multiplier
         from .decay import apply_decay
 
         query_terms = _terms(query)
@@ -169,7 +182,8 @@ class SemanticMemory:
             overlap = len(query_terms & haystack)
             if overlap <= 0:
                 continue
-            score = round(decayed * (1.0 + min(overlap, 4) * 0.1), 4)
+            # Term match x decayed confidence x ledger-supervised usage boost.
+            score = round(decayed * (1.0 + min(overlap, 4) * 0.1) * citation_multiplier(fact), 4)
             recalls.append(
                 MemoryRecall(
                     fact=fact,
