@@ -208,6 +208,8 @@ Selected via env or injection; both abstracted behind protocols.
 | Env | Values | Default |
 |---|---|---|
 | `SPIDER_QWEN_SEARCH_PROVIDER` | `tinyfish` · `qwen_mcp` · `mock` | `tinyfish` |
+| `SPIDER_QWEN_MCP_SEARCH_COMMAND` | MCP stdio server command backing `qwen_mcp` search | unset |
+| `SPIDER_QWEN_MCP_SEARCH_TOOL` | tool name on that server | `web_search` |
 | `SPIDER_QWEN_FETCH_PROVIDER` | `tinyfish` · `qwen_web_extractor` · `mock` | `tinyfish` |
 | `QWEN_ROUTER_MODEL` | verified DashScope model id | `qwen3.7-max` |
 | `QWEN_JSON_EXTRACTOR_MODEL` | verified DashScope model id | `qwen-flash` |
@@ -366,7 +368,7 @@ v2 roadmap:
   until demo + benchmark hardening is complete.
 - Conformal abstention requires a hand-graded calibration set; the shipped
   abstainer refuses to claim a guarantee when uncalibrated.
-- The MCP **client** half (consume Google Drive / filesystem MCP) and the DashScope Responses-API `tools=[{type:mcp}]` wiring (the server half ships today).
+- The DashScope Responses-API `tools=[{type:mcp}]` wiring (server-side MCP execution). The stdio server half and the client half both ship in v1: any MCP server exposing a search tool can back discovery via `SPIDER_QWEN_SEARCH_PROVIDER=qwen_mcp` + `SPIDER_QWEN_MCP_SEARCH_COMMAND`.
 - External agent benchmarks (BFCL V4, tau-bench, LOCOMO) once their datasets + live access are wired.
 - The EOL forecaster sidecar (T-6.2). (Live per-call token metering ships in
   v1: Qwen clients record per-call usage and the cost report turns `metered`

@@ -22,10 +22,13 @@ the evidence ledger, and enforce the budget.
 | Search | Fetch |
 |---|---|
 | `TinyFishSearchProvider` | `TinyFishFetchProvider` |
-| `QwenMcpSearchProvider` (inject MCP backend) | `QwenWebExtractorFetchProvider` |
+| `QwenMcpSearchProvider` (MCP stdio backend) | `QwenWebExtractorFetchProvider` |
 | `MockSearchProvider` | `MockFetchProvider` |
 
-Select via `SPIDER_QWEN_SEARCH_PROVIDER` / `SPIDER_QWEN_FETCH_PROVIDER`.
+Select via `SPIDER_QWEN_SEARCH_PROVIDER` / `SPIDER_QWEN_FETCH_PROVIDER`. The
+`qwen_mcp` provider spawns the MCP stdio server named by
+`SPIDER_QWEN_MCP_SEARCH_COMMAND` and calls `SPIDER_QWEN_MCP_SEARCH_TOOL`
+(default `web_search`); results are ledger-backed as `source_tool="mcp_search"`.
 
 ## Qwen WebExtractor (single-page fallback)
 

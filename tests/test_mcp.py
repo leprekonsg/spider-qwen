@@ -87,6 +87,64 @@ def test_mcp_server_missing_dependency_has_actionable_error(monkeypatch):
     assert "[mcp]" in str(exc.value)
 
 
+# --- MCP client half (T-7.1b): consume an MCP server as a search backend ---
+
+_FIXTURE_SERVER = os.path.join(os.path.dirname(__file__), "fixtures", "mcp_search_server.py")
+
+
+def test_mcp_search_backend_from_env_unset_is_none(monkeypatch):
+    from spider_qwen.mcp.client import McpSearchBackend
+
+    monkeypatch.delenv("SPIDER_QWEN_MCP_SEARCH_COMMAND", raising=False)
+    assert McpSearchBackend.from_env() is None
+
+
+def test_mcp_search_backend_from_env_parses_command_and_tool(monkeypatch):
+    from spider_qwen.mcp.client import McpSearchBackend
+
+    monkeypatch.setenv("SPIDER_QWEN_MCP_SEARCH_COMMAND", "python -m some.search.server")
+    monkeypatch.setenv("SPIDER_QWEN_MCP_SEARCH_TOOL", "vendor_search")
+    backend = McpSearchBackend.from_env()
+    assert backend is not None
+    assert backend.command == ["python", "-m", "some.search.server"]
+    assert backend.tool == "vendor_search"
+
+
+def test_unconfigured_qwen_mcp_provider_error_is_actionable(monkeypatch):
+    from spider_qwen.tools.search_service import SearchProviderError, build_search_provider
+
+    monkeypatch.delenv("SPIDER_QWEN_MCP_SEARCH_COMMAND", raising=False)
+    provider = build_search_provider("qwen_mcp")
+    with pytest.raises(SearchProviderError, match="SPIDER_QWEN_MCP_SEARCH_COMMAND"):
+        asyncio.run(provider.search("office cleaning Singapore", "Singapore", "en", 3))
+
+
+def test_mcp_search_backend_round_trip_against_fixture_server():
+    pytest.importorskip("mcp")
+    from spider_qwen.mcp.client import McpSearchBackend
+
+    backend = McpSearchBackend([sys.executable, _FIXTURE_SERVER])
+    rs = asyncio.run(backend("office cleaning Singapore", "Singapore", "en", 2))
+    assert rs.provider == "qwen_mcp"
+    assert len(rs.results) == 2
+    assert all(r.source_tool == "mcp_search" for r in rs.results)
+    assert all(r.url.startswith("https://mcp-vendor-") for r in rs.results)
+
+
+def test_mcp_search_results_are_ledger_backed(monkeypatch):
+    pytest.importorskip("mcp")
+    from spider_qwen.evidence.ledger import EvidenceLedger
+    from spider_qwen.mcp.client import McpSearchBackend
+    from spider_qwen.tools.search_service import QwenMcpSearchProvider, SearchService
+
+    backend = McpSearchBackend([sys.executable, _FIXTURE_SERVER])
+    ledger = EvidenceLedger("run_mcp_client_test")
+    service = SearchService(QwenMcpSearchProvider(backend=backend), ledger)
+    rs = asyncio.run(service.search("office cleaning Singapore", limit=2))
+    assert rs.results and all(r.evidence_ref is not None for r in rs.results)
+    assert {it.source_tool for it in ledger.items()} == {"mcp_search"}
+
+
 def test_mcp_stdio_server_completes_initialize_list_and_call(tmp_path):
     pytest.importorskip("mcp")
     from mcp.client.session import ClientSession

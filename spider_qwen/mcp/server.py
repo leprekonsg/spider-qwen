@@ -5,9 +5,9 @@ Requires the optional ``mcp`` SDK: ``pip install -e '.[mcp]'``. The handlers in
 into a FastMCP server, so importing it never requires ``mcp`` until ``build_server``
 is called. Run as a stdio server with ``python -m spider_qwen.mcp.server``.
 
-Exposes only read-only, bounded tools. Live third-party MCP consumption (Google
-Drive for RFP docs) and the DashScope Responses-API ``tools=[{type:mcp}]`` wiring
-are deferred to Phase 8.
+Exposes only read-only, bounded tools. The client half lives in ``client.py``
+(MCP stdio search backend); the DashScope Responses-API ``tools=[{type:mcp}]``
+wiring is deferred to Phase 8.
 """
 
 from __future__ import annotations

@@ -62,10 +62,12 @@ class TinyFishSearchProvider:
 class QwenMcpSearchProvider:
     """Qwen search via MCP / Model Studio responses backend.
 
-    Qwen Code has no built-in web_search; it is MCP-based. This provider keeps
-    the abstraction in place. Wire a real backend by passing a coroutine
-    `backend(query, location, language, limit) -> SearchResultSet`. Without one
-    it raises, so callers fall back to TinyFish rather than silently no-op.
+    Qwen Code has no built-in web_search; it is MCP-based. The default backend is
+    `mcp.client.McpSearchBackend.from_env()` (an MCP stdio server named by
+    SPIDER_QWEN_MCP_SEARCH_COMMAND); any coroutine
+    `backend(query, location, language, limit) -> SearchResultSet` also works.
+    Without one it raises, so callers fall back to TinyFish rather than silently
+    no-op.
     """
 
     provider_name = "qwen_mcp"
@@ -84,7 +86,9 @@ class QwenMcpSearchProvider:
         if self.backend is None:
             raise SearchProviderError(
                 "QwenMcpSearchProvider has no MCP backend configured. "
-                "Inject a backend or set SPIDER_QWEN_SEARCH_PROVIDER=tinyfish."
+                "Set SPIDER_QWEN_MCP_SEARCH_COMMAND to an MCP stdio server command "
+                "(and optionally SPIDER_QWEN_MCP_SEARCH_TOOL, default web_search), "
+                "or set SPIDER_QWEN_SEARCH_PROVIDER=tinyfish."
             )
         return await self.backend(query, location, language, limit)
 
@@ -210,5 +214,7 @@ def build_search_provider(name: str | None = None, *, fixtures: dict | None = No
     if name == "mock":
         return MockSearchProvider(fixtures=fixtures)
     if name == "qwen_mcp":
-        return QwenMcpSearchProvider()
+        from ..mcp.client import McpSearchBackend
+
+        return QwenMcpSearchProvider(backend=McpSearchBackend.from_env())
     return TinyFishSearchProvider()
