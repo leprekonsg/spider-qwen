@@ -45,7 +45,7 @@ function SignalsRail({ feed = "rail", signals = [], ledger = [] }) {
             ? ledger.slice(0, 8).map(e => (
                 <div key={e.id} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.id}</span>
-                  <span style={{ color: e.status === "verified" ? "#A6BB87" : e.status === "disputed" ? "#D67F6B" : "var(--sq-fog)" }}>{e.status}</span>
+                  <span style={{ color: e.status === "proven" ? "#A6BB87" : e.status === "disputed" ? "#D67F6B" : "var(--sq-fog)" }}>{e.status}</span>
                 </div>
               ))
             : <span style={{ color: "var(--sq-slate-taupe)" }}>empty</span>}

@@ -5,7 +5,7 @@
 // Right: evidence cards materialising as they're verified
 // Bottom: a candidate map building up
 
-function HuntInProgress({ stream, evidence, candidates, query, activePhase, progress }) {
+function HuntInProgress({ stream, evidence, candidates, query, activePhase, progress, seamLabel, pool }) {
   const streamRef = React.useRef(null);
 
   React.useEffect(() => {
@@ -66,7 +66,7 @@ function HuntInProgress({ stream, evidence, candidates, query, activePhase, prog
         }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
             <span className="sq-overline">Reasoning trace</span>
-            <span className="sq-mono-chip">qwen-3 · streaming</span>
+            <span className="sq-mono-chip">{seamLabel || "pipeline · running"}</span>
           </div>
           <div ref={streamRef} style={{
             flex: 1, minHeight: 0, overflow: "auto",
@@ -81,7 +81,7 @@ function HuntInProgress({ stream, evidence, candidates, query, activePhase, prog
                 borderBottom: "1px dashed var(--sq-border)",
               }}>
                 <span style={{ color: "var(--sq-slate-taupe)" }}>
-                  {String(s.t).padStart(4, "0")}ms
+                  {s.t != null ? `${String(s.t).padStart(4, "0")}ms` : "—"}
                 </span>
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <span style={{
@@ -160,14 +160,15 @@ function HuntInProgress({ stream, evidence, candidates, query, activePhase, prog
             <div>
               <div className="sq-overline" style={{ marginBottom: 4 }}>Candidate pool</div>
               <div style={{ fontFamily: "var(--sq-font-serif)", fontSize: 32, color: "var(--sq-bone)", lineHeight: 1 }}>
-                <span style={{ color: "var(--sq-bone)" }}>{candidates}</span>
-                <span style={{ color: "var(--sq-slate-taupe)", fontSize: 22 }}> / 27</span>
+                <span style={{ color: "var(--sq-bone)" }}>{pool ? pool.considered : candidates}</span>
+                {pool && <span style={{ color: "var(--sq-slate-taupe)", fontSize: 22 }}> considered</span>}
               </div>
             </div>
+            {/* Real counts once the run lands; before that, no invented numbers. */}
             <div style={{ display: "flex", gap: 22, fontFamily: "var(--sq-font-mono)", fontSize: 11, color: "var(--sq-slate-taupe)", letterSpacing: "0.06em" }}>
-              <div><div style={{ color: "#A6BB87" }}>verified</div><div style={{ color: "var(--sq-bone)", fontSize: 14, marginTop: 4 }}>{Math.min(candidates, 4)}</div></div>
-              <div><div style={{ color: "#D7A876" }}>partial</div><div style={{ color: "var(--sq-bone)", fontSize: 14, marginTop: 4 }}>{Math.max(0, candidates - 4)}</div></div>
-              <div><div style={{ color: "#D67F6B" }}>disputed</div><div style={{ color: "var(--sq-bone)", fontSize: 14, marginTop: 4 }}>{candidates >= 5 ? 1 : 0}</div></div>
+              <div><div style={{ color: "#A6BB87" }}>validated</div><div style={{ color: "var(--sq-bone)", fontSize: 14, marginTop: 4 }}>{pool ? pool.validated : "—"}</div></div>
+              <div><div style={{ color: "#D7A876" }}>drafts</div><div style={{ color: "var(--sq-bone)", fontSize: 14, marginTop: 4 }}>{pool ? pool.drafts : "—"}</div></div>
+              <div><div style={{ color: "var(--sq-fog)" }}>evidence</div><div style={{ color: "var(--sq-bone)", fontSize: 14, marginTop: 4 }}>{evidence.length}</div></div>
             </div>
           </div>
         </section>
@@ -197,15 +198,15 @@ function kindColor(k) {
 }
 function statusColor(s) {
   return {
-    verified: "#A6BB87",
-    fresh:    "var(--sq-fog)",
+    proven:   "#A6BB87",
+    recorded: "var(--sq-fog)",
     disputed: "#D67F6B",
   }[s] || "var(--sq-smoke)";
 }
 function statusBorder(s) {
   return {
-    verified: "rgba(122,140,94,0.5)",
-    fresh:    "var(--sq-border-strong)",
+    proven:   "rgba(122,140,94,0.5)",
+    recorded: "var(--sq-border-strong)",
     disputed: "rgba(182,92,74,0.55)",
   }[s] || "var(--sq-border-strong)";
 }

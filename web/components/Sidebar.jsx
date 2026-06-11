@@ -1,6 +1,9 @@
 /* global React, SQIcon */
 
-function Sidebar({ active, onNav, onNewRun, runState }) {
+function Sidebar({ active, onNav, onNewRun, runState, runMeta }) {
+  // runMeta comes from the last real run (qwen seams, mode, ledger span);
+  // before any run the footer shows placeholders instead of invented values.
+  const meta = runMeta || {};
   const top = [
     { k: "hunt",      label: "Hunt",      icon: "spider" },
     { k: "shortlist", label: "Shortlist", icon: "suppliers" },
@@ -91,10 +94,10 @@ function Sidebar({ active, onNav, onNewRun, runState }) {
           </span>
         </div>
         <div style={{ fontFamily: "var(--sq-font-mono)", fontSize: 11, color: "var(--sq-smoke)", lineHeight: 1.85 }}>
-          <Row2 k="provider" v="tinyfish.qwen-3" />
-          <Row2 k="mode"     v="service_quote" />
-          <Row2 k="geo"      v="SEA-first" />
-          <Row2 k="ledger"   v="ev_001 … ev_014" />
+          <Row2 k="seams"  v={meta.seams || "no run yet"} />
+          <Row2 k="mode"   v={meta.mode || "—"} />
+          <Row2 k="geo"    v="SEA-first" />
+          <Row2 k="ledger" v={meta.ledger || "—"} />
         </div>
       </div>
 

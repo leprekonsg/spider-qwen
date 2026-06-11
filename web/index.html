@@ -12,9 +12,11 @@
 
 <div id="root"></div>
 
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<!-- Vendored (web/vendor/, pinned react@18.3.1 + @babel/standalone@7.29.0) so
+     the demo runs with no internet; production React builds for speed. -->
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/babel.min.js"></script>
 
 <!-- API client + result->view-model mapper (plain JS, no JSX) -->
 <script src="api.js"></script>
@@ -116,9 +118,16 @@
 
       // Fire the real backend. classify is a cheap deterministic call for the
       // Insights signal panel; run is the full pipeline.
+      const t0 = Date.now();
       window.SQAPI.classify(q).then(c => { classifyRef.current = c; }).catch(() => {});
       window.SQAPI.run(q)
-        .then(r => { resultRef.current = window.SQMAP.mapResult(r); })
+        .then(r => {
+          resultRef.current = window.SQMAP.mapResult(r);
+          // Append the real discovery trace (initial queries, CRAG verdict,
+          // replan pivots) as soon as the run lands.
+          const lines = window.SQMAP.traceLines(r).map(l => ({ ...l, t: Date.now() - t0 }));
+          if (lines.length) setStream(prev => [...prev, ...lines]);
+        })
         .catch(err => failRun(err));
 
       // Reveal reasoning lines on a cadence; text is the real per-phase summary
@@ -126,7 +135,7 @@
       phases.forEach((p, i) => {
         push(setTimeout(() => {
           setActivePhase(p);
-          setStream(prev => [...prev, { phase: p, text: window.SQMAP.reasoningLine(p, resultRef.current && resultRef.current.result) }]);
+          setStream(prev => [...prev, { phase: p, t: Date.now() - t0, text: window.SQMAP.reasoningLine(p, resultRef.current && resultRef.current.result) }]);
         }, step * (i + 1)));
       });
 
@@ -244,7 +253,14 @@
           </TweakSection>
         </TweaksPanel>
 
-        <Sidebar active={nav} onNav={handleNav} onNewRun={backToIdle} runState={running ? "running" : "idle"} />
+        <Sidebar active={nav} onNav={handleNav} onNewRun={backToIdle} runState={running ? "running" : "idle"}
+          runMeta={view ? {
+            seams: view.qwen.label,
+            mode: view.result.mode.replace("_required", "").replace("_only", ""),
+            ledger: view.ledger.length
+              ? (view.ledger.length === 1 ? view.ledger[0].id : `${view.ledger[0].id} … ${view.ledger[view.ledger.length - 1].id}`)
+              : "empty",
+          } : null} />
 
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
           {screen !== "idle" && (
@@ -273,7 +289,13 @@
               {screen === "hunting" && (
                 <HuntInProgress stream={stream} evidence={evidence}
                   candidates={Math.min(5, Math.floor(progress * 6))} query={query}
-                  activePhase={activePhase} progress={progress} />
+                  activePhase={activePhase} progress={progress}
+                  seamLabel={resultRef.current ? resultRef.current.qwen.label : "pipeline · running"}
+                  pool={resultRef.current ? {
+                    considered: resultRef.current.metrics.candidates_considered ?? 0,
+                    validated: resultRef.current.metrics.validated_candidates_total ?? 0,
+                    drafts: resultRef.current.metrics.rfq_drafts_total ?? 0,
+                  } : null} />
               )}
               {screen === "results" && view && (
                 <ResultsPane view={view} tab={tab} setTab={setTab} focusId={focusId} setFocusId={setFocusId}
@@ -328,6 +350,12 @@
               letterSpacing: "0.06em", paddingBottom: 10,
             }}>
               <span>{detectGeo(query)}</span>
+              <span className="sq-mono-chip" style={{
+                color: view.qwen.live ? "#A6BB87" : "var(--sq-smoke)",
+                borderColor: view.qwen.live ? "rgba(122,140,94,0.5)" : "var(--sq-border)",
+              }} title={view.qwen.seams.map(s => `${s.name}: ${s.enabled ? (s.mock ? "mock" : "live") : "off"}`).join("\n")}>
+                {view.qwen.label}
+              </span>
               <span className="sq-mono-chip" style={{ color: "var(--sq-smoke)" }}>stop · {view.result.stop_reason}</span>
             </span>
           </div>
@@ -349,7 +377,7 @@
     const cls = view.classification || {};
     const sig = (view.classify && view.classify.signals) || {};
     const ps = view.pricingSummary || {};
-    const modes = ["service_quote_required", "product_exact_price", "contact_enrichment_only", "revalidation"];
+    const modes = ["service_quote_required", "product_exact_price", "contact_enrichment_only", "revalidation", "electronics_substitution"];
     return (
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
         <div className="sq-card" style={{ padding: 20 }}>
@@ -373,9 +401,13 @@
           <BudgetBars view={view}/>
         </div>
 
+        <ReasoningCard view={view}/>
+        <TelemetryCard view={view}/>
+        {view.frontier.enabled && <FrontierCard frontier={view.frontier}/>}
+
         <div className="sq-card" style={{ padding: 20, gridColumn: "1 / -1" }}>
           <div className="sq-overline" style={{ marginBottom: 14 }}>Mode classification trace</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
             {modes.map(k => {
               const picked = k === view.result.mode;
               const v = picked ? (cls.confidence || 0) : 0;
@@ -419,6 +451,106 @@
 
   function Stat({ k, v }) {
     return <div><div style={{ color: "var(--sq-slate-taupe)" }}>{k}</div><div style={{ color: "var(--sq-bone)", marginTop: 4 }}>{v}</div></div>;
+  }
+
+  // ---- Discovery reasoning — the real result.reasoning trace ------------------
+  function ReasoningCard({ view }) {
+    const rsn = view.reasoning;
+    if (!rsn) return null;
+    const crag = rsn.crag || {};
+    const pivots = [...(rsn.corrective_queries || []), ...(rsn.replan_queries || [])];
+    const Line = ({ tag, children, color }) => (
+      <div style={{ display: "grid", gridTemplateColumns: "84px 1fr", gap: 12, padding: "7px 0", borderBottom: "1px dashed var(--sq-border)", fontFamily: "var(--sq-font-mono)", fontSize: 11.5, lineHeight: 1.5 }}>
+        <span style={{ color: color || "var(--sq-slate-taupe)", letterSpacing: "0.06em" }}>{tag}</span>
+        <span style={{ color: "var(--sq-fog)", overflowWrap: "anywhere" }}>{children}</span>
+      </div>
+    );
+    return (
+      <div className="sq-card" style={{ padding: 20 }}>
+        <div className="sq-overline" style={{ marginBottom: 10 }}>Discovery reasoning</div>
+        {(rsn.initial_queries || []).map((q, i) => <Line key={"iq" + i} tag={`query ${i + 1}`}>{q}</Line>)}
+        {crag.verdict && (
+          <Line tag="crag" color={crag.verdict === "correct" ? "#A6BB87" : crag.verdict === "incorrect" ? "#D67F6B" : "#D7A876"}>
+            {crag.verdict} · confidence {(crag.confidence ?? 0).toFixed(2)} · mean relevance {(crag.mean_relevance ?? 0).toFixed(2)}
+            {crag.rationale ? ` — ${crag.rationale}` : ""}
+          </Line>
+        )}
+        {pivots.map((q, i) => <Line key={"pv" + i} tag="pivot" color="#D7A876">{q}</Line>)}
+        <Line tag="rewriter">{rsn.query_rewriter || "deterministic"}</Line>
+      </div>
+    );
+  }
+
+  // ---- Run telemetry — per-phase latency + fetch outcomes ---------------------
+  function TelemetryCard({ view }) {
+    const lat = view.latency;
+    const fo = view.fetchOutcomes || {};
+    const phases = lat ? Object.entries(lat).filter(([k]) => k !== "total") : [];
+    const total = lat && lat.total ? lat.total : phases.reduce((s, [, v]) => s + v, 0) || 1;
+    return (
+      <div className="sq-card" style={{ padding: 20 }}>
+        <div className="sq-overline" style={{ marginBottom: 10 }}>
+          Run telemetry{lat && lat.total != null ? ` · ${lat.total.toFixed(1)}s total` : ""}
+        </div>
+        {phases.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {phases.map(([k, v]) => (
+              <div key={k} style={{ display: "grid", gridTemplateColumns: "70px 1fr 56px", alignItems: "center", gap: 12, fontFamily: "var(--sq-font-mono)", fontSize: 11 }}>
+                <span style={{ color: "var(--sq-slate-taupe)" }}>{k}</span>
+                <div style={{ position: "relative", height: 4, background: "var(--sq-border)" }}>
+                  <span style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${Math.min(100, (v / total) * 100)}%`, background: "var(--sq-bone)" }}/>
+                </div>
+                <span style={{ color: "var(--sq-bone)", textAlign: "right" }}>{v.toFixed(1)}s</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {(Object.keys(fo).length > 0 || view.fallbackRecovered > 0) && (
+          <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+            <span style={{ fontFamily: "var(--sq-font-mono)", fontSize: 11, color: "var(--sq-slate-taupe)" }}>fetch ·</span>
+            {Object.entries(fo).map(([k, n]) => (
+              <span key={k} className="sq-mono-chip" style={{ color: k === "ok" ? "#A6BB87" : "#D7A876" }}>{k} × {n}</span>
+            ))}
+            {view.fallbackRecovered > 0 && (
+              <span className="sq-mono-chip" style={{ color: "#A6BB87", borderColor: "rgba(122,140,94,0.5)" }}>
+                fallback recovered × {view.fallbackRecovered}
+              </span>
+            )}
+          </div>
+        )}
+        {view.proofs > 0 && (
+          <div style={{ marginTop: 10, fontFamily: "var(--sq-font-mono)", fontSize: 11, color: "var(--sq-slate-taupe)" }}>
+            {view.proofs} citation inclusion proof(s) · RFC 6962
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ---- Frontier — gather loop counters (only when the flag ran) ---------------
+  function FrontierCard({ frontier }) {
+    const rows = [
+      ["rounds", frontier.rounds],
+      ["leads added", frontier.added],
+      ["leads popped", frontier.popped],
+      ["link leads", frontier.link_leads_inserted],
+      ["entity queries", frontier.entity_query_leads_inserted],
+      ["entity leads fetched", frontier.entity_url_leads_fetched],
+      ["pending at stop", frontier.pending_at_stop],
+    ].filter(([, v]) => v != null);
+    return (
+      <div className="sq-card" style={{ padding: 20, gridColumn: "1 / -1" }}>
+        <div className="sq-overline" style={{ marginBottom: 12 }}>Frontier gather loop</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 12 }}>
+          {rows.map(([k, v]) => (
+            <div key={k} style={{ padding: "10px 12px", border: "1px solid var(--sq-border)" }}>
+              <div style={{ fontFamily: "var(--sq-font-mono)", fontSize: 10, color: "var(--sq-slate-taupe)", letterSpacing: "0.08em", textTransform: "uppercase" }}>{k}</div>
+              <div style={{ fontFamily: "var(--sq-font-serif)", fontSize: 24, color: "var(--sq-bone)", marginTop: 6 }}>{v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   }
 
   function BudgetBars({ view }) {

@@ -119,6 +119,9 @@ function VendorDetail({ vendor, onClose, onDraft }) {
             </ul>
           </section>
 
+          {/* Trust verdict (real trust_verdicts entry from the controller) */}
+          {vendor.trust && <TrustVerdict trust={vendor.trust}/>}
+
           {/* Tags */}
           <section style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {vendor.tags.map((t, i) => <TagPill key={t.t + i} {...t}/>)}
@@ -170,7 +173,7 @@ function VendorDetail({ vendor, onClose, onDraft }) {
                   <span style={{ color: "var(--sq-smoke)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.src}</span>
                   <span style={{ color: "var(--sq-fog)", letterSpacing: "0.06em" }}>{e.kind}</span>
                   <span style={{
-                    color: e.status === "verified" ? "#A6BB87"
+                    color: e.status === "proven" ? "#A6BB87"
                          : e.status === "disputed" ? "#D67F6B"
                          : "var(--sq-fog)",
                     letterSpacing: "0.06em",
@@ -211,6 +214,67 @@ function VendorDetail({ vendor, onClose, onDraft }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Composed trust statement: verified-claim counts, GRADE, GSAR decision,
+// [Bel, Pl] belief interval, disputed facts, and the controller's summary.
+// Every value is the backend's own; "verification disabled" shows as such.
+function TrustVerdict({ trust }) {
+  const [bel, pl] = trust.belief_interval || [null, null];
+  const gradeColor = { high: "#A6BB87", moderate: "#D7A876", low: "#D67F6B", very_low: "#D67F6B" }[trust.grade] || "var(--sq-smoke)";
+  const Cell = ({ k, v, color }) => (
+    <div>
+      <div style={{ fontFamily: "var(--sq-font-mono)", fontSize: 10, color: "var(--sq-slate-taupe)", letterSpacing: "0.1em", textTransform: "uppercase" }}>{k}</div>
+      <div style={{ fontFamily: "var(--sq-font-serif)", fontSize: 22, color: color || "var(--sq-bone)", marginTop: 4 }}>{v}</div>
+    </div>
+  );
+  return (
+    <section>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div className="sq-overline">Trust verdict</div>
+        {!trust.verification_enabled && (
+          <span className="sq-mono-chip" style={{ color: "#D7A876", borderColor: "rgba(201,145,85,0.5)" }}>
+            claim verification disabled
+          </span>
+        )}
+      </div>
+      <div style={{ padding: "18px 20px", border: "1px solid var(--sq-border)", background: "var(--sq-obsidian)" }}>
+        {trust.verification_enabled && (
+          <div style={{ display: "flex", gap: 34, flexWrap: "wrap" }}>
+            <Cell k="grade" v={trust.grade || "n/a"} color={gradeColor}/>
+            <Cell k="decision" v={trust.decision || "n/a"}/>
+            <Cell k="claims verified" v={trust.claims_verified ?? "—"}/>
+            <Cell k="unsupported" v={trust.claims_unsupported ?? "—"} color={trust.claims_unsupported ? "#D67F6B" : undefined}/>
+          </div>
+        )}
+        {bel != null && (
+          <div style={{ marginTop: trust.verification_enabled ? 16 : 0 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--sq-font-mono)", fontSize: 10, color: "var(--sq-slate-taupe)", letterSpacing: "0.08em", marginBottom: 6 }}>
+              <span>quote-channel belief [Bel, Pl]</span>
+              <span style={{ color: "var(--sq-bone)" }}>[{bel.toFixed(2)}, {pl.toFixed(2)}]</span>
+            </div>
+            <div style={{ position: "relative", height: 5, background: "var(--sq-border)" }}>
+              <span style={{ position: "absolute", left: `${bel * 100}%`, width: `${Math.max(0, (pl - bel)) * 100}%`, top: 0, height: "100%", background: "rgba(242,229,230,0.28)" }}/>
+              <span style={{ position: "absolute", left: 0, width: `${bel * 100}%`, top: 0, height: "100%", background: "#A6BB87" }}/>
+            </div>
+          </div>
+        )}
+        {(trust.disputed_facts || []).length > 0 && (
+          <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontFamily: "var(--sq-font-mono)", fontSize: 10, color: "#D67F6B", letterSpacing: "0.1em", textTransform: "uppercase" }}>disputed</span>
+            {trust.disputed_facts.map((f) => (
+              <span key={f} className="sq-mono-chip" style={{ color: "#D67F6B", borderColor: "rgba(182,92,74,0.55)" }}>{f}</span>
+            ))}
+          </div>
+        )}
+        {trust.summary && (
+          <p style={{ margin: "14px 0 0", fontFamily: "var(--sq-font-sans)", fontSize: 13, lineHeight: 1.55, color: "var(--sq-fg-muted)" }}>
+            {trust.summary}
+          </p>
+        )}
+      </div>
+    </section>
   );
 }
 

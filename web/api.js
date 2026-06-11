@@ -78,6 +78,9 @@
 
   function toLedger(result) {
     const refs = dedupeRefs(result.evidence_refs || []);
+    // Honest status: "proven" only when the backend shipped an RFC 6962
+    // inclusion proof for that ledger_id; otherwise the row is "recorded".
+    const proven = new Set((result.citation_proofs || []).map((p) => p.ledger_id));
     const times = refs.map((r) => clock(r.retrieved_at)).filter((n) => typeof n === "number");
     const base = times.length ? Math.min(...times) : 0;
     return refs.map((r) => {
@@ -88,9 +91,9 @@
         src: shortenUrl(r.url),
         url: r.url,
         kind: deriveKind(r.url),
-        status: "verified",
+        status: proven.has(r.ledger_id) ? "proven" : "recorded",
         sha: (r.snippet_hash || "").slice(0, 6) || "------",
-        t: `00:${String(secs % 60).padStart(2, "0")}`,
+        t: `${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`,
       };
     });
   }
@@ -193,7 +196,7 @@
     return `Contact enrichment: ${contacts} contact${contacts === 1 ? "" : "s"} extracted; completeness ${(c.evidence_completeness || 0).toFixed(2)} in ${country}.`;
   }
 
-  function toVendor(c, i, ledger) {
+  function toVendor(c, i, ledger, trustByVendor) {
     const kind = candidateKind(c);
     const refs = dedupeRefs(c.evidence_refs || []);
     const parts = kind === "service" ? serviceScoreParts(c) : null;
@@ -229,8 +232,28 @@
       ledger: refs.map((r) => ledgerById.get(r.ledger_id)).filter(Boolean),
       summary: deriveSummary(c, kind),
       why: deriveWhy(c, kind, parts || {}),
+      trust: (trustByVendor && trustByVendor[c.vendor_name]) || null,
       raw: c,
     };
+  }
+
+  // ---- qwen seams (honesty surface) -----------------------------------------
+  // Summarise qwen_paths into a truthful label: which seams ran live vs mocked,
+  // and which model. An offline run says "offline · mocks", never "qwen live".
+  function qwenSummary(qp) {
+    if (!qp || !Object.keys(qp).length) return { label: "seams · unknown", live: 0, mocked: 0, model: "", offline: true, seams: [] };
+    const seams = Object.entries(qp)
+      .filter(([k, v]) => k !== "offline" && v && typeof v === "object")
+      .map(([k, v]) => ({ name: k, enabled: !!v.enabled, mock: !!v.mock, model: v.model || "" }));
+    const enabled = seams.filter((s) => s.enabled);
+    const live = enabled.filter((s) => !s.mock);
+    const model = (live.find((s) => s.model) || enabled.find((s) => s.model) || {}).model || "";
+    const label = !enabled.length
+      ? "offline · deterministic"
+      : qp.offline || !live.length
+      ? `offline · ${enabled.length} mock seam${enabled.length === 1 ? "" : "s"}`
+      : `${live.length} live seam${live.length === 1 ? "" : "s"} · ${model || "qwen"}`;
+    return { label, live: live.length, mocked: enabled.length - live.length, model, offline: !!qp.offline, seams };
   }
 
   // ---- reasoning trace (derived from the real result) -----------------------
@@ -253,18 +276,65 @@
     const m = result.metrics || {};
     const b = result.budget || {};
     const cls = result.classification || {};
+    const rsn = result.reasoning || {};
+    const crag = rsn.crag || {};
+    const fr = m.frontier || {};
     const top = (result.validated_candidates || [])[0];
     switch (phase) {
       case "classify": return `Mode -> ${result.mode} · confidence ${(cls.confidence || 0).toFixed(2)}`;
       case "budget":   return `Budget envelope · ${b.max_search_calls ?? "?"} search · ${b.max_fetch_urls ?? "?"} fetches max`;
-      case "search":   return `Search · ${m.search_calls_total ?? b.search_calls ?? 0} calls · ${m.candidates_considered ?? 0} candidates surfaced`;
-      case "fetch":    return `Fetch · ${m.fetch_urls_total ?? b.fetch_urls ?? 0} URLs retrieved · SEA-first`;
-      case "extract":  return `Extract · quote-channel found rate ${(m.quote_channel_found_rate ?? 0).toFixed(2)}`;
+      case "search": {
+        const base = `Search · ${m.search_calls_total ?? b.search_calls ?? 0} calls`;
+        const cragBit = crag.verdict ? ` · CRAG ${crag.verdict} (${(crag.confidence ?? 0).toFixed(2)})` : "";
+        const pivots = (rsn.corrective_queries || []).length + (rsn.replan_queries || []).length;
+        return base + cragBit + (pivots ? ` · ${pivots} pivot quer${pivots === 1 ? "y" : "ies"}` : "");
+      }
+      case "fetch": {
+        const rec = m.fetch_fallback_recovered || 0;
+        return `Fetch · ${m.fetch_urls_total ?? b.fetch_urls ?? 0} URLs retrieved`
+          + (rec ? ` · ${rec} recovered via fallback` : "") + " · SEA-first";
+      }
+      case "extract": {
+        const ent = fr.entity_url_leads_fetched || 0;
+        return `Extract · quote-channel found rate ${(m.quote_channel_found_rate ?? 0).toFixed(2)}`
+          + (fr.enabled ? ` · frontier ${fr.rounds ?? 0} round(s)${ent ? `, ${ent} entity lead(s) drained` : ""}` : "");
+      }
       case "rank":     return `Rank · ${m.validated_candidates_total ?? 0} validated · top score ${top ? (top.score || 0).toFixed(1) : "n/a"}`;
       case "draft":    return `Draft · ${m.rfq_drafts_total ?? 0} RFQ draft(s) · ${m.rfq_incomplete_total ?? 0} incomplete`;
-      case "persist":  return `Ledger committed · ${(result.evidence_refs || []).length} evidence refs · stop: ${result.stop_reason}`;
+      case "persist": {
+        const proofs = (result.citation_proofs || []).length;
+        const lat = (m.latency_seconds || {}).total;
+        return `Ledger committed · ${(result.evidence_refs || []).length} evidence refs`
+          + (proofs ? ` · ${proofs} inclusion proof(s)` : "")
+          + (lat != null ? ` · ${lat.toFixed(1)}s` : "") + ` · stop: ${result.stop_reason}`;
+      }
       default:         return PHASE_PLACEHOLDER[phase] || "";
     }
+  }
+
+  // Real discovery trace lines (result.reasoning), appended to the hunting
+  // stream once the run lands — replaces invented narrative with the actual
+  // initial queries, CRAG verdict, and replan pivots.
+  function traceLines(result) {
+    if (!result || !result.reasoning) return [];
+    const rsn = result.reasoning;
+    const lines = [];
+    for (const q of (rsn.initial_queries || []).slice(0, 3)) {
+      lines.push({ phase: "search", text: `query · "${q}"` });
+    }
+    if (rsn.crag && rsn.crag.verdict) {
+      lines.push({ phase: "search", text: `CRAG verdict · ${rsn.crag.verdict} · mean relevance ${(rsn.crag.mean_relevance ?? 0).toFixed(2)} — ${rsn.crag.rationale || ""}` });
+    }
+    for (const q of (rsn.corrective_queries || []).slice(0, 2)) {
+      lines.push({ phase: "search", text: `corrective pivot · "${q}"` });
+    }
+    for (const q of (rsn.replan_queries || []).slice(0, 2)) {
+      lines.push({ phase: "rank", text: `replan pivot · "${q}"` });
+    }
+    if (rsn.query_rewriter) {
+      lines.push({ phase: "search", text: `query rewriter · ${rsn.query_rewriter}` });
+    }
+    return lines;
   }
 
   // ---- signals (derived from the run) --------------------------------------
@@ -289,17 +359,29 @@
   // ---- top-level mapper -----------------------------------------------------
   function mapResult(result) {
     const ledger = toLedger(result);
-    const vendors = (result.validated_candidates || []).map((c, i) => toVendor(c, i, ledger));
+    const trustByVendor = {};
+    for (const t of result.trust_verdicts || []) {
+      if (t && t.vendor_name) trustByVendor[t.vendor_name] = t;
+    }
+    const vendors = (result.validated_candidates || []).map((c, i) => toVendor(c, i, ledger, trustByVendor));
+    const m = result.metrics || {};
     return {
       result,
       vendors,
       ledger,
       signals: toSignals(result, vendors),
       classification: result.classification || {},
-      metrics: result.metrics || {},
+      metrics: m,
       budget: result.budget || {},
       pricingSummary: result.pricing_status_summary || {},
       rfqByVendor: indexRfqByVendor(result),
+      qwen: qwenSummary(result.qwen_paths),
+      reasoning: result.reasoning || null,
+      frontier: m.frontier || { enabled: false },
+      latency: m.latency_seconds || null,
+      fetchOutcomes: m.fetch_outcomes || {},
+      fallbackRecovered: m.fetch_fallback_recovered || 0,
+      proofs: (result.citation_proofs || []).length,
     };
   }
 
@@ -334,6 +416,6 @@
   const PIPELINE_STEPS = PHASE_ORDER.map((k) => ({ k, label: k }));
 
   window.SQAPI = SQAPI;
-  window.SQMAP = { mapResult, reasoningLine, toSignals, toLedger, toVendor };
+  window.SQMAP = { mapResult, reasoningLine, traceLines, toSignals, toLedger, toVendor, qwenSummary };
   window.SQDATA = { PIPELINE_STEPS, PHASE_ORDER, PHASE_PLACEHOLDER, recentRuns, pushRecentRun };
 })();
