@@ -32,8 +32,11 @@ class QwenWebExtractor:
         model: str | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "")
+        # Dedicated env var: the web_extractor tool lives on the v2 apps
+        # protocol endpoint, while QWEN_BASE_URL points every chat-completions
+        # seam at compatible-mode/v1. Sharing one var breaks one side or the other.
         self.base_url = base_url or os.getenv(
-            "QWEN_BASE_URL",
+            "QWEN_WEB_EXTRACTOR_BASE_URL",
             "https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1",
         )
         self.model = model or os.getenv("QWEN_WEB_EXTRACTOR_MODEL", "qwen3.7-max")
