@@ -46,3 +46,24 @@ def test_conflicting():
 def test_currency_normalized():
     result = PricingExtractor().extract("Each unit is S$25.")
     assert result.currency == "SGD"
+
+
+def test_bare_dollar_on_sg_host_is_sgd():
+    result = PricingExtractor().extract(
+        "Ergonomic chair $129 incl. GST.",
+        page_url="https://www.furnituresg.com.sg/chairs",
+    )
+    assert result.currency == "SGD"
+
+
+def test_bare_dollar_with_sgd_mention_is_sgd():
+    result = PricingExtractor().extract(
+        "Delivery fee $80. All prices in SGD.",
+        page_url="https://example.com/pricing",
+    )
+    assert result.currency == "SGD"
+
+
+def test_bare_dollar_without_context_stays_usd():
+    result = PricingExtractor().extract("Reams from $60.00 per case.")
+    assert result.currency == "USD"

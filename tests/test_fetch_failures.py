@@ -137,3 +137,91 @@ def test_fetch_class_recorded_on_evidence_metadata():
     (item,) = ledger.items()
     assert item.metadata["fetch_class"] == PAGE_BOT_WALL
     assert service.fetch_outcomes == {PAGE_BOT_WALL: 1}
+
+
+# --- taxonomy-triggered fallback retry ---------------------------------------
+
+
+class _RecordingFallback:
+    provider_name = "qwen_web_extractor"
+    fetch_source_tool = "qwen_web_extractor"
+    rate_limited = True
+
+    def __init__(self, text: str = OK_TEXT) -> None:
+        self.calls: list[list[str]] = []
+        self._text = text
+
+    async def fetch(self, urls, output_format="markdown", include_links=True):
+        from spider_qwen.tools.provider_types import FetchResult, FetchResultSet
+
+        self.calls.append(list(urls))
+        return FetchResultSet(
+            results=[FetchResult(url=u, final_url=u, title="Recovered",
+                                 text=self._text, source_tool="qwen_web_extractor")
+                     for u in urls],
+            provider="qwen_web_extractor",
+        )
+
+
+def _fallback_service(fixtures, fallback):
+    from spider_qwen.evidence.ledger import EvidenceLedger
+    from spider_qwen.tools.fetch_service import FetchService
+
+    ledger = EvidenceLedger("run_test_fallback")
+    return FetchService(MockFetchProvider(fixtures=fixtures), ledger,
+                        fallback=fallback), ledger
+
+
+def test_transport_error_retried_through_fallback():
+    url = "https://flaky.sg/office-cleaning"
+    fallback = _RecordingFallback()
+    service, ledger = _fallback_service({url: {"status": 500}}, fallback)
+    rs = asyncio.run(service.fetch([url]))
+    assert fallback.calls == [[url]]
+    assert [p.url for p in rs.results] == [url]
+    assert service.fallback_recovered == 1
+    assert rs.errors[0]["recovered_via"] == "qwen_web_extractor"
+    (item,) = ledger.items()
+    assert item.source_tool == "qwen_web_extractor"
+    assert item.metadata["fetch_fallback"]["provider"] == "qwen_web_extractor"
+    # Both attempts appear in the histogram: the failure and the recovery.
+    assert service.fetch_outcomes == {ERROR_TRANSPORT: 1, PAGE_OK: 1}
+
+
+def test_js_shell_replaced_by_fallback_page():
+    url = "https://shell.sg/office-cleaning"
+    fallback = _RecordingFallback()
+    service, ledger = _fallback_service(
+        {url: {"text": "Please enable JavaScript to continue."}}, fallback)
+    rs = asyncio.run(service.fetch([url]))
+    assert fallback.calls == [[url]]
+    (item,) = ledger.items()  # the shell never reached the ledger
+    assert item.text == OK_TEXT
+    assert service.fetch_outcomes == {PAGE_JS_SHELL: 1, PAGE_OK: 1}
+
+
+def test_dead_link_and_bot_wall_are_not_retried():
+    fallback = _RecordingFallback()
+    service, _ = _fallback_service({
+        "https://dead.sg/x": {"status": 404},
+        "https://walled.sg/x": {"text": "Access denied. verify you are a human."},
+    }, fallback)
+    asyncio.run(service.fetch(["https://dead.sg/x", "https://walled.sg/x"]))
+    assert fallback.calls == []
+
+
+def test_fallback_failure_leaves_original_outcome():
+    class _Boom:
+        provider_name = "qwen_web_extractor"
+        fetch_source_tool = "qwen_web_extractor"
+        rate_limited = True
+
+        async def fetch(self, urls, output_format="markdown", include_links=True):
+            raise RuntimeError("model down")
+
+    url = "https://flaky.sg/office-cleaning"
+    service, _ = _fallback_service({url: {"status": 500}}, _Boom())
+    rs = asyncio.run(service.fetch([url]))
+    assert rs.results == []
+    assert service.fallback_recovered == 0
+    assert service.fetch_outcomes == {ERROR_TRANSPORT: 1}

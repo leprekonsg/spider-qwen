@@ -80,6 +80,11 @@ from ..tools.qwen_json_extractor import QwenJsonExtractor, QwenPageExtraction
 from ..tools.search_service import SearchService, build_search_provider
 
 _MOQ_RE = re.compile(r"(?:MOQ|minimum order(?: quantity)?)\D{0,15}([\d,]+)", re.IGNORECASE)
+# Qwen page roles that never become candidates: buyer-side notices, awards,
+# news, and multi-vendor directories. Directory pages still contribute leads
+# (link leads + vendor mentions); they just stop masquerading as vendors.
+_NON_VENDOR_PAGE_ROLES = {"buyer_rfq", "tender_award", "news", "directory"}
+_VENDOR_MENTIONS_PER_PAGE = 10
 _EVIDENCE_SOURCE_TOOLS = {
     "tinyfish_search", "tinyfish_fetch", "qwen_web_extractor", "mcp_search", "semantic_memory", "mock"
 }
@@ -135,6 +140,17 @@ class Controller:
         else:
             self.search_provider = search_provider or build_search_provider()
             self.fetch_provider = fetch_provider or build_fetch_provider()
+        # Finding-6 fetch fallback (flagged): transport_error / js_shell URLs
+        # get one retry through the Qwen web_extractor. Never offline, never
+        # stacked on top of an already-qwen fetch provider.
+        self.fetch_fallback = None
+        if (not self.offline and self.policy.qwen_fetch_fallback_enabled()
+                and getattr(self.fetch_provider, "provider_name", "") != "qwen_web_extractor"):
+            from ..tools.qwen_web_extractor import QwenWebExtractorFetchProvider
+
+            fallback = QwenWebExtractorFetchProvider()
+            if fallback.extractor.is_available:
+                self.fetch_fallback = fallback
         self.state_dir = Path(state_dir) if state_dir else None
         self.persist = persist and self.state_dir is not None
         self.require_review = self.policy.hitl_require_review() if require_review is None else require_review
@@ -337,7 +353,8 @@ class Controller:
 
         search = SearchService(self.search_provider, ledger, tracker, tracer)
         fetch = FetchService(self.fetch_provider, ledger, tracker, tracer,
-                             judge=self.page_judge, query=query, cache=self.page_cache)
+                             judge=self.page_judge, query=query, cache=self.page_cache,
+                             fallback=self.fetch_fallback)
         memory_recalls = self._recall_memory(query, ctx, audit, reference_ts=run_reference_ts)
 
         if review_store and mode == "auto" and classification.confidence < self.policy.qwen_router_confidence_threshold():
@@ -591,6 +608,7 @@ class Controller:
                 # Live-web failure taxonomy: a starved run reports WHY it
                 # starved (bot walls vs JS shells vs thin/dead pages).
                 "fetch_outcomes": dict(sorted(fetch.fetch_outcomes.items())),
+                "fetch_fallback_recovered": fetch.fallback_recovered,
                 "page_cache": {
                     "enabled": self.page_cache is not None,
                     "hits": fetch.cache_hits,
@@ -651,7 +669,8 @@ class Controller:
                                    tracker=tracker, working=working, tracer=tracer)
             search = SearchService(self.search_provider, ledger, tracker, tracer)
             fetch = FetchService(self.fetch_provider, ledger, tracker, tracer,
-                                 judge=self.page_judge, query=query, cache=self.page_cache)
+                                 judge=self.page_judge, query=query, cache=self.page_cache,
+                                 fallback=self.fetch_fallback)
             cands = await self._gather_queries(
                 ctx, route, traj.queries, search, fetch, location=None, target_country=target_country,
             )
@@ -834,6 +853,7 @@ class Controller:
                 for lead in link_leads_from_page(page, query=ctx.query, priors=priors, target_cc=target_cc):
                     link_leads_inserted += frontier.add(lead)
             entity_leads_inserted += self._insert_entity_query_leads(frontier, candidates, target_country)
+            entity_leads_inserted += self._insert_vendor_mention_leads(ctx, frontier, target_country)
 
         stats = {
             "enabled": True, "rounds": rounds,
@@ -866,6 +886,19 @@ class Controller:
             ctx.tracer.record(step="frontier_rescore", tool="qwen_frontier_scorer",
                               status="success", input_count=len(leads), output_count=moved)
         return moved
+
+    def _collect_vendor_mentions(self, ctx: ExecutionContext, qwen: QwenPageExtraction, page_text: str) -> None:
+        """Stash grounded vendor names Qwen found on a multi-vendor page
+        (listicle entries, award winners) for follow-up query leads."""
+        mentions: list[str] = ctx.metadata.setdefault("qwen_vendor_mentions", [])
+        for m in qwen.vendor_mentions[:_VENDOR_MENTIONS_PER_PAGE]:
+            name = (m.name or "").strip()
+            if name and name not in mentions and value_grounded(name, page_text or ""):
+                mentions.append(name)
+
+    def _insert_vendor_mention_leads(self, ctx: ExecutionContext, frontier: Frontier, target_country: str | None) -> int:
+        names = ctx.metadata.pop("qwen_vendor_mentions", [])
+        return sum(frontier.add(entity_query_lead(name, target_country)) for name in names)
 
     def _insert_entity_query_leads(self, frontier: Frontier, candidates: list, target_country: str | None) -> int:
         """Vendors we extracted but could not ground a quote channel for earn a
@@ -1021,7 +1054,9 @@ class Controller:
                 continue
             if not ctx.tracker.consume_extraction():
                 break
-            candidates.append(self._build_candidate(ctx, route, ctx.query, page, target_country))
+            cand = self._build_candidate(ctx, route, ctx.query, page, target_country)
+            if cand is not None:
+                candidates.append(cand)
         return candidates
 
     async def _fetch_pages_parallel(
@@ -1142,6 +1177,22 @@ class Controller:
         geo_score = self.geo.score(meta.country, target_country, page.text)
         page_url = page.final_url or page.url
         qwen = self._extract_qwen_json(ctx, query, page_url, page.text)
+        if qwen is not None:
+            self._collect_vendor_mentions(ctx, qwen, page.text)
+            # Qwen proposes a vendor name; it only replaces the title heuristic
+            # when the proposed name is grounded in the page text.
+            vendor_name = (qwen.vendor.name or "").strip()
+            if vendor_name and value_grounded(vendor_name, page.text or ""):
+                meta.vendor_name = vendor_name
+            # Suppression is tighten-only: Qwen may drop a buyer-side or
+            # multi-vendor page from candidates, never promote one.
+            if qwen.page_role in _NON_VENDOR_PAGE_ROLES:
+                ctx.tracer.record(
+                    step="page_role_gate", tool="qwen_json_extractor", status="success",
+                    input_count=1, output_count=0,
+                    detail={"url": page_url, "page_role": qwen.page_role},
+                )
+                return None
 
         if route.ranker == "product":
             return self._product_candidate(ctx, query, page, meta, refs, geo_score, page_url, qwen)
@@ -1163,7 +1214,7 @@ class Controller:
         return result
 
     def _product_candidate(self, ctx, query, page, meta, refs, geo_score, page_url, qwen: QwenPageExtraction | None):
-        pricing = self._extractors["pricing"].extract(page.text)
+        pricing = self._extractors["pricing"].extract(page.text, page_url=page_url)
         if qwen and qwen.pricing.status != PricingStatus.NOT_FOUND:
             pricing = PricingResult(
                 status=qwen.pricing.status,
@@ -1225,7 +1276,7 @@ class Controller:
                 ctx, page, "quote_channel", best.value or best.matched_text
             )
             quote_channel = QuoteChannel(type=best.type, value=best.value, evidence_ref=quote_ref or refs[0])
-        pricing = self._extractors["pricing"].extract(page.text)
+        pricing = self._extractors["pricing"].extract(page.text, page_url=page_url)
         candidate_refs = _merge_refs(refs, [r for r in (service_ref, quote_ref) if r is not None])
         cand = ServiceCandidate(
             vendor_name=meta.vendor_name,

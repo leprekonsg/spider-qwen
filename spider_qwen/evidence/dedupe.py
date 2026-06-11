@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .models import EvidenceItem
 
 NEAR_DUPLICATE_THRESHOLD = 0.92
-_TRACKING_PREFIXES = ("utm_", "gclid", "fbclid", "mc_", "ref")
+_TRACKING_PREFIXES = ("utm_", "gclid", "fbclid", "mc_", "ref", "srsltid")
 
 
 def canonicalize_url(url: str) -> str:

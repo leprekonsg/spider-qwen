@@ -26,6 +26,12 @@ def test_url_canonicalization_strips_tracking():
     assert a == b
 
 
+def test_url_canonicalization_strips_srsltid():
+    a = canonicalize_url("https://shop.sg/chair?srsltid=AfmBOoq123")
+    b = canonicalize_url("https://shop.sg/chair?srsltid=AfmBOoq999")
+    assert a == b == "https://shop.sg/chair"
+
+
 def test_dedupe_collapses_identical_text():
     items = [
         EvidenceItem(source_tool="mock", url="https://a.sg", snippet="same", text_hash="t1"),

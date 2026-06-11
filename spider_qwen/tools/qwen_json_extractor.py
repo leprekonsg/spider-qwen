@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -58,12 +58,38 @@ class QwenContactExtraction(BaseModel):
     claims: list[QwenClaim] = Field(default_factory=list)
 
 
+# Who is speaking on the page: a vendor offering the product/service, a buyer
+# asking for quotes (RFQ/tender notices), an award/result notice, a news
+# article, or a multi-vendor directory/listicle. Only vendor_offering pages
+# may become candidates; the rest are lead sources at best.
+QwenPageRole = Literal[
+    "vendor_offering", "buyer_rfq", "tender_award", "news", "directory", "other"
+]
+
+
+class QwenVendorExtraction(BaseModel):
+    name: str = ""
+    matched_text: str = ""
+    confidence: float = 0.0
+    claims: list[QwenClaim] = Field(default_factory=list)
+
+
+class QwenVendorMention(BaseModel):
+    """Another vendor named on the page (listicle entry, award winner, directory row)."""
+
+    name: str
+    url: str = ""
+
+
 class QwenPageExtraction(BaseModel):
     # Forbid extras at the top level: a gateway envelope like {"data": {...}}
     # must fail validation (and be unwrapped), not silently parse as an empty
     # extraction with every field defaulted.
     model_config = ConfigDict(extra="forbid")
 
+    page_role: QwenPageRole = "other"
+    vendor: QwenVendorExtraction = Field(default_factory=QwenVendorExtraction)
+    vendor_mentions: list[QwenVendorMention] = Field(default_factory=list)
     pricing: QwenPricingExtraction = Field(default_factory=QwenPricingExtraction)
     quote_channels: list[QwenQuoteChannelExtraction] = Field(default_factory=list)
     contacts: list[QwenContactExtraction] = Field(default_factory=list)
@@ -137,7 +163,17 @@ class QwenJsonExtractor(RecordsTokenUsage):
                     "Return ONLY a JSON object that conforms to the provided JSON Schema. "
                     "Include character spans using Python slicing offsets "
                     "[start_char:end_char] against the provided text. "
-                    "Do not invent facts. If a fact is not present, leave it empty."
+                    "Do not invent facts. If a fact is not present, leave it empty. "
+                    "Classify page_role: vendor_offering = a vendor selling or offering "
+                    "the product/service on its own page; buyer_rfq = a buyer's request "
+                    "for quotation or tender invitation; tender_award = a contract award "
+                    "or result notice; news = an article about companies or the market; "
+                    "directory = a listing, aggregator, or top-N article naming multiple "
+                    "vendors. Set vendor.name to the company that owns this page, exactly "
+                    "as it is written in the page text, only when page_role is "
+                    "vendor_offering. List in vendor_mentions every OTHER vendor company "
+                    "named on the page (listicle entries, award winners, directory rows), "
+                    "each name exactly as written in the page text."
                 ),
             },
             {
@@ -209,7 +245,7 @@ class MockQwenJsonExtractor:
         self._contacts = ContactExtractor()
 
     def extract(self, *, text: str, page_url: str, query: str) -> QwenPageExtraction:
-        pricing = self._pricing.extract(text)
+        pricing = self._pricing.extract(text, page_url=page_url)
         quote_channels = [
             QwenQuoteChannelExtraction(
                 type=m.type,

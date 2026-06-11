@@ -83,6 +83,10 @@ qwen:
   # contradicts-ledger) and reject/flag low-trust pages before the ledger persists.
   # Heuristic + offline by default; off so the base offline pipeline is unchanged.
   page_judge_enabled: false
+  # Finding-6 fetch retry: transport_error / js_shell fetch outcomes earn one
+  # second attempt through the Qwen web_extractor tool (live model call per
+  # URL, max 3 per fetch batch). Env QWEN_FETCH_FALLBACK_ENABLED.
+  fetch_fallback_enabled: false
   # Frontier re-scoring seam: Qwen proposes per-lead score deltas over the
   # gather frontier; the deterministic side clamps them (+/- 0.2) and keeps
   # admission authority. Env QWEN_FRONTIER_SCORER_ENABLED. Needs frontier.enabled.

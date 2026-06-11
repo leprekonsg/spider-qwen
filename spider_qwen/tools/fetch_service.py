@@ -17,7 +17,7 @@ import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from .fetch_failures import PAGE_OK, classify_error, classify_page
+from .fetch_failures import ERROR_TRANSPORT, PAGE_JS_SHELL, PAGE_OK, classify_error, classify_page
 from .provider_types import FetchResult, FetchResultSet
 from .tinyfish_client import TinyFishClient, from_env as tinyfish_from_env
 
@@ -140,6 +140,10 @@ class MockFetchProvider:
         return FetchResultSet(results=results, errors=errors, provider="mock")
 
 
+# Fallback retries per fetch() call: each one is a live single-page model call.
+_MAX_FALLBACK_URLS = 3
+
+
 class FetchService:
     """Budget-aware, evidence-recording wrapper over any FetchProvider."""
 
@@ -154,6 +158,7 @@ class FetchService:
         query: str | None = None,
         wayback: object | None = None,
         cache: "PageCache | None" = None,
+        fallback: object | None = None,
     ) -> None:
         self.provider = provider
         self.ledger = ledger
@@ -167,10 +172,15 @@ class FetchService:
         # Cross-run read-through page cache: hits skip the provider call and
         # consume no fetch budget; the page is still judged and re-recorded.
         self.cache = cache
+        # Finding-6 retry: transport errors and JS shells get one second
+        # attempt through this single-page fallback fetcher (Qwen
+        # web_extractor) before extraction gives up on the URL.
+        self.fallback = fallback
         self.judged = 0
         self.rejected = 0
         self.flagged = 0
         self.recovered = 0
+        self.fallback_recovered = 0
         self.cache_hits = 0
         self.cache_misses = 0
         # Fetch-outcome histogram (fetch_failures taxonomy): a starved live run
@@ -200,8 +210,11 @@ class FetchService:
         # Classify provider errors now, before the judge loop appends its own
         # rejection entries (which are gate decisions, not fetch failures).
         for err in result_set.errors:
-            self._count_outcome(classify_error(str(err.get("error", "")), err.get("status")))
+            err["fetch_class"] = classify_error(str(err.get("error", "")), err.get("status"))
+            self._count_outcome(err["fetch_class"])
         result_set.results = _in_request_order(requested, cached, result_set.results)
+        if self.fallback is not None:
+            await self._retry_with_fallback(result_set)
         kept: list[FetchResult] = []
         for p in result_set.results:
             from_cache = bool(p.metadata.get("page_cache"))
@@ -238,6 +251,8 @@ class FetchService:
                 metadata["page_cache"] = p.metadata["page_cache"]
             elif self.cache is not None and page_class == PAGE_OK:
                 self.cache.put(p)
+            if p.metadata.get("fetch_fallback"):
+                metadata["fetch_fallback"] = p.metadata["fetch_fallback"]
             if verdict is not None:
                 if verdict.verdict == "flag":
                     self.flagged += 1
@@ -246,7 +261,9 @@ class FetchService:
                 metadata["judge"] = verdict.model_dump(mode="json")
 
             p.evidence_ref = self.ledger.record(
-                source_tool=p.source_tool if from_cache else source_tool,
+                source_tool=(p.source_tool
+                             if from_cache or p.metadata.get("fetch_fallback")
+                             else source_tool),
                 url=p.url,
                 final_url=p.final_url,
                 title=p.title,
@@ -274,6 +291,53 @@ class FetchService:
 
     def _count_outcome(self, outcome: str) -> None:
         self.fetch_outcomes[outcome] = self.fetch_outcomes.get(outcome, 0) + 1
+
+    async def _retry_with_fallback(self, result_set: FetchResultSet) -> None:
+        """Finding-6 taxonomy-triggered retry: transport_error and js_shell are
+        the recoverable outcomes (the page exists; the transport or renderer
+        failed), so those URLs get exactly one second attempt through the
+        fallback fetcher. Any fallback failure leaves the original outcome
+        standing; nothing is retried twice.
+        """
+        shell_index = {
+            p.url: i for i, p in enumerate(result_set.results)
+            if not p.metadata.get("page_cache")
+            and classify_page(p.text, title=p.title or "") == PAGE_JS_SHELL
+        }
+        dead = [
+            err["url"] for err in result_set.errors
+            if err.get("url") and err.get("fetch_class") == ERROR_TRANSPORT
+            and not err.get("recovered_via")
+        ]
+        retry_urls = (list(shell_index) + dead)[:_MAX_FALLBACK_URLS]
+        if not retry_urls:
+            return
+        try:
+            recovered = await self.fallback.fetch(retry_urls)
+        except Exception:
+            return
+        for p in recovered.results:
+            if classify_page(p.text, title=p.title or "") != PAGE_OK:
+                continue
+            p.metadata["fetch_fallback"] = {"provider": recovered.provider}
+            if p.url in shell_index:
+                # The shell never reaches the ledger but its outcome is still
+                # counted; the replacement is re-classified by the main loop.
+                self._count_outcome(PAGE_JS_SHELL)
+                result_set.results[shell_index[p.url]] = p
+            else:
+                result_set.results.append(p)
+                for err in result_set.errors:
+                    if err.get("url") == p.url:
+                        err["recovered_via"] = recovered.provider
+            self.fallback_recovered += 1
+            if self.tracer is not None:
+                self.tracer.record(
+                    step="fetch_fallback",
+                    tool=getattr(self.fallback, "fetch_source_tool", "qwen_web_extractor"),
+                    status="success", input_count=1, output_count=1,
+                    detail={"url": p.url},
+                )
 
     def _cached_pages(self, urls: list[str]) -> dict[str, FetchResult]:
         """Fresh cache entries for the requested URLs, keyed by requested URL."""

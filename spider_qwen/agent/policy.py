@@ -217,6 +217,11 @@ class Policy:
     def qwen_page_judge_enabled(self) -> bool:
         return _env_bool("QWEN_PAGE_JUDGE_ENABLED", self.data.get("qwen", {}).get("page_judge_enabled", False))
 
+    def qwen_fetch_fallback_enabled(self) -> bool:
+        # Finding-6 retry: transport_error / js_shell URLs get one second
+        # attempt through the Qwen web_extractor fallback fetcher.
+        return _env_bool("QWEN_FETCH_FALLBACK_ENABLED", self.data.get("qwen", {}).get("fetch_fallback_enabled", False))
+
     def qwen_nli_enabled(self) -> bool:
         # T-2.2 seam: Qwen scores (claim, span) entailment inside MiniCheck.
         # Off by default; the deterministic heuristic keeps final authority.

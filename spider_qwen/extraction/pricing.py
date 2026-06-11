@@ -14,12 +14,14 @@ Examples (from the spec):
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
 from ..modes.contracts import PricingStatus
 
-# Currency tokens -> ISO-ish code. "$" is ambiguous; left as USD but flagged.
+# Currency tokens -> ISO-ish code. A bare "$" is ambiguous and resolved per
+# page by _bare_dollar_currency (same-page S$/SGD mention, then ccTLD).
 _CURRENCY = {
     "s$": "SGD", "sgd": "SGD", "rm": "MYR", "myr": "MYR", "us$": "USD",
     "usd": "USD", "$": "USD", "€": "EUR", "eur": "EUR", "£": "GBP", "gbp": "GBP",
@@ -65,6 +67,20 @@ def _normalize_currency(token: str) -> str | None:
     return _CURRENCY.get(token.strip().lower())
 
 
+# Bare "$" on a Singapore page means SGD: the page either says S$/SGD
+# somewhere, or sits on a .sg host (covers .com.sg etc. via endswith).
+_SGD_HINT_RE = re.compile(r"S\$|\bSGD\b", re.IGNORECASE)
+
+
+def _bare_dollar_currency(text: str, page_url: str | None) -> str:
+    if _SGD_HINT_RE.search(text):
+        return "SGD"
+    host = urlparse(page_url).netloc.lower() if page_url else ""
+    if host.endswith(".sg"):
+        return "SGD"
+    return "USD"
+
+
 def _to_float(num: str) -> float | None:
     try:
         return float(num.replace(",", ""))
@@ -75,12 +91,19 @@ def _to_float(num: str) -> float | None:
 class PricingExtractor:
     """Classify pricing evidence on a page into a PricingStatus."""
 
-    def extract(self, text: str) -> PricingResult:
+    def extract(self, text: str, page_url: str | None = None) -> PricingResult:
         text = text or ""
-        prices = [
-            (_normalize_currency(m.group(1)), _to_float(m.group(2)), m.group(0))
-            for m in _PRICE_RE.finditer(text)
-        ]
+        bare_dollar: str | None = None
+        prices = []
+        for m in _PRICE_RE.finditer(text):
+            token = m.group(1)
+            if token.strip() == "$":
+                if bare_dollar is None:
+                    bare_dollar = _bare_dollar_currency(text, page_url)
+                currency = bare_dollar
+            else:
+                currency = _normalize_currency(token)
+            prices.append((currency, _to_float(m.group(2)), m.group(0)))
         prices = [(c, v, raw) for c, v, raw in prices if v is not None]
         has_range = bool(_RANGE_RE.search(text))
         has_starting = bool(_STARTING_RE.search(text))
