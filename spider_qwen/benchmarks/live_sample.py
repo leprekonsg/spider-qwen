@@ -42,7 +42,14 @@ def build_live_sample(
     """
     cases = json.loads(Path(set_path).read_text(encoding="utf-8"))["cases"][:sample_size]
     controller = controller or Controller(state_dir=state_dir, offline=offline)
-    rows = [asyncio.run(_sample_case(controller, case, state_dir)) for case in cases]
+
+    # One event loop for all cases: live providers hold pooled connections
+    # bound to the loop they were opened on, so per-case asyncio.run dies
+    # with "Event loop is closed" from the second case onward.
+    async def _run_all() -> list[dict[str, Any]]:
+        return [await _sample_case(controller, case, state_dir) for case in cases]
+
+    rows = asyncio.run(_run_all())
     return {
         "schema_version": SCHEMA_VERSION,
         "method": (
