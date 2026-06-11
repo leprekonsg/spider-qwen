@@ -131,7 +131,12 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
             getattr(args, "sth_public_key", None),
         )
         print(json.dumps(out, indent=2))
-        sth_ok = out["signed_tree_head"].get("verified_against_trust_anchor", True) is not False
+        if getattr(args, "require_sth", False):
+            # External-verifier mode: only an STH verified against a configured
+            # trust anchor passes; "no anchor configured" is a failure, not a skip.
+            sth_ok = out["signed_tree_head"].get("verified_against_trust_anchor") is True
+        else:
+            sth_ok = out["signed_tree_head"].get("verified_against_trust_anchor", True) is not False
         return 0 if (result.ok and chain.ok and sth_ok) else 1
     if args.evidence_command == "graph":
         print(render_supplier_graph(ledger))
@@ -141,13 +146,15 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
             ledger,
             getattr(args, "ledger_id", None),
             getattr(args, "sth_public_key", None),
+            require_sth=getattr(args, "require_sth", False),
         )
     print(json.dumps([item.model_dump() for item in ledger.items()], indent=2))
     return 0
 
 
 def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None,
-                    expected_public_key: str | None = None) -> int:
+                    expected_public_key: str | None = None,
+                    require_sth: bool = False) -> int:
     """RFC 6962 citation proof for one ledger row, plus a tamper demonstration.
 
     The proof is bound to the run's PERSISTED tree-head commitment, including
@@ -213,8 +220,14 @@ def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None,
         "signed_tree_head": sth_report,
     }
     print(json.dumps(out, indent=2))
-    sth_ok = sth_report.get("verified_against_trust_anchor", True) is not False
-    citation_sth_ok = sth_report.get("citation_verified_against_signed_head", True) is not False
+    if require_sth:
+        # External-verifier mode: the citation must verify against a signed
+        # head AND a configured trust anchor; absence of either is a failure.
+        sth_ok = sth_report.get("verified_against_trust_anchor") is True
+        citation_sth_ok = sth_report.get("citation_verified_against_signed_head") is True
+    else:
+        sth_ok = sth_report.get("verified_against_trust_anchor", True) is not False
+        citation_sth_ok = sth_report.get("citation_verified_against_signed_head", True) is not False
     return 0 if ok and not tampered_ok and sth_ok and citation_sth_ok else 1
 
 
@@ -474,6 +487,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="prove: which row to prove (default: first row)")
     p_ev.add_argument("--sth-public-key", default=None,
                       help="Ed25519 public-key trust anchor for signed tree-head verification")
+    p_ev.add_argument("--require-sth", action="store_true",
+                      help="fail unless the signed tree head verifies against a "
+                           "configured trust anchor (external-verifier mode)")
     p_ev.set_defaults(func=_cmd_evidence)
 
     p_mem = sub.add_parser("memory", help="Inspect or revalidate semantic memory")

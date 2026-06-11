@@ -153,6 +153,27 @@ class GraphStore:
             )
         self.conn.commit()
 
+    def mark_conflicting_superseded(
+        self, src: str, rel: str, *, keep_dst: str, valid_to: str, before: str | None = None,
+    ) -> int:
+        """Close open rows for ``(src, rel)`` pointing at a DIFFERENT object.
+
+        Zep-style edge invalidation for functional relations: a newer fact with
+        a different object closes the contradicted row's validity window
+        (append-only; history is retained). Returns the number of rows closed.
+        """
+        params: list[Any] = [valid_to, src, rel, keep_dst]
+        sql = (
+            "UPDATE edges SET valid_to=? WHERE src=? AND rel=? AND dst != ? "
+            "AND valid_to IS NULL"
+        )
+        if before is not None:
+            sql += " AND (event_ts IS NULL OR event_ts < ?)"
+            params.append(before)
+        cur = self.conn.execute(sql, params)
+        self.conn.commit()
+        return cur.rowcount
+
     @staticmethod
     def _full_edge_row(r: tuple) -> dict[str, Any]:
         return {

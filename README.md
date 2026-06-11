@@ -368,7 +368,9 @@ v2 roadmap:
   abstainer refuses to claim a guarantee when uncalibrated.
 - The MCP **client** half (consume Google Drive / filesystem MCP) and the DashScope Responses-API `tools=[{type:mcp}]` wiring (the server half ships today).
 - External agent benchmarks (BFCL V4, tau-bench, LOCOMO) once their datasets + live access are wired.
-- Live per-call token metering into the cost dashboard, and the EOL forecaster sidecar (T-6.2).
+- The EOL forecaster sidecar (T-6.2). (Live per-call token metering ships in
+  v1: Qwen clients record per-call usage and the cost report turns `metered`
+  when any live call happened.)
 
 ## License
 

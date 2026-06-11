@@ -61,6 +61,18 @@ class BiTemporalGraph:
             valid_to=None, grade=grade, props=props,
         )
 
+    def invalidate_conflicting(self, src: str, rel: str, *, keep_dst: str, valid_to: str) -> int:
+        """Close open ``(src, rel)`` rows whose object contradicts ``keep_dst``.
+
+        For functional relations (one true object at a time, e.g. ACQUIRED_BY),
+        a newer fact with a different object closes the prior row's validity
+        window at the new fact's valid-from. Rows are never deleted. Returns
+        the number of rows closed.
+        """
+        return self.store.mark_conflicting_superseded(
+            src, rel, keep_dst=keep_dst, valid_to=valid_to, before=valid_to,
+        )
+
     def history(self, src: str, dst: str, rel: str) -> list[TemporalFact]:
         return [self._fact(r) for r in self.store.versions(src, dst, rel)]
 

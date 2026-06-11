@@ -45,6 +45,13 @@ _REL_PHRASES: tuple[tuple[str, str], ...] = (
     ("stocked at", "STOCKED_AT"),
 )
 
+# Functional relations: one true object at a time. A newer fact with a
+# different object invalidates (closes, never deletes) the prior open edge.
+# Many-to-many relations (STOCKED_AT, CROSS_REFERENCE, ...) are excluded.
+FUNCTIONAL_RELS = frozenset({
+    "MANUFACTURED_BY", "ACQUIRED_BY", "RENAMED_TO", "SUPERSEDED_BY",
+})
+
 # Known entity names (surface -> canonical key). Distinct from page_judge's
 # *domain* lists: these are company names that appear in datasheet prose.
 _MANUFACTURERS = {
@@ -197,6 +204,11 @@ def ingest_text(
             continue  # ungrounded relation -> never upserted
         store.upsert_node(tr.subject_id, tr.subject_type, {"surface": tr.subject_surface})
         store.upsert_node(tr.object_id, tr.object_type, {"surface": tr.object_surface})
+        if tr.rel in FUNCTIONAL_RELS:
+            # A newer contradicting fact closes the old row's validity window.
+            temporal.invalidate_conflicting(
+                tr.subject_id, tr.rel, keep_dst=tr.object_id, valid_to=event_ts,
+            )
         temporal.record(
             tr.subject_id, tr.object_id, tr.rel,
             confidence=tr.confidence, reliability=reliability,

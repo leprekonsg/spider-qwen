@@ -18,8 +18,10 @@ import json
 import os
 from typing import Any
 
+from ..observability.usage import RecordsTokenUsage
 
-class QwenNliScorer:
+
+class QwenNliScorer(RecordsTokenUsage):
     """Callable (claim, premise) -> {"score": 0..1, "rationale": str}."""
 
     def __init__(
@@ -82,6 +84,7 @@ class QwenNliScorer:
             response_format={"type": "json_object"},
             extra_body={"enable_thinking": False},
         )
+        self._record_usage(response)
         data = json.loads(_content(response))
         return {"score": data.get("score"), "rationale": data.get("rationale", "")}
 

@@ -104,6 +104,34 @@ def test_ingest_builds_graph_with_evidence_backed_edges():
     assert "ATMEGA48 was acquired by Microchip" in version["props"]["sentence"]
 
 
+def test_functional_relation_contradiction_closes_old_validity_window():
+    store = GraphStore()
+    t1, t2 = "2026-01-01T00:00:00+00:00", "2026-06-01T00:00:00+00:00"
+    ingest_text(store, "The ATMEGA48 was acquired by Atmel.",
+                evidence_claim_id="ev_old", valid_from=t1)
+    ingest_text(store, "The ATMEGA48 was acquired by Microchip.",
+                evidence_claim_id="ev_new", valid_from=t2)
+
+    # Zep-style invalidation: the contradicted edge is closed at the new
+    # fact's valid-from, never deleted; only the new fact stays current.
+    old = store.versions("part:atmega48", "mfr:atmel", "ACQUIRED_BY")[0]
+    assert old["valid_to"] == t2
+    current = store.neighbors("part:atmega48", rels=["ACQUIRED_BY"])
+    assert [n["dst"] for n in current] == ["mfr:microchip"]
+
+
+def test_many_to_many_relation_is_not_invalidated_by_a_second_object():
+    store = GraphStore()
+    t1, t2 = "2026-01-01T00:00:00+00:00", "2026-06-01T00:00:00+00:00"
+    ingest_text(store, "The ATMEGA48 is stocked at Digikey.",
+                evidence_claim_id="ev_a", valid_from=t1)
+    ingest_text(store, "The ATMEGA48 is stocked at Mouser.",
+                evidence_claim_id="ev_b", valid_from=t2)
+
+    current = {n["dst"] for n in store.neighbors("part:atmega48", rels=["STOCKED_AT"])}
+    assert current == {"dist:digikey", "dist:mouser"}  # both stay open
+
+
 # --- acceptance ------------------------------------------------------------
 
 def test_acceptance_supersession_chain_resolves_within_two_hops():

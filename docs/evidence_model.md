@@ -65,4 +65,7 @@ head. `evidence prove` emits a citation proof with that signed head embedded.
 External verification must pin the Ed25519 public key out of band via
 `--sth-public-key`, `SPIDER_QWEN_STH_PUBLIC_KEY`, or
 `SPIDER_QWEN_STH_PUBLIC_KEY_FILE`; the public key embedded in the signed head is
-informational, not a trust anchor.
+informational, not a trust anchor. Pass `--require-sth` to `evidence verify` or
+`evidence prove` for external-verifier mode: the command then fails unless the
+signed tree head verifies against a configured anchor (a missing anchor is a
+failure, not a skip).

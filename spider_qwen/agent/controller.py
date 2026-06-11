@@ -130,6 +130,14 @@ class Controller:
         self.persist = persist and self.state_dir is not None
         self.require_review = self.policy.hitl_require_review() if require_review is None else require_review
         self.classifier = ModeClassifier()
+        # Fail loud at init, not mid-run, when a live Qwen path is enabled with
+        # a model id missing from the pinned pricing: block.
+        if not self.offline and (
+            self.policy.qwen_router_fallback_enabled()
+            or self.policy.qwen_structured_extraction_enabled()
+            or self.policy.qwen_nli_enabled()
+        ):
+            self.policy.validate_model_ids()
         self.qwen_router = qwen_router
         if self.qwen_router is None and self.policy.qwen_router_fallback_enabled() and not self.offline:
             self.qwen_router = QwenModeRouter(model=self.policy.qwen_router_model())
@@ -395,6 +403,16 @@ class Controller:
         # is empty (zero $); the report still logs TinyFish calls + the routing
         # plan (decision -> max under the high_risk_procurement tag).
         cost_meter = CostMeter()
+        # Live token metering: drain per-call usage accumulated by Qwen clients
+        # during this run. Offline mocks record nothing, so the report stays
+        # honestly "token metering unavailable". Drain semantics keep a
+        # long-lived controller from double-counting across runs.
+        for client in (self.qwen_json_extractor, self.qwen_router,
+                       getattr(self.minicheck, "model", None)):
+            drain = getattr(client, "drain_usage", None)
+            if callable(drain):
+                for model, in_tok, out_tok in drain():
+                    cost_meter.record(model, input_tokens=in_tok, output_tokens=out_tok)
         routing = [self.policy.route_task(step, high_risk=high_risk)
                    for step in ("classification", "planning", "extraction", "judge", "decision")]
         max_model = next((r.model for r in routing if r.tier == "max"), "")
@@ -432,6 +450,12 @@ class Controller:
                 "quote_channel_found_rate": metrics.quote_channel_found_rate,
                 "memory_recalls": len(memory_recalls),
                 "pending_reviews": len(review_store.list(status="pending")) if review_store else 0,
+                "pending_review_events": [
+                    {"event_id": e.event_id, "reason": e.reason,
+                     "proposed_action": e.proposed_action}
+                    for e in (review_store.list(status="pending") if review_store else [])
+                    if e.run_id == run_id
+                ],
                 "crag_verdict": crag.verdict,
                 "crag_confidence": crag.confidence,
                 "corrective_searches": corrective_searches,

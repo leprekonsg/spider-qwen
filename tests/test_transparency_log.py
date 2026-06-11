@@ -370,6 +370,37 @@ def test_repersist_without_env_key_keeps_published_signature(tmp_path, monkeypat
     assert payload["signed_tree_head"] == signed
 
 
+def test_evidence_verify_require_sth_demands_trust_anchor(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("cryptography")
+    from spider_qwen.api.cli import main
+    from spider_qwen.evidence.transparency import generate_signing_key
+
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    for env in ("SPIDER_QWEN_STH_PUBLIC_KEY", "SPIDER_QWEN_STH_PUBLIC_KEY_FILE"):
+        monkeypatch.delenv(env, raising=False)
+    key = generate_signing_key()
+    monkeypatch.setenv("SPIDER_QWEN_STH_SIGNING_KEY", key.hex())
+    ledger = EvidenceLedger("run_require_sth", state_dir=tmp_path)
+    ledger.record(source_tool="mock", url="https://example.com", snippet="s")
+    ledger.persist()
+    pub = ledger.published_signed_tree_head()["public_key"]
+    monkeypatch.delenv("SPIDER_QWEN_STH_SIGNING_KEY")
+
+    # Lenient default: a missing anchor is reported, not failed.
+    assert main(["evidence", "verify", "run_require_sth"]) == 0
+    capsys.readouterr()
+    # External-verifier mode: no anchor -> fail; pinned anchor -> pass;
+    # wrong anchor -> fail.
+    assert main(["evidence", "verify", "run_require_sth", "--require-sth"]) == 1
+    capsys.readouterr()
+    assert main(["evidence", "verify", "run_require_sth", "--require-sth",
+                 "--sth-public-key", pub]) == 0
+    capsys.readouterr()
+    assert main(["evidence", "verify", "run_require_sth", "--require-sth",
+                 "--sth-public-key", "00" * 32]) == 1
+    capsys.readouterr()
+
+
 def test_citation_proof_carries_signed_sth_and_verifies_against_anchor(tmp_path, monkeypatch):
     pytest.importorskip("cryptography")
     from spider_qwen.evidence.transparency import generate_signing_key

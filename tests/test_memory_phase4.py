@@ -58,6 +58,12 @@ def test_decay_uses_reference_timestamp_for_reproducibility():
     assert apply_decay(fact, reference_ts="2026-01-01T00:00:00+00:00") == 1.0
 
 
+def test_decay_rejects_malformed_reference_timestamp():
+    # A bad reference must fail loud, not silently fall back to wall-clock time.
+    with pytest.raises(ValueError, match="reference_ts"):
+        apply_decay(_aged_fact(10.0), reference_ts="not-a-timestamp")
+
+
 def test_reaccess_grows_stability_so_decay_is_slower():
     plain = _aged_fact(90.0)
     reinforced = _aged_fact(90.0, reinforcement_count=2)

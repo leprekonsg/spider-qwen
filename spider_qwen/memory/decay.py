@@ -36,8 +36,14 @@ def _age_days(iso_ts: str, *, reference_ts: str | datetime | None = None) -> flo
     else:
         try:
             ref = datetime.fromisoformat(reference_ts)
-        except ValueError:
-            ref = datetime.now(timezone.utc)
+        except ValueError as exc:
+            # A malformed caller-supplied reference must not silently fall back
+            # to wall-clock time: that reintroduces the nondeterminism the
+            # parameter exists to remove.
+            raise ValueError(
+                f"reference_ts {reference_ts!r} is not an ISO-8601 timestamp; "
+                "pass the run's utc_now_iso() value or None for wall-clock time."
+            ) from exc
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=timezone.utc)
     return max(0.0, (ref - then).total_seconds() / 86400.0)

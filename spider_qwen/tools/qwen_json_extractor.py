@@ -10,12 +10,13 @@ import json
 import os
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..extraction.contact import ContactExtractor
 from ..extraction.pricing import PricingExtractor
 from ..extraction.quote_channel import QuoteChannelExtractor
 from ..modes.contracts import PricingStatus, PrivacyClass, QuoteChannelType
+from ..observability.usage import RecordsTokenUsage
 from .qwen_skills import load_skill_prompt
 
 
@@ -58,13 +59,18 @@ class QwenContactExtraction(BaseModel):
 
 
 class QwenPageExtraction(BaseModel):
+    # Forbid extras at the top level: a gateway envelope like {"data": {...}}
+    # must fail validation (and be unwrapped), not silently parse as an empty
+    # extraction with every field defaulted.
+    model_config = ConfigDict(extra="forbid")
+
     pricing: QwenPricingExtraction = Field(default_factory=QwenPricingExtraction)
     quote_channels: list[QwenQuoteChannelExtraction] = Field(default_factory=list)
     contacts: list[QwenContactExtraction] = Field(default_factory=list)
     claims: list[QwenClaim] = Field(default_factory=list)
 
 
-class QwenJsonExtractor:
+class QwenJsonExtractor(RecordsTokenUsage):
     """Extract procurement facts from fetched text using Qwen JSON Schema mode."""
 
     def __init__(
@@ -160,10 +166,17 @@ class QwenJsonExtractor:
                 # Transport failure is not a schema problem; do not retry-loop here.
                 raise QwenJsonExtractorError(f"Qwen JSON extraction failed for {page_url}: {exc}") from exc
 
+            self._record_usage(response)
             raw = _completion_content(response)
             try:
                 return QwenPageExtraction.model_validate_json(raw)
             except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+                unwrapped = _maybe_unwrap_envelope(raw)
+                if unwrapped is not None:
+                    try:
+                        return QwenPageExtraction.model_validate(unwrapped)
+                    except ValidationError:
+                        pass
                 last_exc = exc
                 if attempt < self.max_retries:
                     self.retries += 1
@@ -232,6 +245,24 @@ class MockQwenJsonExtractor:
             contacts=contacts,
             claims=pricing_claims,
         )
+
+
+def _maybe_unwrap_envelope(raw: str) -> dict[str, Any] | None:
+    """Unwrap a single-key envelope like ``{"data": {...}}`` around the payload.
+
+    Some OpenAI-compatible gateways wrap the JSON object the model produced.
+    Only a dict wrapped in exactly one key holding a dict is unwrapped; anything
+    else stays a schema error so the retry loop re-prompts the model.
+    """
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if isinstance(parsed, dict) and len(parsed) == 1:
+        inner = next(iter(parsed.values()))
+        if isinstance(inner, dict):
+            return inner
+    return None
 
 
 def _completion_content(response: Any) -> str:

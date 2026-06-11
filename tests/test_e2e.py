@@ -157,6 +157,13 @@ def test_cli_require_review_holds_and_releases_rfq(capsys, tmp_path, monkeypatch
     assert result["metrics"]["held_for_review"] == len(result["rfq_drafts"])
     assert result["metrics"]["pending_reviews"] >= len(result["rfq_drafts"])
 
+    # The run's own pending events are surfaced in the result, so API users
+    # need no filesystem access to see what is waiting on a human.
+    events = result["metrics"]["pending_review_events"]
+    assert events
+    assert all(e["event_id"] and e["proposed_action"] for e in events)
+    assert any(e["reason"] == "rfq finalization" for e in events)
+
     pending = _run_cli(capsys, ["review", "list", "--status", "pending"])
     rfq_events = [e for e in pending if e["reason"] == "rfq finalization"]
     assert rfq_events

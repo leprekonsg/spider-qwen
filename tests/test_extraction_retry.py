@@ -98,3 +98,42 @@ def test_empty_text_short_circuits_without_calling_client():
     assert isinstance(out, QwenPageExtraction)
     assert len(client.calls) == 0
     assert ex.last_attempts == 0
+
+
+# --- gateway envelopes ------------------------------------------------------
+
+def test_single_key_envelope_is_unwrapped_without_retry():
+    ex, client = _extractor(['{"data": ' + _VALID + "}"])
+    out = ex.extract(text="DF13 connector", page_url="https://x.sg", query="DF13")
+    assert isinstance(out, QwenPageExtraction)
+    assert ex.retries == 0
+    assert ex.malformed_final == 0
+    assert len(client.calls) == 1
+
+
+def test_envelope_never_parses_as_empty_extraction():
+    # extra="forbid": without unwrapping, {"data": {...}} must fail validation
+    # instead of silently parsing as an all-defaults (empty) extraction.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        QwenPageExtraction.model_validate({"data": {}, "noise": 1})
+
+
+# --- token usage metering ----------------------------------------------------
+
+class _UsageClient(_ScriptedClient):
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self._contents.pop(0)))],
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=20),
+        )
+
+
+def test_usage_is_recorded_and_drained_once():
+    client = _UsageClient([_VALID])
+    ex = QwenJsonExtractor(api_key="test", client=client)
+    ex.extract(text="DF13", page_url="https://x.sg", query="DF13")
+    assert ex.drain_usage() == [(ex.model, 100, 20)]
+    assert ex.drain_usage() == []  # drain semantics: a run meters only itself

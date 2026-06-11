@@ -9,10 +9,13 @@ TinyFish call count are still logged.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
+import pytest
+
 from spider_qwen import SCHEMA_VERSION
-from spider_qwen.agent.policy import load_policy
+from spider_qwen.agent.policy import Policy, load_policy
 from spider_qwen.api.cli import main
 from spider_qwen.observability.metrics import CostMeter, CostReport
 
@@ -111,3 +114,50 @@ def test_high_risk_run_routes_decision_to_max(capsys):
     lo_routing = {r["task"]: r["tier"] for r in lo["metrics"]["cost"]["routing"]}
     assert hi_routing["decision"] == "max"
     assert lo_routing["decision"] == "flash"
+
+
+# --- live token metering -----------------------------------------------------
+
+def test_run_drains_client_usage_into_metered_report():
+    from spider_qwen.agent.controller import Controller
+    from spider_qwen.tools.qwen_json_extractor import MockQwenJsonExtractor
+
+    class _MeteredExtractor(MockQwenJsonExtractor):
+        def __init__(self) -> None:
+            super().__init__()
+            self._usage = [("qwen3.5-flash", 1000, 200)]
+
+        def drain_usage(self):
+            drained, self._usage = self._usage, []
+            return drained
+
+    controller = Controller(offline=True, state_dir=None, persist=False,
+                            qwen_json_extractor=_MeteredExtractor())
+    result = asyncio.run(controller.run("office cleaning Singapore",
+                                        mode="service_quote_required"))
+    cost = result.metrics["cost"]
+    assert cost["metering_status"] == "metered"
+    assert cost["tokens_total"] == 1200
+    assert cost["total_usd"] > 0
+    # flash tokens rebilled at the max-tier price -> strictly positive savings
+    assert cost["usd_saved_vs_all_max"] > 0
+
+
+# --- model id validation -------------------------------------------------------
+
+def _clear_model_env(monkeypatch):
+    for env in ("QWEN_ROUTER_MODEL", "QWEN_JSON_EXTRACTOR_MODEL", "QWEN_NLI_MODEL",
+                "SPIDER_QWEN_MODEL_PLANNER", "SPIDER_QWEN_MODEL_EXTRACTION"):
+        monkeypatch.delenv(env, raising=False)
+
+
+def test_validate_model_ids_rejects_unpinned_model(monkeypatch):
+    _clear_model_env(monkeypatch)
+    pol = Policy({"models": {"planner": "qwen-bogus-model"}})
+    with pytest.raises(ValueError, match="qwen-bogus-model"):
+        pol.validate_model_ids()
+
+
+def test_validate_model_ids_accepts_default_policy(monkeypatch):
+    _clear_model_env(monkeypatch)
+    load_policy().validate_model_ids()  # every default id is pinned in pricing:

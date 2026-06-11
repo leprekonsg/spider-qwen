@@ -6,6 +6,7 @@ import json
 import os
 from typing import Any
 
+from ..observability.usage import RecordsTokenUsage
 from .classifier import ClassificationResult
 from .contracts import ProcurementMode
 
@@ -14,7 +15,7 @@ class QwenModeRouterError(Exception):
     pass
 
 
-class QwenModeRouter:
+class QwenModeRouter(RecordsTokenUsage):
     def __init__(
         self,
         api_key: str | None = None,
@@ -91,6 +92,7 @@ class QwenModeRouter:
         except Exception as exc:  # pragma: no cover - network path
             raise QwenModeRouterError(f"Qwen mode routing failed: {exc}") from exc
 
+        self._record_usage(response)
         data = _tool_arguments(response)
         try:
             return ClassificationResult(

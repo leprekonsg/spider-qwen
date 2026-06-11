@@ -111,6 +111,38 @@ class Policy:
             merged[str(model)] = {**merged.get(str(model), {}), **{k: float(v) for k, v in (price or {}).items()}}
         return merged
 
+    def validate_model_ids(self) -> None:
+        """Fail loud when a Qwen call path resolves to an unpinned model id.
+
+        The ``pricing:`` block doubles as the pinned known-good model set: every
+        id a live path can call must be priced there. Catches typos in env
+        overrides (e.g. QWEN_ROUTER_MODEL) at init instead of mid-run.
+        """
+        pricing = self.model_pricing()
+        resolved: dict[str, str] = {}
+        for role in self.models:
+            try:
+                resolved[f"models.{role}"] = self.model_for(role)
+            except KeyError:
+                continue
+        for source, getter in (
+            ("qwen_router_model", self.qwen_router_model),
+            ("qwen_json_extractor_model", self.qwen_json_extractor_model),
+            ("qwen_nli_model", self.qwen_nli_model),
+        ):
+            try:
+                resolved[source] = getter()
+            except KeyError:
+                continue
+        unknown = {src: mid for src, mid in resolved.items() if mid and mid not in pricing}
+        if unknown:
+            offenders = ", ".join(f"{src}={mid!r}" for src, mid in sorted(unknown.items()))
+            raise ValueError(
+                f"Unknown Qwen model id(s): {offenders}. Pin each id in the "
+                "pricing: block of governance/policy_config.yaml (the known-good "
+                "model set), or fix the model id / env override."
+            )
+
     @property
     def schema_version(self) -> str:
         return self.data.get("schema_version", "1.0")
