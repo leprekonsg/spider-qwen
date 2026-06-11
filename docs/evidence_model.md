@@ -56,3 +56,13 @@ ledger-backed but may not have character offsets.
 `EvidenceLedger.persist()` writes `<state_dir>/evidence/<run_id>.ledger.json`.
 `EvidenceLedger.load(run_id, state_dir)` rehydrates it; the CLI exposes it via
 `spider-qwen evidence show <run_id>`, `evidence verify`, and `evidence graph`.
+
+## Transparency proofs
+
+Persisted ledgers include a Merkle `tree_head`. When
+`SPIDER_QWEN_STH_SIGNING_KEY` is configured, the ledger also stores a signed tree
+head. `evidence prove` emits a citation proof with that signed head embedded.
+External verification must pin the Ed25519 public key out of band via
+`--sth-public-key`, `SPIDER_QWEN_STH_PUBLIC_KEY`, or
+`SPIDER_QWEN_STH_PUBLIC_KEY_FILE`; the public key embedded in the signed head is
+informational, not a trust anchor.

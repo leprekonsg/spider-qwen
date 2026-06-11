@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..evidence.models import utc_now_iso
+from ..memory.temporal import BiTemporalGraph
 from ..verification.minicheck import MiniCheck
 from .schema import dist_key, mfr_key, part_key
 
@@ -175,6 +177,7 @@ def ingest_text(
     reliability: float = 1.0,
     minicheck: MiniCheck | None = None,
     confidence: float = 0.7,
+    valid_from: str | None = None,
 ) -> list[Triple]:
     """Generator -> Verifier (MiniCheck) -> Pruner -> upsert into the store.
 
@@ -182,6 +185,8 @@ def ingest_text(
     every edge points back at it (hard rule: never a bare URL).
     """
     mc = minicheck or MiniCheck()
+    temporal = BiTemporalGraph(store)
+    event_ts = valid_from or utc_now_iso()
     added: list[Triple] = []
     for tr in extract_triples(text, confidence=confidence):
         verdict = mc.check(
@@ -192,10 +197,13 @@ def ingest_text(
             continue  # ungrounded relation -> never upserted
         store.upsert_node(tr.subject_id, tr.subject_type, {"surface": tr.subject_surface})
         store.upsert_node(tr.object_id, tr.object_type, {"surface": tr.object_surface})
-        store.add_edge(
+        temporal.record(
             tr.subject_id, tr.object_id, tr.rel,
             confidence=tr.confidence, reliability=reliability,
             evidence_claim_id=evidence_claim_id,
+            valid_from=event_ts,
+            props={"sentence": tr.sentence},
+            supersede=False,
         )
         added.append(tr)
     return added

@@ -274,10 +274,11 @@ class EvidenceLedger:
         for ledger_id in ledger_ids:
             proof = log.citation_proof(self, ledger_id)
             proof.tree_head = head
-            bundle = proof.model_dump(mode="json")
             if signed is not None:
-                bundle["signed_tree_head"] = signed
-            bundles.append(bundle)
+                from .transparency import SignedTreeHead
+
+                proof.signed_tree_head = SignedTreeHead.model_validate(signed)
+            bundles.append(proof.model_dump(mode="json"))
         return bundles
 
     @classmethod

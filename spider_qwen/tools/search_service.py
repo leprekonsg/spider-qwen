@@ -176,6 +176,9 @@ class SearchService:
     async def search(
         self, query: str, location: str | None = None, language: str = "en", limit: int = 10
     ) -> SearchResultSet:
+        from ..agent.tool_registry import ToolRegistry
+
+        ToolRegistry.require_allowed("search")
         if self.tracker is not None:
             self.tracker.consume_search()
         source_tool = getattr(self.provider, "search_source_tool", "mcp_search")

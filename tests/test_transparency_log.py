@@ -19,6 +19,7 @@ from spider_qwen.evidence.transparency import (
     verify_consistency,
     verify_inclusion,
     verify_redacted_leaf,
+    verify_signed_citation,
 )
 
 # Generation (recursive, RFC 6962 section 2.1) and verification (iterative,
@@ -367,6 +368,24 @@ def test_repersist_without_env_key_keeps_published_signature(tmp_path, monkeypat
     reloaded.persist()
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["signed_tree_head"] == signed
+
+
+def test_citation_proof_carries_signed_sth_and_verifies_against_anchor(tmp_path, monkeypatch):
+    pytest.importorskip("cryptography")
+    from spider_qwen.evidence.transparency import generate_signing_key
+
+    key = generate_signing_key()
+    monkeypatch.setenv("SPIDER_QWEN_STH_SIGNING_KEY", key.hex())
+    ledger = EvidenceLedger("run_signed_proof", state_dir=tmp_path)
+    ref = ledger.record(source_tool="mock", url="https://example.com", snippet="s")
+    ledger.persist()
+
+    bundle = ledger.citation_proof_bundles([ref.ledger_id])[0]
+    proof = CitationProof.model_validate(bundle)
+    assert proof.signed_tree_head is not None
+    assert proof.signed_tree_head.head == proof.tree_head
+    assert verify_signed_citation(proof, proof.signed_tree_head.public_key)
+    assert not verify_signed_citation(proof, "00" * 32)
 
 
 def test_malformed_sth_signing_key_fails_loud(monkeypatch):

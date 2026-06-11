@@ -10,7 +10,7 @@ Add `--live` to use live providers instead of the deterministic mock.
 
 ## Sources
 
-1. **Gold set** — 80 curated offline cases, 20 per mode (`gold_set.json`).
+1. **Gold set** — 100 curated offline cases, 20 per mode (`gold_set.json`).
 2. **Baseline parity** — compare discovered vendor domains to an external
    baseline (e.g. b2b-scrape) via `compare_to_baseline.py`. No-op if the
    baseline file is absent.
@@ -44,3 +44,5 @@ Add `--live` to use live providers instead of the deterministic mock.
 Offline note: the mock fetcher is deterministic and now includes product pricing,
 missing-price, conflicting-price, and rate-card cases. Report offline and live
 numbers separately; never present fixture-backed scores as live-web validity.
+Mode classification accuracy is a deterministic classifier regression unless it
+comes from `live_validation_set.json`.

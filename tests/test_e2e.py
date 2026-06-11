@@ -340,3 +340,10 @@ def test_server_run_is_offline_only_by_default(tmp_path, monkeypatch):
     offline = client.post("/run", json={"query": "office cleaning Singapore", "offline": True})
     assert offline.status_code == 200
     assert offline.json()["mode"] == "service_quote_required"
+
+    invalid_mode = client.post("/run", json={
+        "query": "office cleaning Singapore",
+        "mode": "not_a_mode",
+        "offline": True,
+    })
+    assert invalid_mode.status_code == 422

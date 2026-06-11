@@ -67,8 +67,9 @@ rechecks those spans. A ranked candidate with no evidence is dropped, not scored
 Qwen 3.7-Max is the planner/controller in spirit: deep-thinking reasoning over a
 1M-token context for multi-hop substitute discovery and trajectory selection,
 while the cheap, high-volume work — extraction, classification, page judging,
-query expansion — routes to Qwen 3.5-Flash through the cost router (which reports
-`$-saved-vs-all-max`). The hot path stays deterministic (regex/heuristic
+query expansion — routes to Qwen 3.5-Flash through the cost router. When live
+token metering is wired, the report includes `$-saved-vs-all-max`; otherwise it
+marks token metering unavailable. The hot path stays deterministic (regex/heuristic
 extractors, no LLM) for reproducibility; Qwen adds JSON-constrained extraction,
 low-confidence tool-call routing, project skill prompts, and an MCP surface. Model
 IDs are policy-configured (the `models:` block), never hard-coded, so a dated
@@ -181,7 +182,7 @@ flowchart TD
 
 Opt-in layers (dotted) leave the default pipeline unchanged: `--reason` runs the
 multi-trajectory reasoning spine, `--serendipity` runs the discovery sidecar over
-the run's ledger, and the cost router records `$/run` + `$-saved-vs-all-max`.
+the run's ledger, and the cost router records routing plus token-metering status.
 
 ## Procurement modes
 
@@ -217,6 +218,8 @@ Selected via env or injection; both abstracted behind protocols.
 | `QWEN_NLI_ENABLED` | `0` · `1` | `0` |
 | `QWEN_NLI_MODEL` | verified DashScope model id | `qwen-flash` |
 | `SPIDER_QWEN_CONFORMAL_CALIBRATION` | path to hand-graded calibration JSON | unset (gate never blocks; metrics state no guarantee) |
+| `SPIDER_QWEN_STH_PUBLIC_KEY` | Ed25519 public-key trust anchor for evidence proofs | unset |
+| `SPIDER_QWEN_STH_PUBLIC_KEY_FILE` | file containing the same public-key anchor | unset |
 
 Qwen-assisted paths are optional and mocked in offline mode. Regex extractors
 remain the deterministic default. Qwen JSON extraction runs over already-fetched
@@ -251,7 +254,9 @@ Per-mode classification accuracy:
 | electronics_substitution | 20 | `1.00` |
 | revalidation | 20 | `0.80` |
 
-These are fixture-backed regression numbers, not live-web claims. A separate
+These are fixture-backed regression numbers, not live-web claims; mode
+classification accuracy is a deterministic classifier regression, not an
+independent live accuracy claim. A separate
 `spider_qwen/benchmarks/live_validation_set.json` carries a small rate-limited
 live validation set for deployed-path reporting.
 

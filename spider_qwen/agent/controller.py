@@ -24,7 +24,7 @@ from .policy import Policy, load_policy
 from ..api.schema import Classification, RunResult
 from ..evidence.ledger import EvidenceLedger
 from ..evidence.graph import render_supplier_graph
-from ..evidence.models import EvidenceRef, sha256_hex
+from ..evidence.models import EvidenceRef, sha256_hex, utc_now_iso
 from ..evidence.verifier import VerificationSpine
 from ..verification.minicheck import MiniCheck, value_grounded
 from ..extraction.contact import ContactExtractor
@@ -220,7 +220,7 @@ class Controller:
         for item in ledger.items():
             if item.text:
                 ingest_text(store, item.text, evidence_claim_id=item.ledger_id,
-                            reliability=item.reliability)
+                            reliability=item.reliability, valid_from=item.retrieved_at)
         return GraphRetriever(store).retrieve(query, top_k=top_k)
 
     def _classify(self, query: str, forced_mode: str | None = None):
@@ -247,6 +247,7 @@ class Controller:
         chosen = classification.mode
         route = self.router.route(chosen)
         budget = self.policy.budget_for(chosen, route.budget_key)
+        run_reference_ts = utc_now_iso()
 
         run_id = new_run_id()
         ledger = EvidenceLedger(run_id, self.state_dir,
@@ -265,7 +266,7 @@ class Controller:
         search = SearchService(self.search_provider, ledger, tracker, tracer)
         fetch = FetchService(self.fetch_provider, ledger, tracker, tracer,
                              judge=self.page_judge, query=query)
-        memory_recalls = self._recall_memory(query, ctx, audit)
+        memory_recalls = self._recall_memory(query, ctx, audit, reference_ts=run_reference_ts)
 
         if review_store and mode == "auto" and classification.confidence < self.policy.qwen_router_confidence_threshold():
             review_store.create(
@@ -348,14 +349,19 @@ class Controller:
         # spine breaks the loop by forcing recalled rows through SAFE corpus
         # re-grounding against the CURRENT run's fetched pages.
         if memory_recalls and self.memory_mcp is not None and hasattr(self.memory_mcp, "memory"):
-            if self.verify_claims:
-                cited = record_citations(self.memory_mcp.memory, ledger, validated)
-                if cited:
-                    audit.record("memory_citations_recorded", count=cited)
-            else:
-                # Not silent: the audit trail says why no counts moved.
+            creditable = validated if self.verify_claims else self._memory_credit_verified_candidates(
+                ledger, validated, tracer,
+            )
+            cited = record_citations(self.memory_mcp.memory, ledger, creditable)
+            if cited:
+                audit.record(
+                    "memory_citations_recorded",
+                    count=cited,
+                    verifier="global_spine" if self.verify_claims else "memory_credit_spine",
+                )
+            elif self._has_semantic_memory_refs(ledger, validated):
                 audit.record("memory_citations_skipped",
-                             reason="claim verification disabled")
+                             reason="no recalled semantic-memory claim passed verification")
 
         stop_reason = self._stop_reason(chosen, validated, candidates, tracker, budget)
 
@@ -415,7 +421,7 @@ class Controller:
             classification=Classification(
                 mode=chosen.value, confidence=classification.confidence, rationale=classification.rationale
             ),
-            validated_candidates=[c.model_dump(mode="json") for c in validated],
+            validated_candidates=[self._public_candidate_dump(c) for c in validated],
             serendipity=serendipity_result.model_dump(mode="json"),
             serendipity_discovery=discovery.model_dump(mode="json") if discovery else None,
             pricing_status_summary=self._pricing_summary(candidates),
@@ -715,8 +721,6 @@ class Controller:
 
         def _fetch_node(url: str):
             async def run(_dep):
-                if not ctx.tracker.can_fetch():
-                    return None
                 try:
                     return await fetch.fetch([url])
                 except BudgetExceeded:
@@ -733,13 +737,25 @@ class Controller:
         ctx.working.add_fetched([p.final_url or p.url for p in pages])
         return pages
 
-    def _recall_memory(self, query: str, ctx: ExecutionContext, audit: AuditLog) -> list[MemoryRecall]:
+    def _recall_memory(
+        self,
+        query: str,
+        ctx: ExecutionContext,
+        audit: AuditLog,
+        *,
+        reference_ts: str,
+    ) -> list[MemoryRecall]:
         if self.memory_mcp is None:
             return []
         try:
             if hasattr(self.memory_mcp, "memory"):
-                self.memory_mcp.memory.maintain()
-            recalls = self.memory_mcp.recall(query=query, top_k=5, context_budget_chars=1200)
+                self.memory_mcp.memory.maintain(reference_ts=reference_ts)
+            recalls = self.memory_mcp.recall(
+                query=query,
+                top_k=5,
+                context_budget_chars=1200,
+                reference_ts=reference_ts,
+            )
         except Exception as exc:
             ctx.tracer.record(step="memory_recall", tool="semantic_memory", status="error", error=str(exc))
             return []
@@ -1014,6 +1030,51 @@ class Controller:
             }
         return kept, metrics
 
+    def _memory_credit_verified_candidates(self, ledger: EvidenceLedger, candidates, tracer):
+        """Narrow verification pass used only to credit recalled memory facts.
+
+        Global claim verification may be disabled for the user-facing pipeline,
+        but citation counts still must not self-reinforce. Only candidates that
+        cite a semantic_memory row and pass the same spine against the current
+        corpus are eligible for memory citation credit.
+        """
+        spine = VerificationSpine(ledger, minicheck=self.minicheck or MiniCheck())
+        kept = []
+        for cand in candidates:
+            if not self._has_semantic_memory_refs(ledger, [cand]):
+                continue
+            cv = spine.verify_candidate(cand)
+            if cv.verified:
+                kept.append(cand)
+                if tracer is not None:
+                    tracer.record(
+                        step="memory_credit_verify",
+                        tool="minicheck_verifier",
+                        status="success",
+                        input_count=len(cv.claims),
+                        output_count=len(cv.claims),
+                        detail={"vendor": cv.vendor_name, "verifier_score": cv.verifier_score},
+                    )
+            elif tracer is not None:
+                tracer.record(
+                    step="memory_credit_verify",
+                    tool="minicheck_verifier",
+                    status="blocked",
+                    input_count=len(cv.claims),
+                    output_count=0,
+                    detail=cv.model_dump(mode="json"),
+                )
+        return kept
+
+    @staticmethod
+    def _has_semantic_memory_refs(ledger: EvidenceLedger, candidates) -> bool:
+        for cand in candidates:
+            for ref in getattr(cand, "evidence_refs", None) or []:
+                item = ledger.get(getattr(ref, "ledger_id", ""))
+                if item is not None and item.source_tool == "semantic_memory":
+                    return True
+        return False
+
     # --- validation / stop ------------------------------------------------
     def _is_validated(self, candidate, mode: ProcurementMode, budget) -> bool:
         if not candidate.has_evidence():
@@ -1116,6 +1177,21 @@ class Controller:
             if status is not None:
                 summary[status.value] = summary.get(status.value, 0) + 1
         return summary
+
+    def _public_candidate_dump(self, candidate) -> dict:
+        data = candidate.model_dump(mode="json")
+        if not isinstance(candidate, ContactCandidate):
+            return data
+        redacted = 0
+        for contact in data.get("contacts", []):
+            privacy_class = contact.get("privacy_class", "")
+            if self.policy.review_gate_enabled(privacy_class):
+                contact["value"] = "[redacted:high_sensitivity_contact]"
+                contact["redaction_reason"] = "policy review gate required"
+                redacted += 1
+        if redacted:
+            data.setdefault("validation_signals", {})["redacted_contacts"] = redacted
+        return data
 
     def _record_extraction_ref(
         self,

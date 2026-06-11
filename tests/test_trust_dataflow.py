@@ -5,12 +5,12 @@ controller serving consecutive runs against one state dir. They prove:
 
 - run 2 recalls what run 1 promoted (shared SemanticMemory instance;
   a second instance over the same semantic.json used to clobber facts),
-- the full citation loop closes only under verification: promote ->
+- the full citation loop closes through verification: promote ->
   recall -> attach -> SAFE re-ground against the CURRENT corpus ->
-  credit -> persist,
+  credit -> persist, even when the user-facing verification gate is off,
 - the GSAR decision and GRADE surface in RunResult.metrics instead of
   dead-ending inside the verifier,
-- when crediting is impossible (verification off) the audit trail says
+- when crediting is impossible (no current grounding) the audit trail says
   so explicitly.
 """
 
@@ -76,6 +76,19 @@ class _PhasedSearch:
                          snippet="office cleaning Singapore quotation",
                          rank=i, source_tool="mock")
             for i, u in enumerate(urls)
+        ]
+        return SearchResultSet(query=query, location=location, results=results,
+                               total_results=len(results), provider="mock")
+
+
+class _NoDirectoryPhaseSearch(_PhasedSearch):
+    async def search(self, query: str, location: str | None, language: str, limit: int):
+        if self.phase == 1:
+            return await super().search(query, location, language, limit)
+        results = [
+            SearchResult(url=VENDOR_PAGE_RUN2, title=FIXTURES[VENDOR_PAGE_RUN2]["title"],
+                         snippet="office cleaning Singapore quotation",
+                         rank=0, source_tool="mock")
         ]
         return SearchResultSet(query=query, location=location, results=results,
                                total_results=len(results), provider="mock")
@@ -150,7 +163,7 @@ def test_citation_loop_closes_end_to_end_under_verification(tmp_path):
     assert second.metrics["claims_verified"] >= 1
 
 
-def test_citations_are_skipped_loudly_when_verification_is_off(tmp_path):
+def test_citations_credit_with_narrow_spine_when_global_verification_is_off(tmp_path):
     controller = _controller(tmp_path, verify=False)
 
     asyncio.run(controller.run(QUERY, mode="service_quote_required"))
@@ -158,15 +171,24 @@ def test_citations_are_skipped_loudly_when_verification_is_off(tmp_path):
     second = asyncio.run(controller.run(QUERY, mode="service_quote_required"))
 
     assert second.metrics["memory_recalls"] >= 1
-    # Without the spine there is no external check breaking the recall ->
-    # validate -> credit loop, so crediting must not happen -- and the audit
-    # trail must say why, not stay silent.
+    assert any(f["citation_count"] >= 1 for f in _semantic_facts(tmp_path))
+    actions = _audit_actions(tmp_path, second.run_id)
+    assert "memory_citations_recorded" in actions
+    assert second.metrics["verification_assessments"] == {}
+
+
+def test_citations_skip_loudly_when_recalled_fact_cannot_be_regrounded(tmp_path):
+    controller = _controller(tmp_path, verify=False, search=_NoDirectoryPhaseSearch())
+
+    asyncio.run(controller.run(QUERY, mode="service_quote_required"))
+    controller.search_provider.phase = 2
+    second = asyncio.run(controller.run(QUERY, mode="service_quote_required"))
+
+    assert second.metrics["memory_recalls"] >= 1
     assert all(f["citation_count"] == 0 for f in _semantic_facts(tmp_path))
     actions = _audit_actions(tmp_path, second.run_id)
     assert "memory_citations_skipped" in actions
     assert "memory_citations_recorded" not in actions
-    # Stable metrics shape either way.
-    assert second.metrics["verification_assessments"] == {}
 
 
 def test_long_lived_controller_runs_share_one_semantic_memory(tmp_path):

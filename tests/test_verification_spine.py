@@ -187,6 +187,22 @@ def test_safe_search_fn_seam_supplies_grounding():
     assert res.supported
 
 
+def test_safe_search_fn_failure_is_logged(caplog):
+    mc = MiniCheck()
+    claim = decompose(SimpleNamespace(vendor_name="Acme", price=129.0,
+                                      pricing_status=PricingStatus.EXACT_PRICE,
+                                      evidence_refs=[]))[1]
+
+    def boom(_query):
+        raise RuntimeError("search unavailable")
+
+    with caplog.at_level("WARNING", logger="spider_qwen.verification.safe"):
+        res = SafeReverifier(mc, search_fn=boom).reverify(claim, corpus=[])
+
+    assert not res.supported
+    assert "search unavailable" in caplog.text
+
+
 # --- spine over a ledger ---------------------------------------------------
 
 def _record_page_and_claim(ledger, *, page_text, claim_value, grounded):
@@ -285,6 +301,15 @@ def test_spine_treats_priced_value_with_unknown_status_as_critical():
     price = next(c for c in cv.claims if c.field == "price")
     assert price.critical is True
     assert cv.verified is False
+
+
+def test_spine_blocks_candidate_with_no_claims():
+    ledger = EvidenceLedger("run_test", None)
+    cv = VerificationSpine(ledger).verify_candidate(SimpleNamespace(evidence_refs=[]))
+    assert cv.verified is False
+    assert cv.verifier_score == 0.0
+    assert cv.unsupported_critical == ["no_claims"]
+    assert cv.claims == []
 
 
 def test_spine_accepts_candidate_with_failed_noncritical_claim():

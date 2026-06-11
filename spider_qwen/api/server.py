@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel  # core dependency; FastAPI stays lazy below
 
@@ -20,7 +21,14 @@ WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
 class RunRequest(BaseModel):
     query: str
-    mode: str = "auto"
+    mode: Literal[
+        "auto",
+        "product_exact_price",
+        "service_quote_required",
+        "contact_enrichment_only",
+        "revalidation",
+        "electronics_substitution",
+    ] = "auto"
     country: str | None = None
     offline: bool = True
 

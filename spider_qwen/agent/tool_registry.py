@@ -17,11 +17,15 @@ class ToolRegistry:
         self._tools: dict[str, Callable[..., Any]] = {}
 
     def register(self, name: str, fn: Callable[..., Any]) -> None:
-        if name not in self.ALLOWED_V1:
-            raise ValueError(
-                f"Tool '{name}' is not allowed in v1. Allowed: {sorted(self.ALLOWED_V1)}"
-            )
+        self.require_allowed(name)
         self._tools[name] = fn
+
+    @classmethod
+    def require_allowed(cls, name: str) -> None:
+        if name not in cls.ALLOWED_V1:
+            raise ValueError(
+                f"Tool '{name}' is not allowed in v1. Allowed: {sorted(cls.ALLOWED_V1)}"
+            )
 
     def get(self, name: str) -> Callable[..., Any]:
         if name not in self._tools:

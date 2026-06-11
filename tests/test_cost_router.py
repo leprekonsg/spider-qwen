@@ -80,7 +80,8 @@ def test_empty_meter_is_zero_cost():
     assert report.total_usd == 0.0
     assert report.tokens_total == 0
     assert report.tinyfish_calls == 3
-    assert report.usd_saved_vs_all_max == 0.0
+    assert report.usd_saved_vs_all_max is None
+    assert report.metering_status == "token metering unavailable in v1"
     assert report.schema_version == SCHEMA_VERSION
     assert isinstance(report, CostReport)
 
@@ -99,6 +100,7 @@ def test_run_logs_cost_breakdown(capsys):
     assert "total_usd" in cost and "tokens_total" in cost
     assert cost["tinyfish_calls"] >= 1  # search + fetch happened
     assert "usd_saved_vs_all_max" in cost
+    assert cost["metering_status"] == "token metering unavailable in v1"
     assert isinstance(cost["routing"], list) and cost["routing"]
 
 

@@ -22,14 +22,25 @@ DEFAULT_STALE_DAYS = 180.0
 REINFORCE_GROWTH = 0.5
 
 
-def _age_days(iso_ts: str) -> float:
+def _age_days(iso_ts: str, *, reference_ts: str | datetime | None = None) -> float:
     try:
         then = datetime.fromisoformat(iso_ts)
     except ValueError:
         return 0.0
     if then.tzinfo is None:
         then = then.replace(tzinfo=timezone.utc)
-    return max(0.0, (datetime.now(timezone.utc) - then).total_seconds() / 86400.0)
+    if reference_ts is None:
+        ref = datetime.now(timezone.utc)
+    elif isinstance(reference_ts, datetime):
+        ref = reference_ts
+    else:
+        try:
+            ref = datetime.fromisoformat(reference_ts)
+        except ValueError:
+            ref = datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    return max(0.0, (ref - then).total_seconds() / 86400.0)
 
 
 def memory_stability_days(fact: SemanticFact, half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> float:
@@ -45,12 +56,22 @@ def memory_stability_days(fact: SemanticFact, half_life_days: float = DEFAULT_HA
     return reinforced / (2.0 ** disputes)
 
 
-def apply_decay(fact: SemanticFact, half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> float:
+def apply_decay(
+    fact: SemanticFact,
+    half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+    *,
+    reference_ts: str | datetime | None = None,
+) -> float:
     """Return the age-decayed confidence under MemoryBank forgetting."""
-    age = _age_days(fact.last_verified_at)
+    age = _age_days(fact.last_verified_at, reference_ts=reference_ts)
     stability = memory_stability_days(fact, half_life_days)
     return round(fact.confidence * math.exp(-age / stability), 4)
 
 
-def is_stale(fact: SemanticFact, stale_days: float = DEFAULT_STALE_DAYS) -> bool:
-    return _age_days(fact.last_verified_at) >= stale_days
+def is_stale(
+    fact: SemanticFact,
+    stale_days: float = DEFAULT_STALE_DAYS,
+    *,
+    reference_ts: str | datetime | None = None,
+) -> bool:
+    return _age_days(fact.last_verified_at, reference_ts=reference_ts) >= stale_days

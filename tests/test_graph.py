@@ -89,14 +89,19 @@ def test_extract_ignores_unknown_entities():
 
 def test_ingest_builds_graph_with_evidence_backed_edges():
     store = GraphStore()
+    valid_from = "2026-06-01T00:00:00+00:00"
     added = ingest_text(store, "The ATMEGA48 was acquired by Microchip.",
-                        evidence_claim_id="ev_page", reliability=0.95)
+                        evidence_claim_id="ev_page", reliability=0.95,
+                        valid_from=valid_from)
     assert added
     assert store.get_node("part:atmega48")["type"] == "Part"
     nbrs = store.neighbors("part:atmega48", rels=["ACQUIRED_BY"])
     assert nbrs[0]["dst"] == "mfr:microchip"
     assert nbrs[0]["evidence_claim_id"] == "ev_page"
     assert nbrs[0]["reliability"] == 0.95
+    version = store.versions("part:atmega48", "mfr:microchip", "ACQUIRED_BY")[0]
+    assert version["event_ts"] == valid_from
+    assert "ATMEGA48 was acquired by Microchip" in version["props"]["sentence"]
 
 
 # --- acceptance ------------------------------------------------------------

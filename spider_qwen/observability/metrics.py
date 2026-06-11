@@ -34,7 +34,8 @@ class CostReport(BaseModel):
     total_usd: float = 0.0
     tokens_total: int = 0
     tinyfish_calls: int = 0
-    usd_saved_vs_all_max: float = 0.0
+    usd_saved_vs_all_max: float | None = None
+    metering_status: str = "unavailable"
     by_model: list[ModelCost] = Field(default_factory=list)
     routing: list[RouteDecision] = Field(default_factory=list)
 
@@ -80,11 +81,13 @@ class CostMeter:
             by_model.append(
                 ModelCost(model=model, calls=calls, input_tokens=in_tok, output_tokens=out_tok, usd=round(usd, 6))
             )
+        metered = bool(by_model)
         return CostReport(
             total_usd=round(total, 6),
             tokens_total=tokens,
             tinyfish_calls=tinyfish_calls,
-            usd_saved_vs_all_max=round(max(0.0, all_max - total), 6),
+            usd_saved_vs_all_max=round(max(0.0, all_max - total), 6) if metered else None,
+            metering_status="metered" if metered else "token metering unavailable in v1",
             by_model=by_model,
             routing=list(routing),
         )

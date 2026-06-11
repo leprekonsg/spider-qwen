@@ -39,3 +39,10 @@ def test_browser_drive_is_blocked():
     log = AuditLog(run_id="run_test")
     with pytest.raises(PolicyViolation):
         log.record("browser_drive")
+
+
+def test_forbidden_action_check_is_case_insensitive():
+    log = AuditLog(run_id="run_test")
+    with pytest.raises(PolicyViolation):
+        log.record("RFQ_Submitted")
+    assert log.events == []

@@ -8,7 +8,9 @@ Live Drive / DashScope Responses-API wiring is deferred to Phase 8.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import sys
 
 import pytest
@@ -83,3 +85,32 @@ def test_mcp_server_missing_dependency_has_actionable_error(monkeypatch):
     with pytest.raises(ImportError) as exc:
         build_server()
     assert "[mcp]" in str(exc.value)
+
+
+def test_mcp_stdio_server_completes_initialize_list_and_call(tmp_path):
+    pytest.importorskip("mcp")
+    from mcp.client.session import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    async def _run():
+        env = dict(os.environ)
+        env["SPIDER_QWEN_STATE_DIR"] = str(tmp_path)
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "spider_qwen.mcp.server"],
+            env=env,
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                names = {tool.name for tool in tools.tools}
+                assert "procurement_classify" in names
+                result = await session.call_tool(
+                    "procurement_classify",
+                    {"query": "office cleaning Singapore"},
+                )
+                assert not getattr(result, "isError", False)
+                assert result.content or getattr(result, "structuredContent", None)
+
+    asyncio.run(_run())

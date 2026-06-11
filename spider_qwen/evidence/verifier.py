@@ -133,8 +133,18 @@ class VerificationSpine:
 
     def verify_candidate(self, candidate: Any) -> CandidateVerification:
         results = [self._verify_claim(candidate, claim) for claim in decompose(candidate)]
+        if not results:
+            return CandidateVerification(
+                vendor_name=getattr(candidate, "vendor_name", "") or "",
+                verified=False,
+                verifier_score=0.0,
+                claims=[],
+                unsupported_critical=["no_claims"],
+                decision="replan",
+                grade="very_low",
+            )
         unsupported_critical = [r.claim_id for r in results if r.critical and not r.verified]
-        score = round(min((r.verifier_score for r in results), default=1.0), 4)
+        score = round(min(r.verifier_score for r in results), 4)
         verified_grades = [r.grade for r in results if r.verified and r.grade]
         return CandidateVerification(
             vendor_name=getattr(candidate, "vendor_name", "") or "",

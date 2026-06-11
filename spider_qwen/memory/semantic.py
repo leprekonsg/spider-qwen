@@ -72,6 +72,13 @@ class SemanticMemory:
         path = self._path()
         if path and path.exists():
             for raw in json.loads(path.read_text(encoding="utf-8")):
+                version = raw.get("schema_version") if isinstance(raw, dict) else None
+                if version != SCHEMA_VERSION:
+                    raise ValueError(
+                        f"Semantic memory file {path} contains schema_version "
+                        f"{version!r}; expected {SCHEMA_VERSION!r}. Run a memory "
+                        "migration or rebuild semantic memory from the evidence ledger."
+                    )
                 fact = SemanticFact.model_validate(raw)
                 self._facts[fact.fact_id] = fact
 
@@ -140,14 +147,17 @@ class SemanticMemory:
     def active(self) -> list[SemanticFact]:
         return [f for f in self._facts.values() if f.status == "active"]
 
-    def maintain(self, *, stale_days: float | None = None) -> int:
+    def maintain(self, *, stale_days: float | None = None,
+                 reference_ts: str | None = None) -> int:
         """Apply staleness policy and persist changed facts."""
         from .decay import DEFAULT_STALE_DAYS, is_stale
 
         threshold = DEFAULT_STALE_DAYS if stale_days is None else stale_days
         changed = 0
         for fact in self._facts.values():
-            if fact.status == "active" and is_stale(fact, stale_days=threshold):
+            if fact.status == "active" and is_stale(
+                fact, stale_days=threshold, reference_ts=reference_ts,
+            ):
                 fact.status = "stale"
                 changed += 1
         if changed:
@@ -169,6 +179,7 @@ class SemanticMemory:
         *,
         top_k: int = 5,
         context_budget_chars: int = 1200,
+        reference_ts: str | None = None,
     ) -> list[MemoryRecall]:
         """Return active facts that fit a simple limited-context budget."""
         from .citation_rank import citation_multiplier
@@ -177,7 +188,7 @@ class SemanticMemory:
         query_terms = _terms(query)
         recalls: list[MemoryRecall] = []
         for fact in self.active():
-            decayed = apply_decay(fact)
+            decayed = apply_decay(fact, reference_ts=reference_ts)
             haystack = _terms(f"{fact.entity_name} {fact.field} {fact.value}")
             overlap = len(query_terms & haystack)
             if overlap <= 0:

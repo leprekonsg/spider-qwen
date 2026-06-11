@@ -10,10 +10,13 @@ vendor's page does not count.
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from .atomic import AtomicClaim
 from .minicheck import MiniCheck, MiniCheckResult
+
+logger = logging.getLogger(__name__)
 
 
 class SafeReverifier:
@@ -27,8 +30,8 @@ class SafeReverifier:
         if self.search_fn is not None:
             try:
                 spans = spans + [s for s in (self.search_fn(self._query(claim)) or []) if s and s.strip()]
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("SAFE search re-verification failed: %s", exc)
 
         best = MiniCheckResult(supported=False, score=0.0, method="safe_no_grounding",
                                rationale="no independent source grounds the claim")

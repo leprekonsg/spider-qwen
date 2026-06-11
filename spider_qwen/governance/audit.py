@@ -42,7 +42,8 @@ class AuditLog:
         self._state_dir = Path(state_dir) if state_dir else None
 
     def record(self, action: str, **detail: Any) -> AuditEvent:
-        if action in self.FORBIDDEN:
+        normalized = (action or "").lower()
+        if normalized in self.FORBIDDEN:
             raise PolicyViolation(f"Action '{action}' is forbidden (RFQ draft only)")
         event = AuditEvent(run_id=self.run_id, action=action, detail=detail)
         self.events.append(event)

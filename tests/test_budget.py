@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from spider_qwen.agent.budget import Budget, BudgetExceeded, BudgetTracker, StopReason
+from spider_qwen.agent.tool_registry import ToolRegistry
 
 
 def test_search_budget_blocks_after_limit():
@@ -34,3 +35,8 @@ def test_runtime_budget_zero_blocks():
     assert tracker.runtime_exceeded() is True
     with pytest.raises(BudgetExceeded):
         tracker.consume_search()
+
+
+def test_tool_registry_runtime_guard_rejects_forbidden_tool():
+    with pytest.raises(ValueError, match="not allowed"):
+        ToolRegistry.require_allowed("browser_drive")

@@ -126,18 +126,28 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
         out["chain_checked"] = chain.checked
         out["chain_ok"] = chain.ok
         out["chain_issues"] = [i.model_dump() for i in chain.issues]
+        out["signed_tree_head"] = _verify_published_sth(
+            ledger.published_signed_tree_head(),
+            getattr(args, "sth_public_key", None),
+        )
         print(json.dumps(out, indent=2))
-        return 0 if (result.ok and chain.ok) else 1
+        sth_ok = out["signed_tree_head"].get("verified_against_trust_anchor", True) is not False
+        return 0 if (result.ok and chain.ok and sth_ok) else 1
     if args.evidence_command == "graph":
         print(render_supplier_graph(ledger))
         return 0
     if args.evidence_command == "prove":
-        return _evidence_prove(ledger, getattr(args, "ledger_id", None))
+        return _evidence_prove(
+            ledger,
+            getattr(args, "ledger_id", None),
+            getattr(args, "sth_public_key", None),
+        )
     print(json.dumps([item.model_dump() for item in ledger.items()], indent=2))
     return 0
 
 
-def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None) -> int:
+def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None,
+                    expected_public_key: str | None = None) -> int:
     """RFC 6962 citation proof for one ledger row, plus a tamper demonstration.
 
     The proof is bound to the run's PERSISTED tree-head commitment, including
@@ -146,7 +156,7 @@ def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None) -> int:
     prove anything about what was published. Then one hex digit of the leaf is
     flipped to show the same proof fail.
     """
-    from ..evidence.transparency import CitationProof, verify_citation
+    from ..evidence.transparency import CitationProof, verify_citation, verify_signed_citation
 
     try:
         # Fail a malformed signing key before emitting a half-verified proof.
@@ -165,7 +175,6 @@ def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None) -> int:
         return 2
 
     bundle = ledger.citation_proof_bundles([target.ledger_id])[0]
-    sth_dict = bundle.pop("signed_tree_head", None)
     proof = CitationProof.model_validate(bundle)
     ok = verify_citation(proof)
 
@@ -173,12 +182,28 @@ def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None) -> int:
     flipped = ("0" if proof.leaf_data[0] != "0" else "1") + proof.leaf_data[1:]
     tampered_ok = verify_citation(proof.model_copy(update={"leaf_data": flipped}))
 
-    sth_report = _signed_tree_head_report(sth_dict)
+    sth_report = _signed_tree_head_report(
+        proof.signed_tree_head.model_dump(mode="json") if proof.signed_tree_head else None,
+        expected_public_key,
+    )
+    signed_ok: bool | None = None
+    try:
+        anchor, _source = _expected_sth_public_key(expected_public_key)
+        if anchor:
+            signed_ok = verify_signed_citation(proof, anchor)
+    except ImportError as exc:
+        sth_report["verification_unavailable"] = str(exc)
+        signed_ok = False
+    except ValueError as exc:
+        sth_report["trust_anchor_error"] = str(exc)
+        signed_ok = False
+    if signed_ok is not None:
+        sth_report["citation_verified_against_signed_head"] = signed_ok
     out: dict = {
         "run_id": ledger.run_id,
         "ledger_id": target.ledger_id,
         "url": target.url,
-        "citation_proof": bundle,
+        "citation_proof": proof.model_dump(mode="json"),
         "proof_verified": ok,
         "tree_head_published": ledger.published_tree_head() is not None,
         "tamper_demo": {
@@ -189,10 +214,12 @@ def _evidence_prove(ledger: EvidenceLedger, ledger_id: str | None) -> int:
     }
     print(json.dumps(out, indent=2))
     sth_ok = sth_report.get("verified_against_trust_anchor", True) is not False
-    return 0 if ok and not tampered_ok and sth_ok else 1
+    citation_sth_ok = sth_report.get("citation_verified_against_signed_head", True) is not False
+    return 0 if ok and not tampered_ok and sth_ok and citation_sth_ok else 1
 
 
-def _signed_tree_head_report(sth_dict: dict | None) -> dict:
+def _signed_tree_head_report(sth_dict: dict | None,
+                             expected_public_key: str | None = None) -> dict:
     """Report the persisted STH, verified against the operator's trust anchor.
 
     The anchor is the public key derived from SPIDER_QWEN_STH_SIGNING_KEY (the
@@ -211,24 +238,81 @@ def _signed_tree_head_report(sth_dict: dict | None) -> dict:
         from ..evidence.transparency import SignedTreeHead, verify_signed_tree_head
 
         sth = SignedTreeHead.model_validate(sth_dict)
-        key = sth_signing_key_from_env()
-        if key is None:
+        anchor, source = _expected_sth_public_key(expected_public_key)
+        if anchor is None:
             report["trust_anchor"] = (
-                "not configured: set SPIDER_QWEN_STH_SIGNING_KEY to verify as the "
-                "operator; external verifiers must pin the log's public key out of band."
+                "not configured: pass --sth-public-key, set SPIDER_QWEN_STH_PUBLIC_KEY, "
+                "set SPIDER_QWEN_STH_PUBLIC_KEY_FILE, or set SPIDER_QWEN_STH_SIGNING_KEY "
+                "to derive the operator anchor."
             )
         else:
-            from cryptography.hazmat.primitives import serialization
-            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-            anchor = Ed25519PrivateKey.from_private_bytes(key).public_key().public_bytes(
-                encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw,
-            ).hex()
+            report["trust_anchor_source"] = source
             report["verified_against_trust_anchor"] = verify_signed_tree_head(sth, anchor)
         report["verified_against_attacker_key"] = verify_signed_tree_head(sth, "00" * 32)
     except ImportError as exc:
         report["verification_unavailable"] = str(exc)
+    except ValueError as exc:
+        report["trust_anchor_error"] = str(exc)
+        report["verified_against_trust_anchor"] = False
     return report
+
+
+def _verify_published_sth(sth_dict: dict | None, expected_public_key: str | None = None) -> dict:
+    """Evidence verify's STH check: explicit when unavailable, failing when bad."""
+    return _signed_tree_head_report(sth_dict, expected_public_key)
+
+
+def _expected_sth_public_key(cli_value: str | None = None) -> tuple[str | None, str | None]:
+    """Return a pinned Ed25519 public key hex and where it came from.
+
+    Priority: CLI > SPIDER_QWEN_STH_PUBLIC_KEY > SPIDER_QWEN_STH_PUBLIC_KEY_FILE
+    > public key derived from SPIDER_QWEN_STH_SIGNING_KEY. External verifiers
+    should use one of the first three; deriving from the private key is an
+    operator-local convenience.
+    """
+    if cli_value:
+        return _normalize_public_key(cli_value, "--sth-public-key"), "--sth-public-key"
+    env_key = os.getenv("SPIDER_QWEN_STH_PUBLIC_KEY", "").strip()
+    if env_key:
+        return _normalize_public_key(env_key, "SPIDER_QWEN_STH_PUBLIC_KEY"), "SPIDER_QWEN_STH_PUBLIC_KEY"
+    key_file = os.getenv("SPIDER_QWEN_STH_PUBLIC_KEY_FILE", "").strip()
+    if key_file:
+        path = Path(key_file)
+        try:
+            file_key = path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+        except (OSError, IndexError) as exc:
+            raise ValueError(
+                f"SPIDER_QWEN_STH_PUBLIC_KEY_FILE '{path}' must contain a 32-byte "
+                "Ed25519 public key encoded as hex."
+            ) from exc
+        return _normalize_public_key(file_key, "SPIDER_QWEN_STH_PUBLIC_KEY_FILE"), "SPIDER_QWEN_STH_PUBLIC_KEY_FILE"
+
+    private_key = sth_signing_key_from_env()
+    if private_key is None:
+        return None, None
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    except ImportError as exc:
+        raise ValueError(
+            "SPIDER_QWEN_STH_SIGNING_KEY is set but public-key derivation is unavailable. "
+            "Install with: pip install 'spider-qwen[crypto]'"
+        ) from exc
+    anchor = Ed25519PrivateKey.from_private_bytes(private_key).public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw,
+    ).hex()
+    return anchor, "SPIDER_QWEN_STH_SIGNING_KEY"
+
+
+def _normalize_public_key(value: str, source: str) -> str:
+    key = (value or "").strip().lower()
+    try:
+        raw = bytes.fromhex(key)
+    except ValueError as exc:
+        raise ValueError(f"{source} must be a 32-byte Ed25519 public key encoded as hex.") from exc
+    if len(raw) != 32:
+        raise ValueError(f"{source} must decode to exactly 32 bytes.")
+    return key
 
 
 def _cmd_memory(args: argparse.Namespace) -> int:
@@ -388,6 +472,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ev.add_argument("run_id")
     p_ev.add_argument("--ledger-id", default=None,
                       help="prove: which row to prove (default: first row)")
+    p_ev.add_argument("--sth-public-key", default=None,
+                      help="Ed25519 public-key trust anchor for signed tree-head verification")
     p_ev.set_defaults(func=_cmd_evidence)
 
     p_mem = sub.add_parser("memory", help="Inspect or revalidate semantic memory")

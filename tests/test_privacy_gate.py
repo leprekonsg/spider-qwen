@@ -8,9 +8,11 @@ the governance classifier/helper, and the ReviewGate enforcement when enabled.
 from __future__ import annotations
 
 from spider_qwen.extraction.contact import ContactExtractor
+from spider_qwen.agent.controller import Controller
+from spider_qwen.evidence.models import EvidenceRef
 from spider_qwen.governance.privacy import classify_field_privacy, is_high_sensitivity
 from spider_qwen.governance.review import ReviewGate
-from spider_qwen.modes.contracts import PrivacyClass
+from spider_qwen.modes.contracts import Contact, ContactCandidate, PrivacyClass
 
 
 def _emails(matches):
@@ -58,3 +60,37 @@ def test_review_gate_disabled_by_default():
 
     gate = ReviewGate(_Off())
     assert gate.requires_review(PrivacyClass.NAMED_PERSON_HIGH_SENSITIVITY) is False
+
+
+def test_run_output_redacts_high_sensitivity_contacts_by_policy():
+    ref = EvidenceRef(
+        ledger_id="ev_1",
+        url="https://acme.example",
+        snippet_hash="h",
+        retrieved_at="2026-01-01T00:00:00+00:00",
+    )
+    candidate = ContactCandidate(
+        vendor_name="Acme",
+        evidence_refs=[ref],
+        contacts=[
+            Contact(
+                type="email",
+                value="jane.doe@acme.example",
+                confidence=0.7,
+                privacy_class=PrivacyClass.NAMED_PERSON_HIGH_SENSITIVITY,
+                evidence_ref=ref,
+            ),
+            Contact(
+                type="email",
+                value="sales@acme.example",
+                confidence=0.9,
+                privacy_class=PrivacyClass.BUSINESS_CONTACT,
+                evidence_ref=ref,
+            ),
+        ],
+    )
+    public = Controller(offline=True, state_dir=None, persist=False)._public_candidate_dump(candidate)
+    values = [c["value"] for c in public["contacts"]]
+    assert "[redacted:high_sensitivity_contact]" in values
+    assert "sales@acme.example" in values
+    assert public["validation_signals"]["redacted_contacts"] == 1

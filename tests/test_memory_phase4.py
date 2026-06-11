@@ -9,7 +9,10 @@ and 1-3 agentic links.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from spider_qwen.evidence.models import EvidenceRef, utc_now_iso
 from spider_qwen.memory.decay import apply_decay, memory_stability_days
@@ -41,6 +44,20 @@ def test_decay_reduces_to_half_life_baseline_when_unreinforced():
     assert apply_decay(fact) == 0.5
 
 
+def test_decay_uses_reference_timestamp_for_reproducibility():
+    fact = SemanticFact(
+        entity_type="vendor",
+        entity_name="Acme",
+        field="quote_channel",
+        value="sales@acme.sg",
+        confidence=1.0,
+        evidence_refs=[_ref("ev_1")],
+        last_verified_at="2026-01-01T00:00:00+00:00",
+    )
+    assert apply_decay(fact, reference_ts="2026-04-01T00:00:00+00:00") == 0.5
+    assert apply_decay(fact, reference_ts="2026-01-01T00:00:00+00:00") == 1.0
+
+
 def test_reaccess_grows_stability_so_decay_is_slower():
     plain = _aged_fact(90.0)
     reinforced = _aged_fact(90.0, reinforcement_count=2)
@@ -66,6 +83,16 @@ def test_corroborating_upsert_reinforces_the_fact(tmp_path):
     assert f.reinforcement_count == 0
     again = mem.upsert(_aged_fact(0.0, value="sales@acme.sg", evidence_refs=[_ref("ev_2")]))
     assert again.reinforcement_count == 1  # second corroborating observation re-accesses it
+
+
+def test_semantic_memory_rejects_schema_drift_on_load(tmp_path):
+    path = tmp_path / "memory" / "semantic.json"
+    path.parent.mkdir(parents=True)
+    fact = _aged_fact(0.0).model_dump(mode="json")
+    fact["schema_version"] = "0.0"
+    path.write_text(json.dumps([fact]), encoding="utf-8")
+    with pytest.raises(ValueError, match="schema_version"):
+        SemanticMemory(tmp_path)
 
 
 # --- Reflections ------------------------------------------------------------

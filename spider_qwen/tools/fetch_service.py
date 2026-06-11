@@ -169,6 +169,9 @@ class FetchService:
     async def fetch(
         self, urls: list[str], output_format: str = "markdown", include_links: bool = True
     ) -> FetchResultSet:
+        from ..agent.tool_registry import ToolRegistry
+
+        ToolRegistry.require_allowed("fetch")
         urls = [u for u in urls if u]
         if not urls:
             return FetchResultSet(provider=getattr(self.provider, "provider_name", "fetch"))

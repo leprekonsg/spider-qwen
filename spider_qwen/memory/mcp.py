@@ -24,6 +24,7 @@ class SemanticMemoryMcpAdapter:
                 query=str(arguments.get("query", "")),
                 top_k=int(arguments.get("top_k", 5)),
                 context_budget_chars=int(arguments.get("context_budget_chars", 1200)),
+                reference_ts=arguments.get("reference_ts"),
             )
             return {"recalls": [r.model_dump(mode="json") for r in recalls]}
         if name == "semantic_memory.revalidate":
@@ -46,5 +47,11 @@ class SemanticMemoryMcpAdapter:
         query: str,
         top_k: int = 5,
         context_budget_chars: int = 1200,
+        reference_ts: str | None = None,
     ) -> list[MemoryRecall]:
-        return self.memory.recall(query, top_k=top_k, context_budget_chars=context_budget_chars)
+        return self.memory.recall(
+            query,
+            top_k=top_k,
+            context_budget_chars=context_budget_chars,
+            reference_ts=reference_ts,
+        )

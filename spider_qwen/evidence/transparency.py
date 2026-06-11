@@ -93,7 +93,9 @@ class CitationProof(BaseModel):
     """Everything an external verifier needs to confirm one citation.
 
     Verification needs no ledger access: recompute ``leaf_hash(leaf_data)``,
-    walk ``audit_path``, compare against ``tree_head.root_hash``.
+    walk ``audit_path``, compare against ``tree_head.root_hash``. When
+    ``signed_tree_head`` is present, callers can also verify that same tree head
+    against an out-of-band public-key trust anchor.
     """
 
     schema_version: str = SCHEMA_VERSION
@@ -102,6 +104,7 @@ class CitationProof(BaseModel):
     leaf_data: str  # the evidence item's chain_hash
     audit_path: list[str] = Field(default_factory=list)
     tree_head: TreeHead
+    signed_tree_head: SignedTreeHead | None = None
 
 
 class RedactedLeafOpening(BaseModel):
@@ -291,6 +294,21 @@ def verify_citation(proof: CitationProof) -> bool:
     return verify_inclusion(proof.leaf_data, proof.leaf_index,
                             proof.tree_head.tree_size, proof.audit_path,
                             proof.tree_head.root_hash)
+
+
+def verify_signed_citation(proof: CitationProof, expected_public_key: str) -> bool:
+    """Verify citation inclusion and its signed tree head against a pinned key.
+
+    ``verify_citation`` is intentionally only an inclusion proof check. This
+    function is the external-verifiability contract: the proof must carry an
+    STH, that STH must cover the exact tree head in the citation proof, and its
+    Ed25519 signature must validate against the caller's pinned public key.
+    """
+    if not verify_citation(proof) or proof.signed_tree_head is None:
+        return False
+    if proof.signed_tree_head.head != proof.tree_head:
+        return False
+    return verify_signed_tree_head(proof.signed_tree_head, expected_public_key)
 
 
 def verify_consistency(first_size: int, second_size: int, first_root: str,
