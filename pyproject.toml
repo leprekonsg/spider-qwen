@@ -32,6 +32,9 @@ mcp = ["mcp>=1.2"]
 # Merkle proofs themselves are dependency-free; only STH signing needs this.
 crypto = ["cryptography>=42"]
 dev = ["pytest>=8.0", "pygments>=2.7"]
+# Browser smoke tests for the static frontend (tests/test_web_ui.py). Needs the
+# server extra plus a browser binary: python -m playwright install chromium
+ui = ["playwright>=1.49"]
 
 [project.scripts]
 spider-qwen = "spider_qwen.api.cli:main"
