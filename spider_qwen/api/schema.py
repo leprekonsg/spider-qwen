@@ -36,5 +36,18 @@ class RunResult(BaseModel):
     # persisted tree-head commitment (+ signed_tree_head when STH signing is
     # configured). Empty when the run does not persist (no commitment exists).
     citation_proofs: list[dict[str, Any]] = Field(default_factory=list)
+    # One composed trust verdict per validated candidate: verified-claim
+    # counts, GRADE, GSAR decision, [Bel, Pl] interval, conformal status,
+    # disputed facts, and a prose summary -- the single place the end-to-end
+    # trust story for a vendor is stated.
+    trust_verdicts: list[dict[str, Any]] = Field(default_factory=list)
+    # Which Qwen seams existed this run (router, JSON extractor, NLI, query
+    # rewriter, RFQ drafter, page judge), whether each was live or mocked, and
+    # what it was invoked for. Honest by construction: an offline judged demo
+    # reports mock=true rather than implying live model calls.
+    qwen_paths: dict[str, Any] = Field(default_factory=dict)
+    # Discovery reasoning trace: initial queries, the CRAG retrieval verdict,
+    # corrective/replan pivot queries, and which rewriter proposed them.
+    reasoning: dict[str, Any] | None = None
     metrics: dict[str, Any] = Field(default_factory=dict)
     budget: dict[str, Any] = Field(default_factory=dict)

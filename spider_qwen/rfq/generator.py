@@ -21,9 +21,10 @@ _DRAFT_DISCLAIMER = "This is a draft only. spider-qwen does not send or submit R
 
 class RFQGenerator:
     def __init__(self, tone: str = "SEA-neutral professional English; short and direct",
-                 minimum_completeness: float = 0.65) -> None:
+                 minimum_completeness: float = 0.65, drafter: object | None = None) -> None:
         self.tone = tone
         self.minimum_completeness = minimum_completeness
+        self.drafter = drafter  # optional Qwen body drafter; template on None/failure
         self._checklist = RFQChecklistBuilder()
 
     def generate(
@@ -34,6 +35,7 @@ class RFQGenerator:
         target_country: str | None = None,
         evidence_grade: str | None = None,
         belief_interval: BeliefInterval | None = None,
+        evidence_corpus: str | None = None,
     ) -> RFQDraft:
         vendor = RFQVendor(
             vendor_name=candidate.vendor_name,
@@ -84,7 +86,9 @@ class RFQGenerator:
                 f"Checklist completeness {completeness:.2f} is below the {self.minimum_completeness:.2f} threshold."
             )
 
-        email = self._render_email(query, candidate)
+        email, drafted_by, language, unsourced = self._draft_body(
+            query, candidate, evidence_corpus, assumptions
+        )
         return RFQDraft(
             status=status,
             rfq_email_template=email,
@@ -95,7 +99,53 @@ class RFQGenerator:
             evidence_refs=refs,
             evidence_grade=evidence_grade,
             belief_interval=belief_interval,
+            drafted_by=drafted_by,
+            language=language,
+            unsourced_claims=unsourced,
         )
+
+    def _draft_body(
+        self,
+        query: str,
+        candidate: ServiceCandidate,
+        evidence_corpus: str | None,
+        assumptions: list[str],
+    ) -> tuple[str, str, str | None, list[str]]:
+        """Qwen-drafted body with deterministic fact-check, else the template.
+
+        CoVe split: the model only writes prose; ``unsourced_numeric_claims``
+        independently flags every quantitative claim the ledger evidence (or
+        the buyer's own query) cannot ground. Flags are stated on the draft,
+        never silently dropped, and any drafter failure falls back to the
+        deterministic template.
+        """
+        if self.drafter is not None:
+            from .factcheck import unsourced_numeric_claims
+
+            channel = candidate.quote_channel
+            try:
+                drafted = self.drafter.draft(
+                    query=query,
+                    vendor_name=candidate.vendor_name,
+                    country=candidate.country,
+                    quote_channel=channel.type.value if channel else None,
+                )
+            except Exception:
+                drafted = None
+            if drafted is not None and drafted.body.strip():
+                flags = unsourced_numeric_claims(
+                    drafted.body, f"{evidence_corpus or ''} {query}"
+                )
+                drafted_by = f"qwen:{getattr(self.drafter, 'model', '')}"
+                assumptions.append(
+                    f"RFQ body drafted by Qwen ({drafted_by}); deterministic "
+                    f"fact-check flagged {len(flags)} unsourced numeric claim(s)."
+                )
+                for flag in flags:
+                    assumptions.append(f"Unsourced claim flagged for review: '{flag}'.")
+                return drafted.body, drafted_by, drafted.language, flags
+            assumptions.append("Qwen drafter unavailable; deterministic template used.")
+        return self._render_email(query, candidate), "template", None, []
 
     def _render_email(self, query: str, candidate: ServiceCandidate) -> str:
         channel = candidate.quote_channel

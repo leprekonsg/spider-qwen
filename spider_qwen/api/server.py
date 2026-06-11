@@ -42,8 +42,8 @@ def create_app():
             "FastAPI not installed. Install with: pip install 'spider-qwen[server]'"
         ) from exc
 
-    from ..agent.controller import Controller
     from ..modes.classifier import ModeClassifier
+    from .factory import build_controller
 
     app = FastAPI(title="spider-qwen", version="0.1.0")
     state_dir = os.getenv("SPIDER_QWEN_STATE_DIR", ".spider_qwen")
@@ -69,9 +69,9 @@ def create_app():
                 detail="Live providers are disabled. Set SPIDER_QWEN_ALLOW_LIVE=1 on the server to enable.",
             )
         offline = req.offline or not allow_live
-        # offline=True is the controller-level guarantee: mock search/fetch AND
-        # no env-driven live Qwen wiring (router, NLI, JSON extractor).
-        controller = Controller(state_dir=state_dir, offline=offline)
+        # Same construction path as the CLI (api/factory.py); offline=True is
+        # the controller-level guarantee of no live providers or Qwen clients.
+        controller = build_controller(offline=offline, state_dir=state_dir)
         result = await controller.run(req.query, mode=req.mode, target_country=req.country)
         return result.model_dump(mode="json")
 

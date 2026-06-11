@@ -22,7 +22,7 @@ Operational estimate: for routine supplier discovery and RFQ drafting, the goal
 is to reduce research from hours of manual tab-hopping to minutes of
 evidence-backed draft preparation.
 
-- **Qwen-native layer:** optional Qwen JSON extraction (DashScope `json_object` mode), low-confidence tool-call routing, domain skill prompts, and an in-process MCP-compatible memory seam.
+- **Qwen-native layer:** optional Qwen JSON extraction (DashScope `json_object` mode), low-confidence tool-call routing, CRAG corrective query rewriting, RFQ body drafting with a deterministic ledger fact-check, domain skill prompts, and an MCP server + client pair. Every run reports a `qwen_paths` audit block (which seams ran, live or mocked) and per-vendor `trust_verdicts` composing verified claims, GRADE, [Bel, Pl], and conformal status.
 - **Web layer:** [TinyFish](https://docs.tinyfish.ai) Search + Fetch (primary), Qwen WebExtractor (single-page fallback), deterministic mocks for demos.
 - **Guarantee:** every vendor / contact / price / RFQ output references ledger evidence; extracted claims carry span metadata when available.
 
@@ -219,6 +219,8 @@ Selected via env or injection; both abstracted behind protocols.
 | `SPIDER_QWEN_VERIFICATION_ENABLED` | `0` · `1` | `0` |
 | `QWEN_NLI_ENABLED` | `0` · `1` | `0` |
 | `QWEN_NLI_MODEL` | verified DashScope model id | `qwen-flash` |
+| `QWEN_QUERY_REWRITER_ENABLED` | `0` · `1` (CRAG corrective pivot queries) | `0` |
+| `QWEN_RFQ_DRAFTER_ENABLED` | `0` · `1` (Qwen RFQ body + deterministic fact-check) | `0` |
 | `SPIDER_QWEN_CONFORMAL_CALIBRATION` | path to hand-graded calibration JSON | unset (gate never blocks; metrics state no guarantee) |
 | `SPIDER_QWEN_STH_PUBLIC_KEY` | Ed25519 public-key trust anchor for evidence proofs | unset |
 | `SPIDER_QWEN_STH_PUBLIC_KEY_FILE` | file containing the same public-key anchor | unset |

@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 from ..agent.controller import Controller
+from .factory import build_controller
 from ..evidence.ledger import EvidenceLedger, sth_signing_key_from_env
 from ..evidence.models import EvidenceRef, utc_now_iso
 from ..evidence.verifier import verify_ledger
@@ -43,27 +44,12 @@ def _state_dir() -> str:
 
 
 def _build_controller(args: argparse.Namespace) -> Controller:
-    # offline=True is the controller-level guarantee: mock search/fetch AND no
-    # live Qwen client (router, NLI, extractor), even when --judged-demo
-    # enables their flags and an API key is in the env. Only the --qwen-json
-    # arg (no env flag) needs explicit wiring here.
-    offline = getattr(args, "offline", False)
-    qwen_json_extractor = None
-    if getattr(args, "qwen_json", False):
-        if offline:
-            from ..tools.qwen_json_extractor import MockQwenJsonExtractor
-
-            qwen_json_extractor = MockQwenJsonExtractor()
-        else:
-            from ..tools.qwen_json_extractor import QwenJsonExtractor
-
-            qwen_json_extractor = QwenJsonExtractor()
-    return Controller(
-        qwen_json_extractor=qwen_json_extractor,
+    return build_controller(
+        offline=getattr(args, "offline", False),
         state_dir=_state_dir(),
+        qwen_json=getattr(args, "qwen_json", False),
         verify=True if getattr(args, "judged_demo", False) else None,
         require_review=getattr(args, "require_review", None),
-        offline=offline,
     )
 
 
@@ -535,6 +521,8 @@ def _apply_judged_demo_profile(args: argparse.Namespace) -> dict[str, str | None
         "QWEN_PAGE_JUDGE_ENABLED": "1",
         "SPIDER_QWEN_VERIFICATION_ENABLED": "1",
         "QWEN_NLI_ENABLED": "1",
+        "QWEN_QUERY_REWRITER_ENABLED": "1",
+        "QWEN_RFQ_DRAFTER_ENABLED": "1",
     }
     prior = {name: os.environ.get(name) for name in names}
     for name, value in names.items():

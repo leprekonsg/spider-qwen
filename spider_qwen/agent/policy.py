@@ -129,6 +129,8 @@ class Policy:
             ("qwen_router_model", self.qwen_router_model),
             ("qwen_json_extractor_model", self.qwen_json_extractor_model),
             ("qwen_nli_model", self.qwen_nli_model),
+            ("qwen_query_rewriter_model", self.qwen_query_rewriter_model),
+            ("qwen_rfq_drafter_model", self.qwen_rfq_drafter_model),
         ):
             try:
                 resolved[source] = getter()
@@ -224,6 +226,30 @@ class Policy:
             os.getenv("QWEN_NLI_MODEL")
             or str(self.data.get("qwen", {}).get("nli_model") or "")
             or "qwen-flash"
+        )
+
+    def qwen_query_rewriter_enabled(self) -> bool:
+        # CRAG-style corrective retrieval (Yan et al. 2024): Qwen proposes the
+        # rewritten pivot queries; retrieval/extraction stay deterministic.
+        return _env_bool("QWEN_QUERY_REWRITER_ENABLED", self.data.get("qwen", {}).get("query_rewriter_enabled", False))
+
+    def qwen_query_rewriter_model(self) -> str:
+        return (
+            os.getenv("QWEN_QUERY_REWRITER_MODEL")
+            or str(self.data.get("qwen", {}).get("query_rewriter_model") or "")
+            or "qwen-flash"
+        )
+
+    def qwen_rfq_drafter_enabled(self) -> bool:
+        # CoVe-style split (Dhuliawala et al. 2023): Qwen drafts the RFQ body;
+        # a deterministic fact-check flags unsourced claims against the ledger.
+        return _env_bool("QWEN_RFQ_DRAFTER_ENABLED", self.data.get("qwen", {}).get("rfq_drafter_enabled", False))
+
+    def qwen_rfq_drafter_model(self) -> str:
+        return (
+            os.getenv("QWEN_RFQ_DRAFTER_MODEL")
+            or str(self.data.get("qwen", {}).get("rfq_drafter_model") or "")
+            or self.model_for("planner")
         )
 
     def verification_enabled(self) -> bool:

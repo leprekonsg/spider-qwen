@@ -43,3 +43,9 @@ class RFQDraft(BaseModel):
     # interval fused over the quote channel's sources (None without a channel).
     evidence_grade: str | None = None
     belief_interval: BeliefInterval | None = None
+    # Provenance of the email body: "template" (deterministic) or
+    # "qwen:<model>". Qwen-drafted bodies carry a language tag and any numeric
+    # claims the deterministic fact-check could not ground in ledger evidence.
+    drafted_by: str = "template"
+    language: str | None = None
+    unsourced_claims: list[str] = Field(default_factory=list)

@@ -136,6 +136,8 @@ class Controller:
             self.policy.qwen_router_fallback_enabled()
             or self.policy.qwen_structured_extraction_enabled()
             or self.policy.qwen_nli_enabled()
+            or self.policy.qwen_query_rewriter_enabled()
+            or self.policy.qwen_rfq_drafter_enabled()
         ):
             self.policy.validate_model_ids()
         self.qwen_router = qwen_router
@@ -175,6 +177,32 @@ class Controller:
             from ..verification.conformal import abstainer_from_env
 
             self.conformal = abstainer_from_env()
+        # CRAG corrective rewriting: Qwen proposes pivot queries when retrieval
+        # is judged off-target; everything downstream stays deterministic.
+        self.qwen_query_rewriter = None
+        if self.policy.qwen_query_rewriter_enabled():
+            if self.offline:
+                from ..serendipity.qwen_rewriter import MockQwenQueryRewriter
+
+                self.qwen_query_rewriter = MockQwenQueryRewriter()
+            else:
+                from ..serendipity.qwen_rewriter import QwenQueryRewriter
+
+                self.qwen_query_rewriter = QwenQueryRewriter(
+                    model=self.policy.qwen_query_rewriter_model())
+        # CoVe-split RFQ drafting: Qwen writes the body, a deterministic
+        # fact-check flags unsourced numeric claims against ledger evidence.
+        self.qwen_rfq_drafter = None
+        if self.policy.qwen_rfq_drafter_enabled():
+            if self.offline:
+                from ..rfq.qwen_drafter import MockQwenRfqDrafter
+
+                self.qwen_rfq_drafter = MockQwenRfqDrafter()
+            else:
+                from ..rfq.qwen_drafter import QwenRfqDrafter
+
+                self.qwen_rfq_drafter = QwenRfqDrafter(
+                    model=self.policy.qwen_rfq_drafter_model())
         self.memory_mcp = memory_mcp
         if self.memory_mcp is None and self.state_dir is not None:
             # ONE SemanticMemory instance serves recall, promotion, and citation
@@ -289,9 +317,11 @@ class Controller:
 
         # SEA-first gather, then global fallback only if min not met.
         sea_pages: list = []
+        initial_queries: list[str] = []
         candidates = await self._gather(
             ctx, route, query, search, fetch, region="SEA", target_country=target_country,
             reserve_search_calls=1 if budget.max_search_calls > 1 else 0, pages_out=sea_pages,
+            queries_out=initial_queries,
         )
         candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
         ranker = self._rankers[route.ranker]
@@ -307,6 +337,7 @@ class Controller:
                     "mean_relevance": crag.mean_relevance, "pages": len(crag.assessments)},
         )
         corrective_searches = 0
+        corrective_query_log: list[dict[str, str]] = []
 
         extraction_budget_remaining = tracker.candidates_extracted < budget.max_candidates_to_extract
         if (
@@ -317,7 +348,11 @@ class Controller:
         ):
             if crag.verdict == "incorrect" and crag.assessments:
                 # Retrieval judged off-target: broaden / broker-pivot rather than answer.
-                corr = corrective_queries(query, crag, mode=chosen.value)
+                corr = corrective_queries(query, crag, mode=chosen.value,
+                                          llm=self.qwen_query_rewriter)
+                corrective_query_log = [
+                    {"text": c.text, "kind": c.kind, "rationale": c.rationale} for c in corr
+                ]
                 tracer.record(step="crag_corrective", tool="search", status="success",
                               detail={"verdict": crag.verdict, "queries": [c.text for c in corr]})
                 before = tracker.search_calls
@@ -343,9 +378,40 @@ class Controller:
         # claim ledger rows. Opt-in, so the default offline pipeline is unchanged.
         verification_metrics = {"claims_verified": 0, "claims_unsupported": 0,
                                 "candidates_blocked_unverified": 0,
-                                "verification_assessments": {}}
+                                "verification_assessments": {},
+                                "replan_recommended": False}
+        replan_queries: list[str] = []
         if self.verify_claims:
             validated, verification_metrics = self._verify_candidates(ledger, validated, tracer)
+            # Bounded replan: the spine's worst GSAR decision plays the CRAG
+            # retrieval evaluator (Yan et al. 2024) -- "replan" means the cited
+            # corpus cannot ground the critical claims, so re-retrieve once
+            # with rewritten pivot queries and re-verify. Exactly one round,
+            # only within budget; never a loop.
+            if (
+                verification_metrics.get("replan_recommended")
+                and len(validated) < budget.min_validated_candidates
+                and tracker.candidates_extracted < budget.max_candidates_to_extract
+                and tracker.can_search()
+                and not tracker.runtime_exceeded()
+            ):
+                corr = corrective_queries(query, crag, mode=chosen.value,
+                                          llm=self.qwen_query_rewriter)
+                replan_queries = [c.text for c in corr]
+                tracer.record(step="verification_replan", tool="search", status="success",
+                              detail={"queries": replan_queries})
+                more = await self._gather_queries(
+                    ctx, route, replan_queries, search, fetch,
+                    location=None, target_country=target_country, pages_out=sea_pages,
+                )
+                candidates = dedupe_candidates(candidates + more)
+                candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
+                ranked = ranker.rank(candidates)
+                validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
+                validated = validated[: budget.max_validated_candidates]
+                validated, verification_metrics = self._verify_candidates(ledger, validated, tracer)
+                verification_metrics["replan_rounds"] = 1
+        verification_metrics.setdefault("replan_rounds", 0)
 
         # Synthesis A: ledger-supervised citation counts. A VERIFIED candidate
         # whose evidence chain includes a recalled semantic_memory row actually
@@ -376,9 +442,10 @@ class Controller:
         # T-1.1: reshape the ranked candidates into the four-slot serendipity view.
         # Disputed memory facts about this run's vendors whose fused [Bel, Pl]
         # gap exceeds UNCERTAINTY_TAU surface as explicit S3 risk signals.
+        disputed_signals = self._disputed_belief_signals(ledger, ranked, audit)
         serendipity_result = build_serendipity_result(
             ranked, mode=chosen.value,
-            extra_risk_signals=self._disputed_belief_signals(ledger, ranked, audit),
+            extra_risk_signals=disputed_signals,
         )
 
         rfq_drafts: list[dict] = []
@@ -408,7 +475,8 @@ class Controller:
         # honestly "token metering unavailable". Drain semantics keep a
         # long-lived controller from double-counting across runs.
         for client in (self.qwen_json_extractor, self.qwen_router,
-                       getattr(self.minicheck, "model", None)):
+                       getattr(self.minicheck, "model", None),
+                       self.qwen_query_rewriter, self.qwen_rfq_drafter):
             drain = getattr(client, "drain_usage", None)
             if callable(drain):
                 for model, in_tok, out_tok in drain():
@@ -440,6 +508,23 @@ class Controller:
                 mode=chosen.value, confidence=classification.confidence, rationale=classification.rationale
             ),
             validated_candidates=[self._public_candidate_dump(c) for c in validated],
+            trust_verdicts=self._build_trust_verdicts(
+                validated, verification_metrics, ledger, disputed_signals,
+            ),
+            qwen_paths=self._qwen_paths_block(
+                classification, ctx.metadata.get("qwen_json_extractions", 0),
+            ),
+            reasoning={
+                "initial_queries": initial_queries,
+                "crag": {"verdict": crag.verdict, "confidence": crag.confidence,
+                         "mean_relevance": crag.mean_relevance, "rationale": crag.rationale},
+                "corrective_queries": corrective_query_log,
+                "replan_queries": replan_queries,
+                "query_rewriter": (
+                    f"qwen:{getattr(self.qwen_query_rewriter, 'model', '')}"
+                    if self.qwen_query_rewriter is not None else "deterministic"
+                ),
+            },
             serendipity=serendipity_result.model_dump(mode="json"),
             serendipity_discovery=discovery.model_dump(mode="json") if discovery else None,
             pricing_status_summary=self._pricing_summary(candidates),
@@ -583,6 +668,7 @@ class Controller:
         target_country: str | None,
         reserve_search_calls: int = 0,
         pages_out: list | None = None,
+        queries_out: list | None = None,
     ) -> list:
         templates = build_query_templates(
             query, region=region, target_country=target_country, mode=route.mode.value
@@ -592,6 +678,8 @@ class Controller:
         if reserve_search_calls:
             max_queries = max(0, max_queries - reserve_search_calls)
         queries = merge_gather_queries(templates, expanded, max_queries=max_queries)
+        if queries_out is not None:
+            queries_out.extend(queries)
         ctx.tracer.record(
             step="query_expand", tool="query_rewrite", status="success",
             input_count=1, output_count=len(queries),
@@ -863,6 +951,7 @@ class Controller:
             ctx.tracer.record(step="qwen_json_extract", tool="qwen_json_extractor", status="error", error=str(exc))
             return None
         ctx.tracer.record(step="qwen_json_extract", tool="qwen_json_extractor", status="success", input_count=1, output_count=1)
+        ctx.metadata["qwen_json_extractions"] = ctx.metadata.get("qwen_json_extractions", 0) + 1
         return result
 
     def _product_candidate(self, ctx, query, page, meta, refs, geo_score, page_url, qwen: QwenPageExtraction | None):
@@ -1005,13 +1094,17 @@ class Controller:
         spine = VerificationSpine(ledger, minicheck=self.minicheck or MiniCheck())
         kept = []
         verified_claims = unsupported_claims = blocked = abstained = 0
+        replan_recommended = False
         # GSAR decision + GRADE per kept candidate: computing these and then
         # dropping them would make the trust signals invisible end to end.
-        assessments: dict[str, dict[str, str]] = {}
+        assessments: dict[str, dict] = {}
         for cand in validated:
             cv = spine.verify_candidate(cand)
             verified_claims += sum(1 for c in cv.claims if c.verified)
             unsupported_claims += sum(1 for c in cv.claims if not c.verified)
+            # The worst GSAR decision across all candidates (kept or blocked)
+            # drives the bounded replan round in run().
+            replan_recommended = replan_recommended or cv.decision == "replan"
             if not cv.verified:
                 blocked += 1
                 if tracer is not None:
@@ -1033,7 +1126,12 @@ class Controller:
                                       detail={"vendor": cv.vendor_name,
                                               **decision.model_dump(mode="json")})
                     continue
-            assessments[cv.vendor_name] = {"decision": cv.decision, "grade": cv.grade}
+            assessments[cv.vendor_name] = {
+                "decision": cv.decision, "grade": cv.grade,
+                "verifier_score": cv.verifier_score,
+                "claims_verified": sum(1 for c in cv.claims if c.verified),
+                "claims_unsupported": sum(1 for c in cv.claims if not c.verified),
+            }
             if tracer is not None:
                 tracer.record(step="verify_claims", tool="minicheck_verifier", status="success",
                               input_count=len(cv.claims), output_count=len(cv.claims),
@@ -1042,12 +1140,17 @@ class Controller:
             kept.append(cand)
         metrics = {"claims_verified": verified_claims, "claims_unsupported": unsupported_claims,
                    "candidates_blocked_unverified": blocked,
-                   "verification_assessments": assessments}
+                   "verification_assessments": assessments,
+                   "replan_recommended": replan_recommended}
         if self.conformal is not None:
+            calibrated = self.conformal.threshold is not None
             metrics["conformal"] = {
-                "calibrated": self.conformal.threshold is not None,
+                "calibrated": calibrated,
                 "threshold": self.conformal.threshold,
                 "alpha": self.conformal.alpha,
+                # Explicit None when uncalibrated: "abstained 0/N" must not be
+                # read as a coverage statement when no guarantee exists.
+                "coverage_guarantee": round(1.0 - self.conformal.alpha, 4) if calibrated else None,
                 "candidates_abstained": abstained,
                 "rationale": "; ".join(self.conformal.reasons)
                 or f"calibrated on {self.conformal.calibration_size} examples",
@@ -1142,6 +1245,7 @@ class Controller:
         generator = RFQGenerator(
             tone=self.policy.rfq_tone,
             minimum_completeness=self.policy.minimum_checklist_completeness,
+            drafter=self.qwen_rfq_drafter,
         )
         assessments = assessments or {}
         drafts: list[dict] = []
@@ -1155,6 +1259,9 @@ class Controller:
                 # fused over the quote channel's source reliabilities.
                 evidence_grade=(assessments.get(cand.vendor_name) or {}).get("grade"),
                 belief_interval=quote_channel_interval(cand, ledger),
+                # Fact-check corpus for a Qwen-drafted body: the candidate's
+                # own ledger evidence, so unsourced numbers are flagged.
+                evidence_corpus=self._evidence_corpus(cand, ledger),
             )
             metrics.rfq_drafts_total += 1
             if draft.status == "incomplete":
@@ -1194,6 +1301,128 @@ class Controller:
         return drafts
 
     # --- helpers ----------------------------------------------------------
+    def _evidence_corpus(self, candidate, ledger: EvidenceLedger | None) -> str:
+        """Concatenated snippet/text of the candidate's cited ledger rows."""
+        if ledger is None:
+            return ""
+        parts: list[str] = []
+        for ref in getattr(candidate, "evidence_refs", None) or []:
+            item = ledger.get(getattr(ref, "ledger_id", ""))
+            if item is None:
+                continue
+            if item.snippet:
+                parts.append(item.snippet)
+            if item.text:
+                parts.append(item.text)
+        return " ".join(parts)
+
+    def _build_trust_verdicts(
+        self,
+        validated,
+        verification_metrics: dict,
+        ledger: EvidenceLedger,
+        disputed_signals,
+    ) -> list[dict]:
+        """One composed trust verdict per validated candidate.
+
+        Pulls the fragments that previously lived only in metrics, RFQ
+        assumptions, and S3 risk signals into a single per-vendor statement.
+        """
+        assessments = verification_metrics.get("verification_assessments") or {}
+        conformal_meta = verification_metrics.get("conformal")
+        verdicts: list[dict] = []
+        for cand in validated:
+            name = getattr(cand, "vendor_name", "") or ""
+            assessment = assessments.get(name) or {}
+            interval = (
+                quote_channel_interval(cand, ledger)
+                if isinstance(cand, ServiceCandidate) else None
+            )
+            disputed = sorted({
+                s.entity for s in disputed_signals or []
+                if _same_vendor(name, s.entity)
+            })
+            parts: list[str] = []
+            if not self.verify_claims:
+                parts.append("claim verification disabled for this run")
+            elif assessment:
+                parts.append(
+                    f"{assessment.get('claims_verified', 0)} verified claim(s), "
+                    f"grade {assessment.get('grade') or 'n/a'}, "
+                    f"decision {assessment.get('decision') or 'n/a'}"
+                )
+            if interval is not None:
+                parts.append(
+                    f"quote-channel belief [{interval.belief}, {interval.plausibility}]"
+                )
+            if conformal_meta is not None:
+                parts.append(
+                    f"conformal coverage >= {conformal_meta['coverage_guarantee']}"
+                    if conformal_meta.get("calibrated")
+                    else "conformal guarantee unavailable (uncalibrated)"
+                )
+            parts.append(
+                f"{len(disputed)} disputed fact(s) flagged" if disputed else "no disputed facts"
+            )
+            verdicts.append({
+                "vendor_name": name,
+                "verification_enabled": self.verify_claims,
+                "claims_verified": assessment.get("claims_verified"),
+                "claims_unsupported": assessment.get("claims_unsupported"),
+                "verifier_score": assessment.get("verifier_score"),
+                "grade": assessment.get("grade"),
+                "decision": assessment.get("decision"),
+                "belief_interval": (
+                    [interval.belief, interval.plausibility] if interval is not None else None
+                ),
+                "belief_uncertainty": interval.uncertainty if interval is not None else None,
+                "conformal": conformal_meta,
+                "disputed_facts": disputed,
+                "summary": "; ".join(parts) + ".",
+            })
+        return verdicts
+
+    def _qwen_paths_block(self, classification, json_extractions: int) -> dict:
+        """Per-run audit of every Qwen seam: present, live or mocked, invoked.
+
+        Honesty surface for demos: an offline judged run reports mock=true on
+        each seam instead of implying live model calls happened.
+        """
+        def seam(obj, *, model=None, **extra) -> dict:
+            info: dict = {"enabled": obj is not None}
+            if obj is not None:
+                name = type(obj).__name__
+                info["implementation"] = name
+                info["mock"] = "mock" in name.lower()
+                if model:
+                    info["model"] = model
+            info.update(extra)
+            return info
+
+        nli = getattr(self.minicheck, "model", None) if self.minicheck is not None else None
+        return {
+            "offline": self.offline,
+            "mode_router": seam(
+                self.qwen_router, model=getattr(self.qwen_router, "model", None),
+                invoked="qwen_tool_call" in (getattr(classification, "signals", None) or {}),
+            ),
+            "json_extractor": seam(
+                self.qwen_json_extractor,
+                model=getattr(self.qwen_json_extractor, "model", None),
+                invocations=json_extractions,
+            ),
+            "nli_scorer": seam(nli, model=getattr(nli, "model", None)),
+            "query_rewriter": seam(
+                self.qwen_query_rewriter,
+                model=getattr(self.qwen_query_rewriter, "model", None),
+            ),
+            "rfq_drafter": seam(
+                self.qwen_rfq_drafter,
+                model=getattr(self.qwen_rfq_drafter, "model", None),
+            ),
+            "page_judge": seam(self.page_judge),
+        }
+
     def _pricing_summary(self, candidates) -> dict[str, int]:
         summary: dict[str, int] = {}
         for c in candidates:

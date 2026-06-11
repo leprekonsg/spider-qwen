@@ -138,8 +138,47 @@ def corrective_queries(
     mode: str | None = None,
     llm: Callable[[str], str] | None = None,
 ) -> list[SearchQuery]:
-    """Broaden/broker-pivot queries for an off-target retrieval (broker first)."""
-    variants = expand_query(query, mode=mode, llm=llm)
+    """Broaden/broker-pivot queries for an off-target retrieval (broker first).
+
+    With an ``llm`` (Qwen rewriter), up to two model-proposed pivot queries are
+    appended as kind ``qwen_pivot`` -- the CRAG rewritten-web-search step. The
+    deterministic variants always lead, so an llm failure changes nothing.
+    """
+    variants = expand_query(query, mode=mode)
     order = {"broker_operator": 0, "step_back": 1, "obsolescence": 2}
     picks = [v for v in variants if v.kind in order]
-    return sorted(picks, key=lambda v: order[v.kind])
+    picks = sorted(picks, key=lambda v: order[v.kind])
+    seen = {p.text.lower() for p in picks} | {query.lower()}
+    for text in _llm_pivots(query, verdict, llm):
+        if text.lower() not in seen:
+            seen.add(text.lower())
+            picks.append(SearchQuery(text=text, kind="qwen_pivot",
+                                     rationale="qwen corrective pivot"))
+    return picks
+
+
+def _llm_pivots(
+    query: str,
+    verdict: CorrectiveVerdict,
+    llm: Callable[[str], str] | None,
+    max_pivots: int = 2,
+) -> list[str]:
+    if llm is None:
+        return []
+    prompt = (
+        f"Web retrieval for the procurement query '{query}' was judged "
+        f"{verdict.verdict} (mean relevance {verdict.mean_relevance}). "
+        f"Propose up to {max_pivots} alternative search queries."
+    )
+    try:
+        raw = llm(prompt) or ""
+    except Exception:
+        return []  # degrade to the deterministic variants
+    out: list[str] = []
+    for line in raw.splitlines():
+        text = " ".join(line.strip().lstrip("-*0123456789.) ").split())
+        if text and len(text) <= 200:
+            out.append(text)
+        if len(out) >= max_pivots:
+            break
+    return out
