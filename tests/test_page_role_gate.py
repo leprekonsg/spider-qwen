@@ -128,3 +128,145 @@ def test_qwen_failure_keeps_deterministic_candidate():
 
     result = _run(boom)
     assert result.validated_candidates  # degraded to deterministic extraction
+
+
+def test_vendor_mention_lead_drained_into_candidate(monkeypatch):
+    """A vendor named on a gated directory page must end up fetched and
+    extracted via its entity follow-up query, not stranded in the queue."""
+    monkeypatch.setenv("SPIDER_QWEN_FRONTIER_ENABLED", "1")
+    directory_url = "https://top10cleaners.example/best-office-cleaners"
+
+    class _MentionAwareSearch(_FixedSearch):
+        async def search(self, query, location=None, language="en", limit=10):
+            if "Sparkle Facilities" in query:
+                return SearchResultSet(
+                    query=query,
+                    results=[SearchResult(
+                        rank=0, source_tool="mock", url=VENDOR_URL,
+                        title="Sparkle Facilities Pte Ltd",
+                        snippet="Office cleaning Singapore. Request quotation.")],
+                    total_results=1, provider="mock",
+                )
+            return await super().search(query, location, language, limit)
+
+    search = _MentionAwareSearch([{
+        "url": directory_url,
+        "title": "Top 10 Office Cleaners in Singapore",
+        "snippet": "The best office cleaning companies in Singapore.",
+    }])
+    fetch = MockFetchProvider(fixtures={
+        directory_url: {"title": "Top 10 Office Cleaners in Singapore",
+                        "text": "Our favourite is Sparkle Facilities Pte Ltd.",
+                        "links": []},
+        VENDOR_URL: {"title": "Sparkle Facilities Pte Ltd",
+                     "text": VENDOR_TEXT, "links": []},
+    })
+
+    def build(text, url):
+        if url == directory_url:
+            return QwenPageExtraction(
+                page_role="directory",
+                vendor_mentions=[QwenVendorMention(name="Sparkle Facilities Pte Ltd")],
+            )
+        return QwenPageExtraction(
+            page_role="vendor_offering",
+            vendor=QwenVendorExtraction(name="Sparkle Facilities Pte Ltd"),
+        )
+
+    controller = Controller(
+        offline=True, state_dir=None, persist=False,
+        search_provider=search, fetch_provider=fetch,
+        qwen_json_extractor=_ScriptedQwen(build),
+    )
+    result = asyncio.run(controller.run(QUERY, mode="service_quote_required"))
+    assert result.metrics["frontier"]["entity_url_leads_fetched"] >= 1
+    names = {c["vendor_name"] for c in result.validated_candidates}
+    assert "Sparkle Facilities Pte Ltd" in names
+
+
+# --- deterministic marketplace listing gate ----------------------------------
+
+
+def test_marketplace_listing_urls_detected():
+    from spider_qwen.agent.controller import _marketplace_listing_page
+
+    assert _marketplace_listing_page("https://www.lazada.sg/tag/office-chair/")
+    assert _marketplace_listing_page("https://shopee.sg/search?q=office+chair")
+    assert _marketplace_listing_page("https://www.lazada.com.my/catalog/?q=chair")
+    # Product detail pages and non-marketplace hosts are not listings.
+    assert not _marketplace_listing_page("https://www.lazada.sg/products/ergo-chair-i123.html")
+    assert not _marketplace_listing_page("https://sparkle.sg/tag/office-cleaning")
+    assert not _marketplace_listing_page(None)
+
+
+def test_marketplace_tag_page_never_becomes_candidate():
+    tag_url = "https://www.lazada.sg/tag/office-chair/"
+    search = _FixedSearch([{
+        "url": tag_url,
+        "title": "Office Chair - Buy Office Chairs Online | Lazada SG",
+        "snippet": "Shop office chairs. Ergonomic office chair deals.",
+    }])
+    fetch = MockFetchProvider(fixtures={
+        tag_url: {"title": "Office Chair | Lazada SG",
+                  "text": "Ergonomic Office Chair $89.00. Mesh Chair $120.00. Add to cart.",
+                  "links": []},
+    })
+    controller = Controller(offline=True, state_dir=None, persist=False,
+                            search_provider=search, fetch_provider=fetch)
+    result = asyncio.run(controller.run("ergonomic office chair Singapore",
+                                        mode="product_exact_price"))
+    assert result.validated_candidates == []
+
+
+# --- Qwen pricing subject gate ------------------------------------------------
+
+CHAIR_QUERY = "ergonomic office chair Singapore"
+CHAIR_URL = "https://chairshop.sg/ergonomic-office-chair"
+CHAIR_TEXT = (
+    "ErgoPro Ergonomic Office Chair S$459.00. "
+    "Memory Foam Headrest S$49.90. Add to cart."
+)
+
+
+def _run_product(qwen_build):
+    search = _FixedSearch([{
+        "url": CHAIR_URL,
+        "title": "ErgoPro Ergonomic Office Chair | ChairShop",
+        "snippet": "Ergonomic office chair Singapore.",
+    }])
+    fetch = MockFetchProvider(fixtures={
+        CHAIR_URL: {"title": "ErgoPro Ergonomic Office Chair | ChairShop",
+                    "text": CHAIR_TEXT, "links": []},
+    })
+    controller = Controller(
+        offline=True, state_dir=None, persist=False,
+        search_provider=search, fetch_provider=fetch,
+        qwen_json_extractor=_ScriptedQwen(qwen_build),
+    )
+    return asyncio.run(controller.run(CHAIR_QUERY, mode="product_exact_price"))
+
+
+def test_accessory_price_with_unrelated_subject_is_dropped():
+    from spider_qwen.modes.contracts import PricingStatus
+    from spider_qwen.tools.qwen_json_extractor import QwenPricingExtraction
+
+    result = _run_product(lambda text, url: QwenPageExtraction(
+        page_role="vendor_offering",
+        pricing=QwenPricingExtraction(
+            status=PricingStatus.EXACT_PRICE, price=49.9, currency="SGD",
+            subject="Memory Foam Headrest", matched_text="S$49.90"),
+    ))
+    assert all(c.get("price") != 49.9 for c in result.validated_candidates)
+
+
+def test_price_with_query_matching_subject_is_kept():
+    from spider_qwen.modes.contracts import PricingStatus
+    from spider_qwen.tools.qwen_json_extractor import QwenPricingExtraction
+
+    result = _run_product(lambda text, url: QwenPageExtraction(
+        page_role="vendor_offering",
+        pricing=QwenPricingExtraction(
+            status=PricingStatus.EXACT_PRICE, price=459.0, currency="SGD",
+            subject="ErgoPro Ergonomic Office Chair", matched_text="S$459.00"),
+    ))
+    assert any(c.get("price") == 459.0 for c in result.validated_candidates)

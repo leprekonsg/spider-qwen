@@ -60,7 +60,7 @@ class Lead(BaseModel):
     value: str
     score: float = 0.0
     depth: int = 0
-    provenance: str = "serp"  # serp | template | contact_link | directory_link | entity_query
+    provenance: str = "serp"  # serp | entity_serp | template | contact_link | directory_link | entity_query
     title: str | None = None
     snippet: str = ""
     parent_url: str | None = None
@@ -249,11 +249,13 @@ class Frontier:
         self._seen.add(_key(lead))
         self._leads.pop(_key(lead), None)
 
-    def pop(self, kind: str, limit: int) -> list[Lead]:
-        """Remove and return up to ``limit`` highest-scoring leads of ``kind``."""
+    def pop(self, kind: str, limit: int, provenance: str | None = None) -> list[Lead]:
+        """Remove and return up to ``limit`` highest-scoring leads of ``kind``
+        (optionally restricted to one ``provenance``)."""
         if limit <= 0:
             return []
-        matching = [(k, l) for k, l in self._leads.items() if l.kind == kind]
+        matching = [(k, l) for k, l in self._leads.items()
+                    if l.kind == kind and (provenance is None or l.provenance == provenance)]
         matching.sort(key=lambda kl: -kl[1].score)
         taken = matching[:limit]
         for key, _ in taken:
@@ -262,10 +264,11 @@ class Frontier:
         self.stats["popped"] += len(taken)
         return [l for _, l in taken]
 
-    def pending(self, kind: str | None = None) -> int:
+    def pending(self, kind: str | None = None, provenance: str | None = None) -> int:
         if kind is None:
             return len(self._leads)
-        return sum(1 for l in self._leads.values() if l.kind == kind)
+        return sum(1 for l in self._leads.values()
+                   if l.kind == kind and (provenance is None or l.provenance == provenance))
 
     def url_leads(self) -> list[Lead]:
         """Current url leads (for external re-scoring); order is insertion order."""

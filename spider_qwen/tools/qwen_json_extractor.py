@@ -37,6 +37,10 @@ class QwenPricingExtraction(BaseModel):
     price: float | None = None
     currency: str | None = None
     unit: str | None = None
+    # What the price is for, exactly as written on the page (e.g. the product
+    # name next to the price tag). Lets deterministic code drop an accessory
+    # price that does not match the buyer query instead of attributing it.
+    subject: str = ""
     matched_text: str = ""
     claims: list[QwenClaim] = Field(default_factory=list)
 
@@ -173,7 +177,10 @@ class QwenJsonExtractor(RecordsTokenUsage):
                     "as it is written in the page text, only when page_role is "
                     "vendor_offering. List in vendor_mentions every OTHER vendor company "
                     "named on the page (listicle entries, award winners, directory rows), "
-                    "each name exactly as written in the page text."
+                    "each name exactly as written in the page text. For pricing, set "
+                    "pricing.subject to the product or service the price belongs to, "
+                    "exactly as written next to the price on the page; prefer the price "
+                    "of the item the buyer query asks for over accessory or add-on prices."
                 ),
             },
             {

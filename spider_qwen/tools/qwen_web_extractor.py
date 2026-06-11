@@ -67,11 +67,14 @@ class QwenWebExtractor:
             f"contact, pricing, or quotation information found: {url}"
         )
         try:
+            # The endpoint rejects web_extractor alone ("must be executed with
+            # web_search tool") and rejects enable_thinking=false ("Normal mode
+            # does not support web_extractor").
             response = client.responses.create(
                 model=self.model,
                 input=prompt,
-                tools=[{"type": "web_extractor"}],
-                extra_body={"enable_thinking": False},
+                tools=[{"type": "web_search"}, {"type": "web_extractor"}],
+                extra_body={"enable_thinking": True},
             )
         except Exception as exc:  # pragma: no cover - network path
             raise QwenWebExtractorError(f"Qwen WebExtractor call failed for {url}: {exc}") from exc

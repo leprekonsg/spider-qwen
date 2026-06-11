@@ -131,6 +131,70 @@ def test_ungrounded_vendor_earns_entity_query_lead(monkeypatch):
     assert result.metrics["frontier"]["entity_query_leads_inserted"] >= 1
 
 
+class _QueryAwareSearch:
+    """Routes entity follow-up queries (quoted vendor name) to their own results."""
+
+    provider_name = "mock"
+    search_source_tool = "mock"
+    rate_limited = False
+
+    def __init__(self, default: list[dict], entity_marker: str, entity: list[dict]) -> None:
+        self._default = default
+        self._marker = entity_marker
+        self._entity = entity
+
+    async def search(self, query, location=None, language="en", limit=10):
+        rows = self._entity if self._marker in query else self._default
+        return SearchResultSet(
+            query=query,
+            results=[SearchResult(rank=i, source_tool="mock", **r)
+                     for i, r in enumerate(rows)],
+            total_results=len(rows),
+            provider="mock",
+        )
+
+
+def test_entity_fetch_reserve_drains_follow_up_leads(monkeypatch):
+    """Without held-back budget, round 1 SERP leads consume every fetch slot and
+    entity follow-up queries die in the queue (live finding: recall capped with
+    named vendors stranded). The reserve must leave room to fetch them."""
+    monkeypatch.setenv("SPIDER_QWEN_FRONTIER_ENABLED", "1")
+    ghost = "https://ghostvendor.sg/office-cleaning-singapore"
+    contact = "https://ghostvendor.sg/contact-us"
+    fillers = [f"https://filler-{i}.sg/office-cleaning-singapore" for i in range(12)]
+    search = _QueryAwareSearch(
+        default=[{"url": ghost, "title": "GhostVendor Pte Ltd",
+                  "snippet": "Office cleaning Singapore."}]
+        + [{"url": u, "title": f"Cleaner {u}", "snippet": "Office cleaning Singapore."}
+           for u in fillers],
+        entity_marker="GhostVendor",
+        entity=[{"url": contact, "title": "GhostVendor Pte Ltd | Contact",
+                 "snippet": "Request a quotation from GhostVendor."}],
+    )
+    fixtures = {
+        # A vendor without a quote channel earns the entity follow-up query.
+        ghost: {"title": "GhostVendor Pte Ltd",
+                "text": "We provide office cleaning services across Singapore.",
+                "links": []},
+        contact: {"title": "GhostVendor Pte Ltd | Contact",
+                  "text": "GhostVendor Pte Ltd office cleaning. "
+                          "Request a quotation at sales@ghostvendor.sg.",
+                  "links": []},
+    }
+    for u in fillers:
+        fixtures[u] = {"title": f"Cleaner {u}",
+                       "text": "We provide office cleaning services across Singapore.",
+                       "links": []}
+    result = _run(Controller(offline=True, search_provider=search,
+                             fetch_provider=MockFetchProvider(fixtures=fixtures)))
+    frontier = result.metrics["frontier"]
+    assert frontier["entity_query_leads_inserted"] >= 1
+    assert frontier["entity_url_leads_fetched"] >= 1
+    budget = result.budget
+    assert budget["fetch_urls"] <= budget["max_fetch_urls"]
+    assert budget["search_calls"] <= budget["max_search_calls"]
+
+
 def test_qwen_scorer_seam_reorders_offline(monkeypatch):
     monkeypatch.setenv("SPIDER_QWEN_FRONTIER_ENABLED", "1")
     monkeypatch.setenv("QWEN_FRONTIER_SCORER_ENABLED", "1")

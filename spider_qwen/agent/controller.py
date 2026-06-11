@@ -27,6 +27,7 @@ from .frontier import (
     leads_from_search_results,
     link_leads_from_page,
     rank_leads,
+    term_overlap,
 )
 from .planner import Planner
 from .policy import Policy, load_policy
@@ -85,6 +86,32 @@ _MOQ_RE = re.compile(r"(?:MOQ|minimum order(?: quantity)?)\D{0,15}([\d,]+)", re.
 # (link leads + vendor mentions); they just stop masquerading as vendors.
 _NON_VENDOR_PAGE_ROLES = {"buyer_rfq", "tender_award", "news", "directory"}
 _VENDOR_MENTIONS_PER_PAGE = 10
+# Budget held back in early frontier rounds so entity follow-up leads (vendor
+# mentions on gated pages, ungrounded quote channels) can still be searched and
+# fetched after the SERP leads of round 1; released once no entity queries are
+# pending. Without the reserve, round 1 spends everything and mention leads die
+# in the queue (live finding: recall capped at 0.407 with 16 named vendors
+# stranded on correctly-gated pages).
+_ENTITY_FETCH_RESERVE = 3
+_ENTITY_SEARCH_RESERVE = 2
+# Marketplace tag/catalog/search listings are directory pages by construction;
+# gate them deterministically (one Lazada tag page slipped the Qwen gate in the
+# live sample). Product detail pages on these hosts are NOT matched.
+_MARKETPLACE_HOST_RE = re.compile(
+    r"(^|\.)(lazada|shopee|carousell|qoo10|aliexpress|alibaba|amazon|ebay)\.", re.IGNORECASE
+)
+_MARKETPLACE_LISTING_PATH_RE = re.compile(r"^/(tag|catalog|search)(/|$)", re.IGNORECASE)
+
+
+def _marketplace_listing_page(url: str | None) -> bool:
+    if not url:
+        return False
+    parts = urlparse(url)
+    if not _MARKETPLACE_HOST_RE.search(parts.netloc or ""):
+        return False
+    if _MARKETPLACE_LISTING_PATH_RE.search(parts.path or ""):
+        return True
+    return bool(re.search(r"(^|&)q=", parts.query or ""))
 _EVIDENCE_SOURCE_TOOLS = {
     "tinyfish_search", "tinyfish_fetch", "qwen_web_extractor", "mcp_search", "semantic_memory", "mock"
 }
@@ -811,14 +838,36 @@ class Controller:
         rounds = 0
         link_leads_inserted = 0
         entity_leads_inserted = 0
+        entity_urls_fetched = 0
         scorer_moved = 0
         while rounds < MAX_ROUNDS and not ctx.tracker.runtime_exceeded():
             rounds += 1
+            # Entity follow-ups are still possible in round 1 (nothing fetched
+            # yet) or while entity queries wait in the queue; only then is part
+            # of the budget held back for them.
+            entity_possible = rounds == 1 or frontier.pending("query", provenance="entity_query") > 0
             n_search = max(0, ctx.tracker.remaining_search_calls() - reserve_search_calls)
-            query_leads = frontier.pop("query", n_search)
-            if query_leads:
+            entity_queries = frontier.pop("query", n_search, provenance="entity_query")
+            search_hold = _ENTITY_SEARCH_RESERVE if entity_possible and not entity_queries else 0
+            search_hold = min(search_hold, max(0, n_search - 1))
+            other_queries = frontier.pop(
+                "query", max(0, n_search - len(entity_queries) - search_hold))
+            query_leads = entity_queries + other_queries
+            if entity_queries:
+                # Searched separately so their SERP leads carry entity
+                # provenance and may draw on the reserved fetch slots.
                 results = await self._collect_search_results(
-                    ctx, [l.value for l in query_leads], search,
+                    ctx, [l.value for l in entity_queries], search,
+                    location=location, reserve_search_calls=reserve_search_calls,
+                )
+                for lead in leads_from_search_results(
+                    results, query=ctx.query, priors=priors, target_cc=target_cc,
+                ):
+                    lead.provenance = "entity_serp"
+                    frontier.add(lead)
+            if other_queries:
+                results = await self._collect_search_results(
+                    ctx, [l.value for l in other_queries], search,
                     location=location, reserve_search_calls=reserve_search_calls,
                 )
                 for lead in leads_from_search_results(
@@ -830,7 +879,13 @@ class Controller:
 
             can_extract = ctx.tracker.budget.max_candidates_to_extract - ctx.tracker.candidates_extracted
             can_fetch = ctx.tracker.budget.max_fetch_urls - ctx.tracker.fetch_urls
-            url_leads = frontier.pop("url", min(can_extract, can_fetch))
+            budget_now = min(can_extract, can_fetch)
+            url_leads = frontier.pop("url", budget_now, provenance="entity_serp")
+            entity_urls_fetched += len(url_leads)
+            fetch_hold = _ENTITY_FETCH_RESERVE if entity_possible and not url_leads else 0
+            fetch_hold = min(fetch_hold, max(0, budget_now - len(url_leads) - 1))
+            url_leads = url_leads + frontier.pop(
+                "url", max(0, budget_now - len(url_leads) - fetch_hold))
             if not query_leads and not url_leads:
                 break
             if not url_leads:
@@ -859,11 +914,24 @@ class Controller:
             "enabled": True, "rounds": rounds,
             "link_leads_inserted": link_leads_inserted,
             "entity_query_leads_inserted": entity_leads_inserted,
+            "entity_url_leads_fetched": entity_urls_fetched,
             "pending_at_stop": frontier.pending(),
             **frontier.stats,
         }
         if scorer_moved:
             stats["qwen_scorer_moved"] = scorer_moved
+        # A replan/broadening pass runs a fresh frontier; counters accumulate
+        # across gathers (pending_at_stop stays the last gather's honest value).
+        prev = ctx.metadata.get("frontier")
+        if isinstance(prev, dict) and prev.get("enabled"):
+            for key in ("rounds", "link_leads_inserted", "entity_query_leads_inserted",
+                        "entity_url_leads_fetched", "added", "dropped_floor",
+                        "dropped_depth", "dropped_duplicate", "popped"):
+                stats[key] = stats.get(key, 0) + prev.get(key, 0)
+            merged_moved = stats.get("qwen_scorer_moved", 0) + prev.get("qwen_scorer_moved", 0)
+            if merged_moved:
+                stats["qwen_scorer_moved"] = merged_moved
+            stats["gathers"] = prev.get("gathers", 1) + 1
         ctx.metadata["frontier"] = stats
         return dedupe_candidates(candidates)
 
@@ -1176,6 +1244,14 @@ class Controller:
         refs = [ref] if ref else []
         geo_score = self.geo.score(meta.country, target_country, page.text)
         page_url = page.final_url or page.url
+        if _marketplace_listing_page(page_url):
+            ctx.tracer.record(
+                step="page_role_gate", tool="url_heuristic", status="success",
+                input_count=1, output_count=0,
+                detail={"url": page_url, "page_role": "directory",
+                        "reason": "marketplace_listing"},
+            )
+            return None
         qwen = self._extract_qwen_json(ctx, query, page_url, page.text)
         if qwen is not None:
             self._collect_vendor_mentions(ctx, qwen, page.text)
@@ -1223,6 +1299,22 @@ class Controller:
                 unit=qwen.pricing.unit,
                 matched_text=qwen.pricing.matched_text,
             )
+            # Tighten-only subject check: when Qwen names what the price is
+            # for and that grounded subject shares no term with the buyer
+            # query, the price belongs to something else on the page (an
+            # accessory, an add-on) and is dropped, not attributed.
+            subject = (qwen.pricing.subject or "").strip()
+            if (
+                subject
+                and value_grounded(subject, page.text or "")
+                and term_overlap(query, subject) == 0.0
+            ):
+                ctx.tracer.record(
+                    step="pricing_subject_gate", tool="qwen_json_extractor",
+                    status="success", input_count=1, output_count=0,
+                    detail={"url": page_url, "subject": subject},
+                )
+                pricing = PricingResult(status=PricingStatus.NOT_FOUND)
         pricing_ref = self._record_extraction_ref(
             ctx, page, "pricing", pricing.matched_text
         ) if pricing.matched_text else None
