@@ -429,6 +429,126 @@ def _cmd_skills(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_calibrate(args: argparse.Namespace) -> int:
+    """Build and validate the hand-graded conformal calibration set.
+
+    ``template`` collects verifier-scored claim rows from finished runs into a
+    JSON file with ``prediction_correct: null`` placeholders; a human grades
+    each one. ``check`` validates a graded file and reports the fitted
+    threshold, so a misconfigured set fails here instead of mid-run.
+    """
+    from ..verification.conformal import CalibrationExample, ConformalAbstainer
+
+    if args.calibrate_command == "template":
+        if not args.run_ids:
+            print("usage: spider-qwen calibrate template <run_id> [...] --out <file>",
+                  file=sys.stderr)
+            return 2
+        examples: list[dict] = []
+        runs_seen = 0
+        for run_id in args.run_ids:
+            try:
+                ledger = EvidenceLedger.load(run_id, _state_dir())
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            if len(ledger) == 0:
+                print(f"No evidence found for run '{run_id}' under {_state_dir()}",
+                      file=sys.stderr)
+                continue
+            runs_seen += 1
+            for item in ledger.items():
+                meta = item.metadata
+                if "claim_id" not in meta or "verifier_score" not in meta:
+                    continue  # only verifier-annotated claim rows are gradable
+                examples.append({
+                    "verifier_score": meta["verifier_score"],
+                    # Grade by hand: true if the verifier's verdict was right
+                    # for this claim, false if it was wrong. Left null, `check`
+                    # and run startup both refuse the file loudly.
+                    "prediction_correct": None,
+                    "claim": {
+                        "run_id": run_id,
+                        "ledger_id": item.ledger_id,
+                        "field": meta.get("field"),
+                        "value": item.snippet,
+                        "url": item.url,
+                        "verifier_verdict": meta.get("verified"),
+                        "grounding": meta.get("grounding"),
+                        "grade": meta.get("grade"),
+                        "stage": meta.get("verifier_stage"),
+                    },
+                })
+        if not examples:
+            print(
+                "No verifier-annotated claim rows found in the given runs. "
+                "Calibration needs runs executed with the verification spine on: "
+                "SPIDER_QWEN_VERIFICATION_ENABLED=1 or --judged-demo.",
+                file=sys.stderr,
+            )
+            return 1
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"alpha": args.alpha, "examples": examples}, indent=2),
+                       encoding="utf-8")
+        print(json.dumps({
+            "out": str(out),
+            "runs": runs_seen,
+            "claims": len(examples),
+            "next": (
+                f"Hand-grade every prediction_correct in {out} (true/false), then "
+                f"run: spider-qwen calibrate check {out}"
+            ),
+        }, indent=2))
+        return 0
+
+    if args.calibrate_command == "check":
+        path = Path(args.run_ids[0]) if args.run_ids else None
+        if path is None:
+            print("usage: spider-qwen calibrate check <file>", file=sys.stderr)
+            return 2
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            raw_examples = payload["examples"]
+            alpha = float(payload.get("alpha", 0.1))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(
+                f"Calibration file {path} could not be loaded: {exc}. Expected "
+                '{"alpha": 0.1, "examples": [{"verifier_score": 0.9, '
+                '"prediction_correct": true}, ...]}',
+                file=sys.stderr,
+            )
+            return 2
+        ungraded = [i for i, e in enumerate(raw_examples)
+                    if not isinstance(e.get("prediction_correct"), bool)]
+        if ungraded:
+            print(
+                f"{len(ungraded)} of {len(raw_examples)} examples in {path} are "
+                f"ungraded (prediction_correct is not true/false), first at index "
+                f"{ungraded[0]}. Grade them by hand, then re-run this check.",
+                file=sys.stderr,
+            )
+            return 1
+        examples = [CalibrationExample.model_validate(e) for e in raw_examples]
+        abstainer = ConformalAbstainer.fit(examples, alpha=alpha)
+        print(json.dumps({
+            "calibrated": abstainer.threshold is not None,
+            "threshold": abstainer.threshold,
+            "alpha": abstainer.alpha,
+            "calibration_size": abstainer.calibration_size,
+            "correct_examples": sum(1 for e in examples if e.prediction_correct),
+            "reasons": abstainer.reasons,
+            "activate": (
+                f"set SPIDER_QWEN_CONFORMAL_CALIBRATION={path} to gate emission"
+                if abstainer.threshold is not None else None
+            ),
+        }, indent=2))
+        return 0 if abstainer.threshold is not None else 1
+
+    print("usage: spider-qwen calibrate [template|check] ...", file=sys.stderr)
+    return 2
+
+
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     from ..benchmarks.evaluate_service_mode import run_gold_set
 
@@ -499,6 +619,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills.add_argument("skills_command", choices=["list", "match", "show"])
     p_skills.add_argument("query", nargs="?", help="Query for 'match' or skill name for 'show'")
     p_skills.set_defaults(func=_cmd_skills)
+
+    p_cal = sub.add_parser(
+        "calibrate",
+        help="Build/validate the hand-graded conformal calibration set",
+    )
+    p_cal.add_argument("calibrate_command", choices=["template", "check"])
+    p_cal.add_argument("run_ids", nargs="*",
+                       help="template: run ids to harvest claims from; check: the graded file")
+    p_cal.add_argument("--out", default="calibration.json",
+                       help="template: output file (default calibration.json)")
+    p_cal.add_argument("--alpha", type=float, default=0.1,
+                       help="template: target miscoverage rate written to the file")
+    p_cal.set_defaults(func=_cmd_calibrate)
 
     p_bench = sub.add_parser("benchmark", help="Run the gold-set benchmark")
     p_bench.add_argument("--gold-set", required=True)

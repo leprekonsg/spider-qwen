@@ -279,6 +279,7 @@ class Controller:
 
     async def run(self, query: str, mode: str = "auto", target_country: str | None = None,
                   high_risk: bool = False, serendipity: bool = False) -> RunResult:
+        phase_start = time.perf_counter()
         classification = self._classify(query, forced_mode=mode)
         chosen = classification.mode
         route = self.router.route(chosen)
@@ -372,6 +373,7 @@ class Controller:
             validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
 
         validated = validated[: budget.max_validated_candidates]
+        gather_done = time.perf_counter()
 
         # T-2.2: verification spine. Block candidates whose critical claims are not
         # entailed by their cited evidence; write verified/verifier_score onto the
@@ -412,6 +414,7 @@ class Controller:
                 validated, verification_metrics = self._verify_candidates(ledger, validated, tracer)
                 verification_metrics["replan_rounds"] = 1
         verification_metrics.setdefault("replan_rounds", 0)
+        verify_done = time.perf_counter()
 
         # Synthesis A: ledger-supervised citation counts. A VERIFIED candidate
         # whose evidence chain includes a recalled semantic_memory row actually
@@ -448,6 +451,7 @@ class Controller:
             extra_risk_signals=disputed_signals,
         )
 
+        rfq_start = time.perf_counter()
         rfq_drafts: list[dict] = []
         if route.produces_rfq:
             rfq_drafts = self._build_rfqs(
@@ -455,6 +459,7 @@ class Controller:
                 ledger=ledger,
                 assessments=verification_metrics["verification_assessments"],
             )
+        rfq_done = time.perf_counter()
 
         metrics.search_calls_total = tracker.search_calls
         metrics.fetch_urls_total = tracker.fetch_urls
@@ -546,6 +551,15 @@ class Controller:
                 "corrective_searches": corrective_searches,
                 "pages_rejected": fetch.rejected,
                 "pages_flagged": fetch.flagged,
+                # Where a run's wall clock went: gather covers classify ->
+                # search/fetch/extract/rank, verify covers the spine plus its
+                # bounded replan, rfq covers drafting + fact-check.
+                "latency_seconds": {
+                    "gather": round(gather_done - phase_start, 3),
+                    "verify": round(verify_done - gather_done, 3),
+                    "rfq": round(rfq_done - rfq_start, 3),
+                    "total": round(time.perf_counter() - phase_start, 3),
+                },
                 **verification_metrics,
             },
             budget=tracker.snapshot(),

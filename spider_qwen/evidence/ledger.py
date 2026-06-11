@@ -113,6 +113,7 @@ class EvidenceLedger:
         item.chain_hash = _chain_hash(item.content_digest(), self._chain_tip)
         self._chain_tip = item.chain_hash
         self._items[item.ledger_id] = item
+        self._wal_append(item)
         return item.to_ref()
 
     def get(self, ledger_id: str) -> EvidenceItem | None:
@@ -206,6 +207,26 @@ class EvidenceLedger:
             return None
         return self._state_dir / "evidence" / f"{self.run_id}.ledger.json"
 
+    def wal_path(self) -> Path | None:
+        if not self._state_dir:
+            return None
+        return self._state_dir / "evidence" / f"{self.run_id}.ledger.wal.jsonl"
+
+    def _wal_append(self, item: EvidenceItem) -> None:
+        """Crash safety: append each row to a write-ahead log as it is recorded.
+
+        Evidence must survive a crash mid-run, not only the end-of-run
+        persist(). The WAL holds rows as first recorded; annotations written
+        later (verifier verdicts) live only in the canonical file, so a
+        WAL-recovered ledger is the pre-verification record.
+        """
+        wal = self.wal_path()
+        if wal is None:
+            return
+        wal.parent.mkdir(parents=True, exist_ok=True)
+        with wal.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(item.model_dump(mode="json")) + "\n")
+
     def persist(self) -> Path | None:
         target = self.path()
         if target is None:
@@ -240,6 +261,11 @@ class EvidenceLedger:
                 payload["signed_tree_head"] = signed
             self._loaded_signed_tree_head = signed
         target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        wal = self.wal_path()
+        if wal is not None:
+            # The canonical file now holds everything (including annotations);
+            # the crash-recovery log is superseded.
+            wal.unlink(missing_ok=True)
         return target
 
     def published_tree_head(self) -> dict[str, Any] | None:
@@ -285,6 +311,28 @@ class EvidenceLedger:
     def load(cls, run_id: str, state_dir: str | Path) -> "EvidenceLedger":
         ledger = cls(run_id, state_dir)
         target = ledger.path()
+        wal = ledger.wal_path()
+        if target and not target.exists() and wal and wal.exists():
+            # Crash recovery: the run never reached persist(), so rebuild from
+            # the write-ahead log. A truncated final line (crash mid-append)
+            # ends the replay; everything before it is intact.
+            for line in wal.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    break
+                item = EvidenceItem.model_validate(raw)
+                ledger._items[item.ledger_id] = item
+            # WAL rows hold record-time hashes; in-memory annotations between
+            # records resealed the live chain, so replayed links can disagree.
+            # No tree_head was ever published for a crashed run, so reseal from
+            # content rather than report phantom tampering.
+            ledger._chain_stale = bool(ledger._items)
+            ledger._seal_chain()
+            return ledger
         if target and target.exists():
             payload = json.loads(target.read_text(encoding="utf-8"))
             for raw in payload.get("items", []):

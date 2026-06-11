@@ -116,6 +116,16 @@ spider-qwen skills list                       # project Qwen Agent Skills
 spider-qwen benchmark --gold-set spider_qwen/benchmarks/gold_set.json
 ```
 
+Calibrating the conformal emission gate (hand-grading required):
+
+```bash
+spider-qwen run "office cleaning Singapore" --offline --judged-demo   # verifier-scored claims
+spider-qwen calibrate template <run_id> [...] --out calibration.json  # gradable template
+# hand-grade every prediction_correct (true/false), then:
+spider-qwen calibrate check calibration.json                          # fitted threshold or refusal
+SPIDER_QWEN_CONFORMAL_CALIBRATION=calibration.json spider-qwen run ...
+```
+
 Opt-in modes (default `run` output is unchanged):
 
 ```bash
@@ -369,7 +379,9 @@ v2 roadmap:
 - Default-pipeline S1/S2/S3 remains opt-in (`--serendipity` or `--judged-demo`)
   until demo + benchmark hardening is complete.
 - Conformal abstention requires a hand-graded calibration set; the shipped
-  abstainer refuses to claim a guarantee when uncalibrated.
+  abstainer refuses to claim a guarantee when uncalibrated. `spider-qwen
+  calibrate template|check` builds and validates the set; the grading itself
+  stays human.
 - The DashScope Responses-API `tools=[{type:mcp}]` wiring (server-side MCP execution). The stdio server half and the client half both ship in v1: any MCP server exposing a search tool can back discovery via `SPIDER_QWEN_SEARCH_PROVIDER=qwen_mcp` + `SPIDER_QWEN_MCP_SEARCH_COMMAND`.
 - External agent benchmarks (BFCL V4, tau-bench, LOCOMO) once their datasets + live access are wired.
 - The EOL forecaster sidecar (T-6.2). (Live per-call token metering ships in

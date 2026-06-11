@@ -57,6 +57,14 @@ ledger-backed but may not have character offsets.
 `EvidenceLedger.load(run_id, state_dir)` rehydrates it; the CLI exposes it via
 `spider-qwen evidence show <run_id>`, `evidence verify`, and `evidence graph`.
 
+Crash safety: when a state dir is configured, every `record()` also appends the
+row to `<run_id>.ledger.wal.jsonl`. A successful `persist()` removes the WAL
+(the canonical file supersedes it); if the run crashed before persisting,
+`load()` replays the WAL instead, dropping a torn final line. WAL recovery is
+the pre-verification record: verifier annotations written after `record()` live
+only in the canonical file, and no `tree_head` was published for a crashed run,
+so the chain is resealed from row content on replay.
+
 ## Transparency proofs
 
 Persisted ledgers include a Merkle `tree_head`. When
