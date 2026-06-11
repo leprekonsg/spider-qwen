@@ -17,12 +17,14 @@ import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from .fetch_failures import PAGE_OK, classify_error, classify_page
 from .provider_types import FetchResult, FetchResultSet
 from .tinyfish_client import TinyFishClient, from_env as tinyfish_from_env
 
 if TYPE_CHECKING:
     from ..agent.budget import BudgetTracker
     from ..evidence.ledger import EvidenceLedger
+    from .page_cache import PageCache
 
 
 class TinyFishFetchProvider:
@@ -151,6 +153,7 @@ class FetchService:
         judge: object | None = None,
         query: str | None = None,
         wayback: object | None = None,
+        cache: "PageCache | None" = None,
     ) -> None:
         self.provider = provider
         self.ledger = ledger
@@ -161,10 +164,18 @@ class FetchService:
         self.query = query or ""
         # T-5.2: optional Wayback recoverer; recovers dead/404 fetches from the archive.
         self.wayback = wayback
+        # Cross-run read-through page cache: hits skip the provider call and
+        # consume no fetch budget; the page is still judged and re-recorded.
+        self.cache = cache
         self.judged = 0
         self.rejected = 0
         self.flagged = 0
         self.recovered = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
+        # Fetch-outcome histogram (fetch_failures taxonomy): a starved live run
+        # reports WHY it starved (bot walls vs JS shells vs thin pages).
+        self.fetch_outcomes: dict[str, int] = {}
 
     async def fetch(
         self, urls: list[str], output_format: str = "markdown", include_links: bool = True
@@ -175,13 +186,28 @@ class FetchService:
         urls = [u for u in urls if u]
         if not urls:
             return FetchResultSet(provider=getattr(self.provider, "provider_name", "fetch"))
-        if self.tracker is not None:
+        requested = list(urls)
+        cached = self._cached_pages(urls)
+        urls = [u for u in urls if u not in cached]
+        if self.tracker is not None and urls:
             allowed = self.tracker.consume_fetch(len(urls))
             urls = urls[:allowed]
         source_tool = getattr(self.provider, "fetch_source_tool", "tinyfish_fetch")
-        result_set = await self.provider.fetch(urls, output_format, include_links)
+        if urls:
+            result_set = await self.provider.fetch(urls, output_format, include_links)
+        else:
+            result_set = FetchResultSet(provider=getattr(self.provider, "provider_name", "fetch"))
+        # Classify provider errors now, before the judge loop appends its own
+        # rejection entries (which are gate decisions, not fetch failures).
+        for err in result_set.errors:
+            self._count_outcome(classify_error(str(err.get("error", "")), err.get("status")))
+        result_set.results = _in_request_order(requested, cached, result_set.results)
         kept: list[FetchResult] = []
         for p in result_set.results:
+            from_cache = bool(p.metadata.get("page_cache"))
+            page_class = classify_page(p.text, title=p.title or "")
+            if not from_cache:
+                self._count_outcome(page_class)
             verdict = None
             if self.judge is not None:
                 # Judge every page, including empty-text ones: an image-only / no-
@@ -206,7 +232,12 @@ class FetchService:
                     continue
 
             confidence = 0.6
-            metadata: dict = {"links": p.links[:20], "provider": result_set.provider}
+            metadata: dict = {"links": p.links[:20], "provider": result_set.provider,
+                              "fetch_class": page_class}
+            if from_cache:
+                metadata["page_cache"] = p.metadata["page_cache"]
+            elif self.cache is not None and page_class == PAGE_OK:
+                self.cache.put(p)
             if verdict is not None:
                 if verdict.verdict == "flag":
                     self.flagged += 1
@@ -215,7 +246,7 @@ class FetchService:
                 metadata["judge"] = verdict.model_dump(mode="json")
 
             p.evidence_ref = self.ledger.record(
-                source_tool=source_tool,
+                source_tool=p.source_tool if from_cache else source_tool,
                 url=p.url,
                 final_url=p.final_url,
                 title=p.title,
@@ -230,9 +261,38 @@ class FetchService:
         if self.wayback is not None and result_set.errors:
             await self._recover_dead_urls(result_set)
         if self.tracer is not None:
+            detail: dict = {}
+            if cached:
+                detail["cache_hits"] = len(cached)
+            non_ok = {k: v for k, v in self.fetch_outcomes.items() if k != PAGE_OK}
+            if non_ok:
+                detail["fetch_outcomes"] = non_ok
             self.tracer.record(step="fetch", tool=source_tool, status="success",
-                               input_count=len(urls), output_count=len(result_set.results))
+                               input_count=len(requested), output_count=len(result_set.results),
+                               detail=detail or None)
         return result_set
+
+    def _count_outcome(self, outcome: str) -> None:
+        self.fetch_outcomes[outcome] = self.fetch_outcomes.get(outcome, 0) + 1
+
+    def _cached_pages(self, urls: list[str]) -> dict[str, FetchResult]:
+        """Fresh cache entries for the requested URLs, keyed by requested URL."""
+        if self.cache is None:
+            return {}
+        hits: dict[str, FetchResult] = {}
+        for u in urls:
+            entry = self.cache.get(u)
+            if entry is None:
+                self.cache_misses += 1
+                continue
+            self.cache_hits += 1
+            hits[u] = FetchResult(
+                url=u, final_url=entry.final_url, title=entry.title, text=entry.text,
+                links=entry.links, language=entry.language, source_tool=entry.source_tool,
+                metadata={"page_cache": {"hit": True, "fetched_at": entry.fetched_at,
+                                         "age_seconds": round(entry.age_seconds(), 1)}},
+            )
+        return hits
 
     async def _recover_dead_urls(self, result_set: FetchResultSet) -> None:
         """T-5.2: recover dead/404 fetch errors from the Wayback archive.
@@ -276,6 +336,27 @@ class FetchService:
                 self.tracer.record(step="wayback_recover", tool="wayback_cdx", status="success",
                                    input_count=1, output_count=1,
                                    detail={"recovered_from": dead_url, "archive_url": snap.archive_url})
+
+
+def _in_request_order(
+    requested: list[str],
+    cached: dict[str, FetchResult],
+    fetched: list[FetchResult],
+) -> list[FetchResult]:
+    """Merge cache hits and provider results back into the caller's URL order.
+
+    Callers pass URLs in pre-fetch-score order; that order decides which pages
+    are extracted when the extraction cap binds, so it must survive the split.
+    """
+    by_url = {p.url: p for p in fetched}
+    merged: list[FetchResult] = []
+    for u in requested:
+        if u in cached:
+            merged.append(cached[u])
+        elif u in by_url:
+            merged.append(by_url.pop(u))
+    merged.extend(by_url.values())  # redirected/renamed URLs keep provider order
+    return merged
 
 
 def build_fetch_provider(name: str | None = None, *, fixtures: dict | None = None) -> object:

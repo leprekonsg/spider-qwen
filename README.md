@@ -210,6 +210,17 @@ Optionally Qwen re-scores pending leads (`QWEN_FRONTIER_SCORER_ENABLED=1`);
 its deltas are clamped to ±0.2 and it can reorder leads but never admit or
 remove them — the proposes/verifies split, applied to search planning.
 
+Two more live-web layers sit on the fetch path. Every fetch outcome is
+classified into a deterministic taxonomy (`ok`, `bot_wall`, `js_shell`,
+`geo_block`, `empty`, `thin`, `dead_link`, `transport_error`) and the
+histogram is reported in run metrics as `fetch_outcomes`, so a starved live
+run says why it starved instead of flattening everything into "insufficient
+evidence". And with `SPIDER_QWEN_PAGE_CACHE_ENABLED=1` (on in
+`--judged-demo`), a cross-run read-through cache keyed by canonical URL
+serves repeat pages within a freshness TTL without a provider call or fetch
+budget — the page is still judged and re-recorded in the new run's ledger
+with cache provenance, and non-ok pages are never cached.
+
 ## Procurement modes
 
 | Mode | When | Output |
@@ -250,6 +261,8 @@ Selected via env or injection; both abstracted behind protocols.
 | `SPIDER_QWEN_FRONTIER_ENABLED` | `0` · `1` (score-before-fetch frontier gather) | `0` |
 | `QWEN_FRONTIER_SCORER_ENABLED` | `0` · `1` (Qwen re-scores frontier leads, clamped) | `0` |
 | `QWEN_FRONTIER_SCORER_MODEL` | verified DashScope model id | `qwen-flash` |
+| `SPIDER_QWEN_PAGE_CACHE_ENABLED` | `0` · `1` (cross-run read-through page cache) | `0` |
+| `SPIDER_QWEN_PAGE_CACHE_TTL_SECONDS` | freshness TTL for cached pages | `86400` |
 | `SPIDER_QWEN_CONFORMAL_CALIBRATION` | path to hand-graded calibration JSON | unset (gate never blocks; metrics state no guarantee) |
 | `SPIDER_QWEN_STH_PUBLIC_KEY` | Ed25519 public-key trust anchor for evidence proofs | unset |
 | `SPIDER_QWEN_STH_PUBLIC_KEY_FILE` | file containing the same public-key anchor | unset |
@@ -292,6 +305,22 @@ classification accuracy is a deterministic classifier regression, not an
 independent live accuracy claim. A separate
 `spider_qwen/benchmarks/live_validation_set.json` carries a small rate-limited
 live validation set for deployed-path reporting.
+
+To turn live extraction quality into a measured number, the `live-sample`
+harness mirrors the conformal calibration workflow (template, hand-grade,
+check):
+
+```bash
+# Run N live cases; emit (query, extracted fields, page-text excerpts) with
+# null grading slots. --offline smoke-tests the harness against the mocks.
+spider-qwen live-sample template --sample 5 --out live_sample.json
+# Hand-grade extraction_correct (true/false) and missed_on_page (integer), then:
+spider-qwen live-sample check live_sample.json
+```
+
+`check` refuses a partially graded file and otherwise reports measured live
+extraction precision and recall (per mode), plus the fetch-outcome histogram
+for each sampled case.
 
 **External agent benchmarks (BFCL V4, tau-bench, LOCOMO): deferred to v2.** They
 require their published datasets and live model/API access, which the offline,

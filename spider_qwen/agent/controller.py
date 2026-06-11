@@ -229,6 +229,15 @@ class Controller:
 
                 self.qwen_frontier_scorer = QwenFrontierScorer(
                     model=self.policy.qwen_frontier_scorer_model())
+        # Cross-run read-through page cache (flagged, needs a state dir): hits
+        # skip the provider call and consume no fetch budget; pages are still
+        # judged and re-recorded in each run's own ledger.
+        self.page_cache = None
+        if self.state_dir is not None and self.policy.page_cache_enabled():
+            from ..tools.page_cache import PageCache
+
+            self.page_cache = PageCache(
+                self.state_dir, ttl_seconds=self.policy.page_cache_ttl_seconds())
         self.memory_mcp = memory_mcp
         if self.memory_mcp is None and self.state_dir is not None:
             # ONE SemanticMemory instance serves recall, promotion, and citation
@@ -328,7 +337,7 @@ class Controller:
 
         search = SearchService(self.search_provider, ledger, tracker, tracer)
         fetch = FetchService(self.fetch_provider, ledger, tracker, tracer,
-                             judge=self.page_judge, query=query)
+                             judge=self.page_judge, query=query, cache=self.page_cache)
         memory_recalls = self._recall_memory(query, ctx, audit, reference_ts=run_reference_ts)
 
         if review_store and mode == "auto" and classification.confidence < self.policy.qwen_router_confidence_threshold():
@@ -579,6 +588,14 @@ class Controller:
                 "corrective_searches": corrective_searches,
                 "pages_rejected": fetch.rejected,
                 "pages_flagged": fetch.flagged,
+                # Live-web failure taxonomy: a starved run reports WHY it
+                # starved (bot walls vs JS shells vs thin/dead pages).
+                "fetch_outcomes": dict(sorted(fetch.fetch_outcomes.items())),
+                "page_cache": {
+                    "enabled": self.page_cache is not None,
+                    "hits": fetch.cache_hits,
+                    "misses": fetch.cache_misses,
+                },
                 # Where a run's wall clock went: gather covers classify ->
                 # search/fetch/extract/rank, verify covers the spine plus its
                 # bounded replan, rfq covers drafting + fact-check.
@@ -634,7 +651,7 @@ class Controller:
                                    tracker=tracker, working=working, tracer=tracer)
             search = SearchService(self.search_provider, ledger, tracker, tracer)
             fetch = FetchService(self.fetch_provider, ledger, tracker, tracer,
-                                 judge=self.page_judge, query=query)
+                                 judge=self.page_judge, query=query, cache=self.page_cache)
             cands = await self._gather_queries(
                 ctx, route, traj.queries, search, fetch, location=None, target_country=target_country,
             )

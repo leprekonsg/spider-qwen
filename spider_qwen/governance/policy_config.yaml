@@ -88,6 +88,16 @@ qwen:
   # admission authority. Env QWEN_FRONTIER_SCORER_ENABLED. Needs frontier.enabled.
   frontier_scorer_enabled: false
 
+page_cache:
+  # Cross-run read-through page cache under <state_dir>/page_cache, keyed by
+  # canonical URL. A hit inside ttl_seconds skips the provider call and
+  # consumes no fetch budget; the page is still judged and re-recorded in the
+  # new run's ledger with cache provenance. Only ok-classified pages are
+  # cached (never bot walls / JS shells / thin pages). Env
+  # SPIDER_QWEN_PAGE_CACHE_ENABLED / SPIDER_QWEN_PAGE_CACHE_TTL_SECONDS.
+  enabled: false
+  ttl_seconds: 86400
+
 frontier:
   # Frontier gather: queries and 1-hop page links (same-domain contact pages,
   # directory entries) compete on one scored priority queue; the fetch budget

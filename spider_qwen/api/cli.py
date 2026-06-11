@@ -557,6 +557,56 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_live_sample(args: argparse.Namespace) -> int:
+    """Hand-gradable live extraction sample (critique: measure live recall).
+
+    ``template`` runs N validation cases through the pipeline and writes
+    (query, extracted fields, page-text excerpts) with null grading slots.
+    ``check`` validates a graded file and reports measured precision/recall.
+    """
+    from ..benchmarks.live_sample import build_live_sample, score_live_sample
+
+    if args.live_sample_command == "template":
+        payload = build_live_sample(
+            args.case_set, sample_size=args.sample,
+            state_dir=_state_dir(), offline=args.offline,
+        )
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(json.dumps({
+            "out": str(out),
+            "cases": payload["sample_size"],
+            "offline": payload["offline"],
+            "next": (
+                f"Hand-grade every extraction_correct (true/false) and "
+                f"missed_on_page (integer) in {out}, then run: "
+                f"spider-qwen live-sample check {out}"
+            ),
+        }, indent=2))
+        return 0
+
+    if args.live_sample_command == "check":
+        if not args.path:
+            print("usage: spider-qwen live-sample check <file>", file=sys.stderr)
+            return 2
+        path = Path(args.path)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"Live sample file {path} could not be loaded: {exc}", file=sys.stderr)
+            return 2
+        try:
+            print(json.dumps(score_live_sample(payload), indent=2))
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+
+    print("usage: spider-qwen live-sample [template|check] ...", file=sys.stderr)
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spider-qwen", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -637,6 +687,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--gold-set", required=True)
     p_bench.add_argument("--live", action="store_true", help="Use live providers instead of mock")
     p_bench.set_defaults(func=_cmd_benchmark)
+
+    p_ls = sub.add_parser(
+        "live-sample",
+        help="Build/score a hand-gradable live extraction sample (template/check)",
+    )
+    p_ls.add_argument("live_sample_command", choices=["template", "check"])
+    p_ls.add_argument("path", nargs="?", help="check: the graded sample file")
+    p_ls.add_argument("--set", dest="case_set",
+                      default="spider_qwen/benchmarks/live_validation_set.json",
+                      help="template: validation case set to sample from")
+    p_ls.add_argument("--sample", type=int, default=5,
+                      help="template: number of cases to run (first N, deterministic)")
+    p_ls.add_argument("--out", default="live_sample.json",
+                      help="template: output file (default live_sample.json)")
+    p_ls.add_argument("--offline", action="store_true",
+                      help="template: mock providers (harness smoke test; "
+                           "measures the mocks, not the web)")
+    p_ls.set_defaults(func=_cmd_live_sample)
     return parser
 
 
@@ -658,6 +726,7 @@ def _apply_judged_demo_profile(args: argparse.Namespace) -> dict[str, str | None
         "QWEN_RFQ_DRAFTER_ENABLED": "1",
         "SPIDER_QWEN_FRONTIER_ENABLED": "1",
         "QWEN_FRONTIER_SCORER_ENABLED": "1",
+        "SPIDER_QWEN_PAGE_CACHE_ENABLED": "1",
     }
     prior = {name: os.environ.get(name) for name in names}
     for name, value in names.items():

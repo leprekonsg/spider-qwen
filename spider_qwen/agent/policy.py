@@ -253,6 +253,23 @@ class Policy:
             or self.model_for("planner")
         )
 
+    def page_cache_enabled(self) -> bool:
+        # Cross-run read-through page cache: hits skip the provider call and
+        # consume no fetch budget. Off by default so every base run is cold.
+        return _env_bool("SPIDER_QWEN_PAGE_CACHE_ENABLED", self.data.get("page_cache", {}).get("enabled", False))
+
+    def page_cache_ttl_seconds(self) -> int:
+        raw = os.getenv("SPIDER_QWEN_PAGE_CACHE_TTL_SECONDS")
+        if raw is not None:
+            try:
+                return int(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"SPIDER_QWEN_PAGE_CACHE_TTL_SECONDS={raw!r} is not an "
+                    "integer number of seconds."
+                ) from exc
+        return int(self.data.get("page_cache", {}).get("ttl_seconds", 86400))
+
     def frontier_enabled(self) -> bool:
         # Frontier gather (flagged): queries and 1-hop page links compete on
         # one scored priority queue instead of fixed search->fetch gulps. Off

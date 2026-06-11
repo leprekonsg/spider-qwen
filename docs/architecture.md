@@ -42,7 +42,13 @@ keyword classifier is low-confidence. Both fail back to local behavior.
    (same-domain contact pages, directory entries) and follow-up queries for
    ungrounded vendors re-enter as scored leads, within the same budget caps.
    Qwen may re-score pending leads (`QWEN_FRONTIER_SCORER_ENABLED`); deltas are
-   clamped and reorder-only.
+   clamped and reorder-only. With `SPIDER_QWEN_PAGE_CACHE_ENABLED=1`, a
+   cross-run read-through cache (`tools/page_cache.py`, canonical-URL keyed,
+   TTL-bounded) serves repeat pages without a provider call or fetch budget;
+   only ok-classified pages are cached. Every fetch outcome is classified
+   (`tools/fetch_failures.py`: ok / bot_wall / js_shell / geo_block / empty /
+   thin / dead_link / transport_error) and the histogram lands in run metrics
+   as `fetch_outcomes`, so a starved live run reports why it starved.
 4. **Rank + validate** — per-mode ranker scores; `_is_validated` applies the
    mode contract + `evidence_completeness_threshold`.
 5. **Global fallback** — if validated < `min_validated_candidates` and budget
