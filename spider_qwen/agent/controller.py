@@ -19,6 +19,15 @@ from urllib.parse import urlparse
 from .budget import Budget, BudgetExceeded, BudgetTracker, StopReason
 from .compiler import LLMCompiler, NullRateLimiter, RateLimiter, ToolNode
 from .execution_context import ExecutionContext, new_run_id
+from .frontier import (
+    Frontier,
+    Lead,
+    apply_scorer_deltas,
+    entity_query_lead,
+    leads_from_search_results,
+    link_leads_from_page,
+    rank_leads,
+)
 from .planner import Planner
 from .policy import Policy, load_policy
 from ..api.schema import Classification, RunResult
@@ -138,6 +147,7 @@ class Controller:
             or self.policy.qwen_nli_enabled()
             or self.policy.qwen_query_rewriter_enabled()
             or self.policy.qwen_rfq_drafter_enabled()
+            or self.policy.qwen_frontier_scorer_enabled()
         ):
             self.policy.validate_model_ids()
         self.qwen_router = qwen_router
@@ -203,6 +213,22 @@ class Controller:
 
                 self.qwen_rfq_drafter = QwenRfqDrafter(
                     model=self.policy.qwen_rfq_drafter_model())
+        # Frontier gather (flagged): score-before-fetch priority queue with
+        # 1-hop link insertion. The linear gather path stays the default.
+        self.frontier_enabled = self.policy.frontier_enabled()
+        # Frontier re-scoring seam: Qwen proposes clamped per-lead deltas;
+        # the deterministic frontier keeps admission authority.
+        self.qwen_frontier_scorer = None
+        if self.policy.qwen_frontier_scorer_enabled():
+            if self.offline:
+                from .qwen_frontier_scorer import MockQwenFrontierScorer
+
+                self.qwen_frontier_scorer = MockQwenFrontierScorer()
+            else:
+                from .qwen_frontier_scorer import QwenFrontierScorer
+
+                self.qwen_frontier_scorer = QwenFrontierScorer(
+                    model=self.policy.qwen_frontier_scorer_model())
         self.memory_mcp = memory_mcp
         if self.memory_mcp is None and self.state_dir is not None:
             # ONE SemanticMemory instance serves recall, promotion, and citation
@@ -481,7 +507,8 @@ class Controller:
         # long-lived controller from double-counting across runs.
         for client in (self.qwen_json_extractor, self.qwen_router,
                        getattr(self.minicheck, "model", None),
-                       self.qwen_query_rewriter, self.qwen_rfq_drafter):
+                       self.qwen_query_rewriter, self.qwen_rfq_drafter,
+                       self.qwen_frontier_scorer):
             drain = getattr(client, "drain_usage", None)
             if callable(drain):
                 for model, in_tok, out_tok in drain():
@@ -548,6 +575,7 @@ class Controller:
                 ],
                 "crag_verdict": crag.verdict,
                 "crag_confidence": crag.confidence,
+                "frontier": ctx.metadata.get("frontier", {"enabled": False}),
                 "corrective_searches": corrective_searches,
                 "pages_rejected": fetch.rejected,
                 "pages_flagged": fetch.flagged,
@@ -701,11 +729,138 @@ class Controller:
                     "queries": queries[:12]},
         )
         location = None if region == "global" else self.geo.location_code(target_country)
+        if self.frontier_enabled:
+            return await self._gather_frontier(
+                ctx, route, queries, search, fetch,
+                location=location, target_country=target_country,
+                reserve_search_calls=reserve_search_calls, pages_out=pages_out,
+            )
         return await self._gather_queries(
             ctx, route, queries, search, fetch,
             location=location, target_country=target_country,
             reserve_search_calls=reserve_search_calls, pages_out=pages_out,
         )
+
+    async def _gather_frontier(
+        self,
+        ctx: ExecutionContext,
+        route: RoutePlan,
+        queries: list[str],
+        search: SearchService,
+        fetch: FetchService,
+        *,
+        location: str | None,
+        target_country: str | None,
+        reserve_search_calls: int = 0,
+        pages_out: list | None = None,
+    ) -> list:
+        """Flagged frontier gather: one scored priority queue of queries and URLs,
+        drained best-first within the same budget caps as the linear path.
+
+        Each round: pop query leads -> search -> SERP results enter as scored
+        url leads; pop the best url leads -> fetch/extract; 1-hop page links
+        (same-domain contact pages, directory entries) re-enter the queue and
+        compete on score. Stops on empty queue, budget caps, or MAX_ROUNDS.
+        """
+        from .frontier import MAX_ROUNDS, SCORE_FLOOR
+
+        priors = self.policy.source_reliability()
+        target_cc = self.geo.location_code(target_country)
+        frontier = Frontier()
+        for i, q in enumerate(queries):
+            frontier.add(Lead(kind="query", value=q, provenance="template",
+                              score=max(SCORE_FLOOR, 0.5 - 0.01 * i)))
+
+        candidates: list = []
+        rounds = 0
+        link_leads_inserted = 0
+        entity_leads_inserted = 0
+        scorer_moved = 0
+        while rounds < MAX_ROUNDS and not ctx.tracker.runtime_exceeded():
+            rounds += 1
+            n_search = max(0, ctx.tracker.remaining_search_calls() - reserve_search_calls)
+            query_leads = frontier.pop("query", n_search)
+            if query_leads:
+                results = await self._collect_search_results(
+                    ctx, [l.value for l in query_leads], search,
+                    location=location, reserve_search_calls=reserve_search_calls,
+                )
+                for lead in leads_from_search_results(
+                    results, query=ctx.query, priors=priors, target_cc=target_cc,
+                ):
+                    frontier.add(lead)
+
+            scorer_moved += self._qwen_rescore_frontier(ctx, frontier)
+
+            can_extract = ctx.tracker.budget.max_candidates_to_extract - ctx.tracker.candidates_extracted
+            can_fetch = ctx.tracker.budget.max_fetch_urls - ctx.tracker.fetch_urls
+            url_leads = frontier.pop("url", min(can_extract, can_fetch))
+            if not query_leads and not url_leads:
+                break
+            if not url_leads:
+                continue
+            ctx.tracer.record(
+                step="frontier_drain", tool="frontier", status="success",
+                input_count=len(url_leads), output_count=len(url_leads),
+                detail={"round": rounds,
+                        "leads": [{"url": l.value, "score": l.score, "provenance": l.provenance,
+                                   "depth": l.depth} for l in url_leads[:8]]},
+            )
+            round_pages: list = []
+            candidates.extend(await self._fetch_and_extract(
+                ctx, route, [l.value for l in url_leads], fetch, target_country, round_pages,
+            ))
+            if pages_out is not None:
+                pages_out.extend(round_pages)
+            for page in round_pages:
+                frontier.mark_seen(Lead(kind="url", value=page.final_url or page.url))
+                for lead in link_leads_from_page(page, query=ctx.query, priors=priors, target_cc=target_cc):
+                    link_leads_inserted += frontier.add(lead)
+            entity_leads_inserted += self._insert_entity_query_leads(frontier, candidates, target_country)
+
+        stats = {
+            "enabled": True, "rounds": rounds,
+            "link_leads_inserted": link_leads_inserted,
+            "entity_query_leads_inserted": entity_leads_inserted,
+            "pending_at_stop": frontier.pending(),
+            **frontier.stats,
+        }
+        if scorer_moved:
+            stats["qwen_scorer_moved"] = scorer_moved
+        ctx.metadata["frontier"] = stats
+        return dedupe_candidates(candidates)
+
+    def _qwen_rescore_frontier(self, ctx: ExecutionContext, frontier: Frontier) -> int:
+        """Stage-3 seam (off unless QWEN_FRONTIER_SCORER_ENABLED): Qwen proposes
+        per-lead deltas, the frontier clamps and applies them. Reorder only."""
+        if self.qwen_frontier_scorer is None:
+            return 0
+        leads = frontier.url_leads()
+        if not leads:
+            return 0
+        try:
+            deltas = self.qwen_frontier_scorer(ctx.query, [(l.value, l.score, l.provenance) for l in leads])
+        except Exception as exc:
+            ctx.tracer.record(step="frontier_rescore", tool="qwen_frontier_scorer",
+                              status="error", error=str(exc))
+            return 0
+        moved = apply_scorer_deltas(leads, deltas)
+        if moved:
+            ctx.tracer.record(step="frontier_rescore", tool="qwen_frontier_scorer",
+                              status="success", input_count=len(leads), output_count=moved)
+        return moved
+
+    def _insert_entity_query_leads(self, frontier: Frontier, candidates: list, target_country: str | None) -> int:
+        """Vendors we extracted but could not ground a quote channel for earn a
+        targeted follow-up query lead (depth 1)."""
+        inserted = 0
+        for cand in candidates:
+            if not isinstance(cand, ServiceCandidate) or cand.quote_channel is not None:
+                continue
+            if not cand.vendor_name or cand.vendor_name == "Unknown Vendor":
+                continue
+            inserted += frontier.add(entity_query_lead(cand.vendor_name, target_country))
+        return inserted
 
     async def _gather_queries(
         self,
@@ -725,9 +880,10 @@ class Controller:
         Candidates always match against the buyer's original query (``ctx.query``),
         even when ``queries`` are expanded/corrective variants.
         """
-        urls = await self._collect_search_urls(
+        results = await self._collect_search_results(
             ctx, queries, search, location=location, reserve_search_calls=reserve_search_calls,
         )
+        urls = self._prioritize_fetch_urls(ctx, results, target_country)
         return await self._fetch_and_extract(ctx, route, urls, fetch, target_country, pages_out)
 
     async def gather_parallel(
@@ -747,10 +903,30 @@ class Controller:
         Used by the width-first GRAM-lite mode (T-3.3). Work is capped to the
         remaining search/fetch budget and rate-limited by token buckets.
         """
-        urls = await self._collect_search_urls(ctx, queries, search, location=location)
+        results = await self._collect_search_results(ctx, queries, search, location=location)
+        urls = self._prioritize_fetch_urls(ctx, results, target_country)
         return await self._fetch_and_extract(ctx, route, urls, fetch, target_country, pages_out)
 
-    async def _collect_search_urls(
+    def _prioritize_fetch_urls(self, ctx: ExecutionContext, results: list, target_country: str | None) -> list[str]:
+        """Order SERP results by fetch-worthiness before any budget is spent.
+
+        The snippet/title the SERP already paid for prices each fetch:
+        reliability prior + term overlap + geo TLD. Ties keep discovery order
+        (stable sort), so equal-scored results behave as before.
+        """
+        leads = rank_leads(leads_from_search_results(
+            results, query=ctx.query, priors=self.policy.source_reliability(),
+            target_cc=self.geo.location_code(target_country),
+        ))
+        if leads:
+            ctx.tracer.record(
+                step="frontier_score", tool="frontier", status="success",
+                input_count=len(leads), output_count=len(leads),
+                detail={"top": [{"url": l.value, "score": l.score} for l in leads[:5]]},
+            )
+        return [l.value for l in leads]
+
+    async def _collect_search_results(
         self,
         ctx: ExecutionContext,
         queries: list[str],
@@ -758,8 +934,9 @@ class Controller:
         *,
         location: str | None,
         reserve_search_calls: int = 0,
-    ) -> list[str]:
-        """Run one or many search queries; return deduped URLs in discovery order."""
+    ) -> list:
+        """Run one or many search queries; return URL-deduped SearchResults in
+        discovery order (titles/snippets kept for pre-fetch scoring)."""
         max_searches = ctx.tracker.remaining_search_calls()
         if reserve_search_calls:
             max_searches = max(0, max_searches - reserve_search_calls)
@@ -767,16 +944,16 @@ class Controller:
         if not budgeted:
             return []
 
-        urls: list[str] = []
+        collected: list = []
         seen: set[str] = set()
 
         def _add(result_set) -> None:
             if result_set is None:
                 return
-            for u in result_set.urls():
-                if u not in seen:
-                    seen.add(u)
-                    urls.append(u)
+            for r in result_set.results:
+                if r.url not in seen:
+                    seen.add(r.url)
+                    collected.append(r)
 
         if len(budgeted) == 1:
             if ctx.tracker.can_search():
@@ -784,7 +961,7 @@ class Controller:
                     _add(await search.search(budgeted[0], location=location))
                 except BudgetExceeded:
                     pass
-            return urls
+            return collected
 
         def _search_node(q: str):
             async def run(_dep):
@@ -801,7 +978,7 @@ class Controller:
         results, _trace = await self.compiler.execute(nodes, tracer=ctx.tracer)
         for rs in results.values():
             _add(rs)
-        return urls
+        return collected
 
     async def _fetch_and_extract(
         self,

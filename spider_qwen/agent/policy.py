@@ -131,6 +131,7 @@ class Policy:
             ("qwen_nli_model", self.qwen_nli_model),
             ("qwen_query_rewriter_model", self.qwen_query_rewriter_model),
             ("qwen_rfq_drafter_model", self.qwen_rfq_drafter_model),
+            ("qwen_frontier_scorer_model", self.qwen_frontier_scorer_model),
         ):
             try:
                 resolved[source] = getter()
@@ -250,6 +251,24 @@ class Policy:
             os.getenv("QWEN_RFQ_DRAFTER_MODEL")
             or str(self.data.get("qwen", {}).get("rfq_drafter_model") or "")
             or self.model_for("planner")
+        )
+
+    def frontier_enabled(self) -> bool:
+        # Frontier gather (flagged): queries and 1-hop page links compete on
+        # one scored priority queue instead of fixed search->fetch gulps. Off
+        # by default; the linear gather path stays the v1 default.
+        return _env_bool("SPIDER_QWEN_FRONTIER_ENABLED", self.data.get("frontier", {}).get("enabled", False))
+
+    def qwen_frontier_scorer_enabled(self) -> bool:
+        # Qwen proposes per-lead score deltas; the deterministic frontier
+        # clamps them (+/- MAX_SCORER_DELTA) and keeps admission authority.
+        return _env_bool("QWEN_FRONTIER_SCORER_ENABLED", self.data.get("qwen", {}).get("frontier_scorer_enabled", False))
+
+    def qwen_frontier_scorer_model(self) -> str:
+        return (
+            os.getenv("QWEN_FRONTIER_SCORER_MODEL")
+            or str(self.data.get("qwen", {}).get("frontier_scorer_model") or "")
+            or "qwen-flash"
         )
 
     def verification_enabled(self) -> bool:

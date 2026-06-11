@@ -35,6 +35,14 @@ keyword classifier is low-confidence. Both fail back to local behavior.
    supplies the `Budget`.
 3. **Gather (SEA-first)** — build geo query templates, `search` within budget,
    `fetch` candidate URLs, run extractors, build candidates with `EvidenceRef`s.
+   SERP results are fetched in pre-fetch-score order (`agent/frontier.py`:
+   source-reliability prior + query-term overlap + geo TLD), not discovery
+   order. With `SPIDER_QWEN_FRONTIER_ENABLED=1` (on in `--judged-demo`) the
+   gather becomes a drain loop over one priority queue: 1-hop page links
+   (same-domain contact pages, directory entries) and follow-up queries for
+   ungrounded vendors re-enter as scored leads, within the same budget caps.
+   Qwen may re-score pending leads (`QWEN_FRONTIER_SCORER_ENABLED`); deltas are
+   clamped and reorder-only.
 4. **Rank + validate** — per-mode ranker scores; `_is_validated` applies the
    mode contract + `evidence_completeness_threshold`.
 5. **Global fallback** — if validated < `min_validated_candidates` and budget

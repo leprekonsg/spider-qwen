@@ -83,6 +83,18 @@ qwen:
   # contradicts-ledger) and reject/flag low-trust pages before the ledger persists.
   # Heuristic + offline by default; off so the base offline pipeline is unchanged.
   page_judge_enabled: false
+  # Frontier re-scoring seam: Qwen proposes per-lead score deltas over the
+  # gather frontier; the deterministic side clamps them (+/- 0.2) and keeps
+  # admission authority. Env QWEN_FRONTIER_SCORER_ENABLED. Needs frontier.enabled.
+  frontier_scorer_enabled: false
+
+frontier:
+  # Frontier gather: queries and 1-hop page links (same-domain contact pages,
+  # directory entries) compete on one scored priority queue; the fetch budget
+  # is drained best-first instead of in SERP discovery order. Same budget caps
+  # as the linear path. Env SPIDER_QWEN_FRONTIER_ENABLED. Off by default; the
+  # judged-demo profile enables it.
+  enabled: false
 
 verification:
   # T-2.2 verification spine: atomic decomposition -> MiniCheck entailment ->

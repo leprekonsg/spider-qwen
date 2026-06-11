@@ -133,7 +133,10 @@ Opt-in modes (default `run` output is unchanged):
 spider-qwen run "find a replacement for an obsolete Hirose DF13-6P-1.25DSA, deliver to Singapore in 14 days" --offline --serendipity
 # Multi-trajectory reasoning spine (PPRM winner selection -> ReasoningResult)
 spider-qwen run "NE5532 substitute" --offline --reason
-# Judged demo profile: Qwen extraction + verification/trust surfaces + S1/S2/S3
+# Frontier gather: queries + 1-hop page links compete on one scored priority
+# queue; fetch budget is drained best-first instead of SERP discovery order
+SPIDER_QWEN_FRONTIER_ENABLED=1 spider-qwen run "office cleaning Singapore" --offline
+# Judged demo profile: Qwen extraction + verification/trust surfaces + S1/S2/S3 + frontier
 spider-qwen run "office cleaning Singapore" --offline --judged-demo
 # Cost router: high-risk forces the decision step to the max-tier model
 spider-qwen run "obsolete connector substitute" --offline --high-risk
@@ -194,6 +197,19 @@ Opt-in layers (dotted) leave the default pipeline unchanged: `--reason` runs the
 multi-trajectory reasoning spine, `--serendipity` runs the discovery sidecar over
 the run's ledger, and the cost router records routing plus token-metering status.
 
+The gather phase has two interchangeable strategies. The default linear path
+searches, then fetches SERP results in discovery order. The flagged frontier
+path (`SPIDER_QWEN_FRONTIER_ENABLED=1`, on in `--judged-demo`) prices every
+fetch before spending it: SERP results, same-domain contact pages, and
+directory entries (1-hop links from fetched pages) compete on one priority
+queue scored by source-reliability prior + query-term overlap + geo TLD, and
+the same budget caps are drained best-first. A directory page listing many
+vendors becomes many leads instead of one weak candidate, and a vendor whose
+quote channel could not be grounded earns a targeted follow-up query.
+Optionally Qwen re-scores pending leads (`QWEN_FRONTIER_SCORER_ENABLED=1`);
+its deltas are clamped to ±0.2 and it can reorder leads but never admit or
+remove them — the proposes/verifies split, applied to search planning.
+
 ## Procurement modes
 
 | Mode | When | Output |
@@ -231,6 +247,9 @@ Selected via env or injection; both abstracted behind protocols.
 | `QWEN_NLI_MODEL` | verified DashScope model id | `qwen-flash` |
 | `QWEN_QUERY_REWRITER_ENABLED` | `0` · `1` (CRAG corrective pivot queries) | `0` |
 | `QWEN_RFQ_DRAFTER_ENABLED` | `0` · `1` (Qwen RFQ body + deterministic fact-check) | `0` |
+| `SPIDER_QWEN_FRONTIER_ENABLED` | `0` · `1` (score-before-fetch frontier gather) | `0` |
+| `QWEN_FRONTIER_SCORER_ENABLED` | `0` · `1` (Qwen re-scores frontier leads, clamped) | `0` |
+| `QWEN_FRONTIER_SCORER_MODEL` | verified DashScope model id | `qwen-flash` |
 | `SPIDER_QWEN_CONFORMAL_CALIBRATION` | path to hand-graded calibration JSON | unset (gate never blocks; metrics state no guarantee) |
 | `SPIDER_QWEN_STH_PUBLIC_KEY` | Ed25519 public-key trust anchor for evidence proofs | unset |
 | `SPIDER_QWEN_STH_PUBLIC_KEY_FILE` | file containing the same public-key anchor | unset |

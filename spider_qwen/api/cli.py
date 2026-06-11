@@ -582,7 +582,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Discovery sidecar: populate S1/S2/S3 from real components (graph/Wayback/signals/DMSMS); default run is unchanged")
     p_run.add_argument("--qwen-json", action="store_true", help="Enable mocked Qwen JSON extraction when used with --offline")
     p_run.add_argument("--judged-demo", action="store_true", default=False,
-                       help="Enable the opt-in judged-demo profile: Qwen extraction, verification/trust surfaces, and S1/S2/S3 sidecar")
+                       help="Enable the opt-in judged-demo profile: Qwen extraction, verification/trust surfaces, S1/S2/S3 sidecar, and frontier gather")
     p_run.add_argument("--require-review", action="store_true", default=None, help="Persist HITL review gates for this run")
     p_run.set_defaults(func=_cmd_run)
 
@@ -656,6 +656,8 @@ def _apply_judged_demo_profile(args: argparse.Namespace) -> dict[str, str | None
         "QWEN_NLI_ENABLED": "1",
         "QWEN_QUERY_REWRITER_ENABLED": "1",
         "QWEN_RFQ_DRAFTER_ENABLED": "1",
+        "SPIDER_QWEN_FRONTIER_ENABLED": "1",
+        "QWEN_FRONTIER_SCORER_ENABLED": "1",
     }
     prior = {name: os.environ.get(name) for name in names}
     for name, value in names.items():
