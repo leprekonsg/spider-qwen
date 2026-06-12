@@ -146,10 +146,12 @@ function VendorDetail({ vendor, onClose, onDraft }) {
                   {vendor.quoteType || "channel"} · evidence · {vendor.evidence[0] || "—"} · sha256:{vendor.sha}
                 </div>
               </div>
+              {/* "evidenced", not "verified": claim-level verification lives in
+                  the trust verdict below; this chip only says evidence exists. */}
               <span className="sq-mono-chip" style={{
                 color: vendor.quoteType ? "#A6BB87" : "var(--sq-smoke)",
                 borderColor: vendor.quoteType ? "rgba(122,140,94,0.5)" : "var(--sq-border-strong)",
-              }}>{vendor.quoteType ? "verified" : "none"}</span>
+              }}>{vendor.quoteType ? "evidenced" : "none"}</span>
             </div>
           </section>
 

@@ -15,6 +15,7 @@ Setup (skipped automatically when anything is missing):
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import threading
@@ -139,6 +140,59 @@ def test_vendor_dossier_shows_trust_verdict_and_proof_backed_ledger(page, server
     statuses = dossier_ledger.get_by_text("proven").or_(dossier_ledger.get_by_text("recorded"))
     pw_sync.expect(statuses.first).to_be_visible(timeout=5_000)
     assert dossier_ledger.get_by_text("verified", exact=True).count() == 0
+    assert page.errors == []
+
+
+@pytest.fixture(scope="module")
+def run_payload(server_url):
+    """One real offline RunResult, replayed by the route-interception tests."""
+    import httpx
+
+    resp = httpx.post(
+        f"{server_url}/run",
+        json={"query": "pest control services for office building Singapore"},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def test_instant_result_streams_ledger_without_crash(page, server_url, run_payload):
+    """A /run that resolves before the theatre window ends must not crash.
+
+    Regression: the evidence ticker read ``led[shown]`` inside the React state
+    updater, which runs after ``shown += 1`` -- the final tick pushed
+    ``undefined`` and HuntInProgress threw on ``e.id``. Six ledger rows at
+    240ms/row exhaust the ticker inside the ~2.9s theatre window, hitting the
+    exact tick the old code crashed on.
+    """
+    payload = dict(run_payload)
+    payload["evidence_refs"] = payload["evidence_refs"][:6]
+    page.route("**/run", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(payload)))
+    page.goto(server_url)
+    page.get_by_role("button", name="Begin hunt").click()
+    _expect(page.get_by_text("stop ·"), timeout=HUNT_TIMEOUT_MS)
+    assert page.errors == []
+
+
+def test_slow_result_still_commits_after_theatre_window(page, server_url, run_payload):
+    """A run that lands long after the theatre window must still commit.
+
+    Regression: finalize() stopped polling after a 12s ceiling, stranding the
+    hunt screen forever on live runs (which take minutes). 16s clears the old
+    ceiling plus the theatre window.
+    """
+    body = json.dumps(run_payload)
+
+    def slow(route):
+        time.sleep(16)
+        route.fulfill(status=200, content_type="application/json", body=body)
+
+    page.route("**/run", slow)
+    page.goto(server_url)
+    page.get_by_role("button", name="Begin hunt").click()
+    _expect(page.get_by_text("stop ·"), timeout=40_000)
     assert page.errors == []
 
 

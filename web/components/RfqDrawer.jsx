@@ -101,7 +101,10 @@ function RfqDrawer({ vendor, draft, onClose }) {
                 {qc.type} · evidence · {qc.evidence_ref ? qc.evidence_ref.ledger_id : "—"} · sha256:{qc.evidence_ref ? (qc.evidence_ref.snippet_hash || "").slice(0, 6) : "------"}
               </div>
             </div>
-            <span className="sq-mono-chip" style={{ color: "#A6BB87", borderColor: "rgba(122,140,94,0.5)" }}>verified</span>
+            <span className="sq-mono-chip" style={qc.evidence_ref
+              ? { color: "#A6BB87", borderColor: "rgba(122,140,94,0.5)" }
+              : { color: "var(--sq-smoke)", borderColor: "var(--sq-border-strong)" }
+            }>{qc.evidence_ref ? "evidenced" : "unsourced"}</span>
           </div>
         </section>
       )}

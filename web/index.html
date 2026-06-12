@@ -154,19 +154,23 @@
         const led = resultRef.current && resultRef.current.ledger;
         if (!led) return;
         if (shown >= led.length) { clearInterval(evId); return; }
-        setEvidence(prev => [led[shown], ...prev]);
+        // Read the item now: the state updater runs after `shown` increments,
+        // so `led[shown]` inside it would skip rows and push undefined at the end.
+        const item = led[shown];
         shown += 1;
+        setEvidence(prev => [item, ...prev]);
       }, 240 * speed);
       intervalsRef.current.push(evId);
 
       // Finalise once the window elapsed AND the result is ready.
-      const finalize = (waited) => {
+      const finalize = () => {
         if (error) return;
         if (resultRef.current) return commitResult(resultRef.current);
-        if (waited > 12000) return;                 // hard ceiling; failRun handles errors
-        push(setTimeout(() => finalize(waited + 200), 200));
+        // Keep polling until the run lands: live runs take minutes. The fetch
+        // rejecting (failRun) or the user halting clears this timer chain.
+        push(setTimeout(finalize, 200));
       };
-      push(setTimeout(() => finalize(0), D + 300));
+      push(setTimeout(finalize, D + 300));
     }
 
     function commitResult(v) {
