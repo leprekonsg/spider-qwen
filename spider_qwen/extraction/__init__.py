@@ -12,7 +12,7 @@ from .quote_channel import QuoteChannelExtractor, QuoteChannelMatch
 from .contact import ContactExtractor, ContactMatch
 from .vendor_metadata import VendorMetadataExtractor, VendorMetadata
 from .service_match import ServiceMatchExtractor, ServiceMatchResult
-from .dedupe import dedupe_candidates
+from .dedupe import dedupe_candidates, normalize_vendor_name
 
 __all__ = [
     "PricingExtractor",
@@ -26,4 +26,5 @@ __all__ = [
     "ServiceMatchExtractor",
     "ServiceMatchResult",
     "dedupe_candidates",
+    "normalize_vendor_name",
 ]

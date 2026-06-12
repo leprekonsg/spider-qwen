@@ -127,19 +127,43 @@ def test_reasoning_trace_surfaces_queries(capsys, tmp_path, monkeypatch):
 # --- bounded verification replan ---------------------------------------------------
 
 class _TwoResultSearch:
-    """Mock search capped at 2 results so extraction budget remains for replan."""
+    """Mock search returning 3 fixed vendor URLs for any query.
+
+    Fixed URLs (not slug-based) ensure URL-level dedup collapses all search
+    calls to exactly 3 unique pages, keeping candidates_extracted well under
+    max_candidates_to_extract=10. Three distinct vendor domains also ensure
+    min_validated_candidates=3 is met from SEA gather alone, so the geo-fallback
+    does not consume the reserved search call — leaving budget for the replan.
+    """
 
     provider_name = "mock"
     search_source_tool = "mock"
     rate_limited = False
 
-    def __init__(self) -> None:
-        from spider_qwen.tools.search_service import MockSearchProvider
+    _VENDORS = [
+        {"url": "https://example-vendor-1.sg/cleaning",
+         "title": "Example Vendor 1 Pte Ltd - office cleaning Singapore",
+         "snippet": "Provider 1 for office cleaning Singapore. Request a quotation via our contact page."},
+        {"url": "https://example-vendor-2.sg/cleaning",
+         "title": "Example Vendor 2 Pte Ltd - office cleaning Singapore",
+         "snippet": "Provider 2 for office cleaning Singapore. Request a quotation via our contact page."},
+        {"url": "https://example-vendor-3.sg/cleaning",
+         "title": "Example Vendor 3 Pte Ltd - office cleaning Singapore",
+         "snippet": "Provider 3 for office cleaning Singapore. Request a quotation via our contact page."},
+    ]
 
-        self._inner = MockSearchProvider()
+    def __init__(self) -> None:
+        pass
 
     async def search(self, query, location, language, limit):
-        return await self._inner.search(query, location, language, min(limit, 2))
+        from spider_qwen.tools.provider_types import SearchResult, SearchResultSet
+        results = [
+            SearchResult(url=v["url"], title=v["title"], snippet=v["snippet"],
+                         rank=i, source_tool="mock")
+            for i, v in enumerate(self._VENDORS)
+        ]
+        return SearchResultSet(query=query, location=location, provider="mock",
+                               results=results, total_results=len(results))
 
 
 def test_replan_runs_exactly_one_bounded_round(monkeypatch):

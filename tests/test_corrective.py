@@ -61,9 +61,18 @@ def test_evaluate_empty_pages_has_no_assessments():
 
 
 def test_corrective_queries_broker_first():
+    # Broker-first pivot only fires for electronics_substitution mode; the query
+    # is an electronics connector obsolescence search so the mode is appropriate.
     v = CorrectiveVerdict(verdict="incorrect", confidence=0.0, mean_relevance=0.0)
-    qs = corrective_queries("obsolete DF13 connector", v)
+    qs = corrective_queries("obsolete DF13 connector", v, mode="electronics_substitution")
     assert qs and qs[0].kind == "broker_operator"
+
+
+def test_corrective_queries_step_back_first_for_service_mode():
+    # For non-electronics modes corrective pivots degrade gracefully to step_back.
+    v = CorrectiveVerdict(verdict="incorrect", confidence=0.0, mean_relevance=0.0)
+    qs = corrective_queries("pest control services Singapore", v, mode="service_quote_required")
+    assert qs and qs[0].kind == "step_back"
 
 
 def test_controller_irrelevant_pages_trigger_broker_pivot():

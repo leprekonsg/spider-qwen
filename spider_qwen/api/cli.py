@@ -44,11 +44,17 @@ def _state_dir() -> str:
 
 
 def _build_controller(args: argparse.Namespace) -> Controller:
+    if getattr(args, "judged_demo", False):
+        # env wins: _apply_judged_demo_profile already ran setdefault, so the
+        # post-setdefault env value is authoritative for both surfaces.
+        verify: bool | None = True if _env_true("SPIDER_QWEN_VERIFICATION_ENABLED") else None
+    else:
+        verify = None
     return build_controller(
         offline=getattr(args, "offline", False),
         state_dir=_state_dir(),
         qwen_json=getattr(args, "qwen_json", False),
-        verify=True if getattr(args, "judged_demo", False) else None,
+        verify=verify,
         require_review=getattr(args, "require_review", None),
     )
 
@@ -714,7 +720,6 @@ def _env_true(name: str) -> bool:
 
 def _apply_judged_demo_profile(args: argparse.Namespace) -> dict[str, str | None]:
     """Opt into demo-facing Qwen/trust features without changing v1 defaults."""
-    args.qwen_json = True
     args.serendipity = True
     names = {
         "QWEN_STRUCTURED_EXTRACTION_ENABLED": "1",
@@ -739,6 +744,9 @@ def _apply_judged_demo_profile(args: argparse.Namespace) -> dict[str, str | None
                 "overrides the profile; this surface stays disabled.",
                 file=sys.stderr,
             )
+    # Derive args.qwen_json from the post-setdefault env so an explicit
+    # QWEN_STRUCTURED_EXTRACTION_ENABLED=0 disables the extractor build flag.
+    args.qwen_json = _env_true("QWEN_STRUCTURED_EXTRACTION_ENABLED")
     return prior
 
 

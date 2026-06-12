@@ -38,7 +38,7 @@ from ..evidence.models import EvidenceRef, sha256_hex, utc_now_iso
 from ..evidence.verifier import VerificationSpine
 from ..verification.minicheck import MiniCheck, value_grounded
 from ..extraction.contact import ContactExtractor
-from ..extraction.dedupe import dedupe_candidates
+from ..extraction.dedupe import dedupe_candidates, normalize_vendor_name
 from ..extraction.pricing import PricingExtractor, PricingResult
 from ..extraction.quote_channel import QuoteChannelExtractor, QuoteChannelMatch
 from ..extraction.service_match import ServiceMatchExtractor
@@ -403,6 +403,7 @@ class Controller:
             reserve_search_calls=1 if budget.max_search_calls > 1 else 0, pages_out=sea_pages,
             queries_out=initial_queries,
         )
+        candidates, _sea_merges = dedupe_candidates(candidates)
         candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
         ranker = self._rankers[route.ranker]
         ranked = ranker.rank(candidates)
@@ -446,7 +447,7 @@ class Controller:
                 more = await self._gather(
                     ctx, route, query, search, fetch, region="global", target_country=target_country
                 )
-            candidates = dedupe_candidates(candidates + more)
+            candidates, _fb_merges = dedupe_candidates(candidates + more)
             candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
             ranked = ranker.rank(candidates)
             validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
@@ -485,7 +486,7 @@ class Controller:
                     ctx, route, replan_queries, search, fetch,
                     location=None, target_country=target_country, pages_out=sea_pages,
                 )
-                candidates = dedupe_candidates(candidates + more)
+                candidates, _rp_merges = dedupe_candidates(candidates + more)
                 candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
                 ranked = ranker.rank(candidates)
                 validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
@@ -933,7 +934,8 @@ class Controller:
                 stats["qwen_scorer_moved"] = merged_moved
             stats["gathers"] = prev.get("gathers", 1) + 1
         ctx.metadata["frontier"] = stats
-        return dedupe_candidates(candidates)
+        deduped, _frontier_merges = dedupe_candidates(candidates)
+        return deduped
 
     def _qwen_rescore_frontier(self, ctx: ExecutionContext, frontier: Frontier) -> int:
         """Stage-3 seam (off unless QWEN_FRONTIER_SCORER_ENABLED): Qwen proposes
@@ -2040,14 +2042,9 @@ def _span_for_match(text: str, matched_text: str, fallback_terms: list[str] | No
 
 
 def _same_vendor(a: str, b: str) -> bool:
-    left = _normal_vendor(a)
-    right = _normal_vendor(b)
+    left = normalize_vendor_name(a)
+    right = normalize_vendor_name(b)
     return bool(left and right and (left in right or right in left))
-
-
-def _normal_vendor(name: str) -> str:
-    stop = {"pte", "ltd", "sdn", "bhd", "llc", "inc", "co", "company", "team"}
-    return " ".join(t for t in re.sub(r"[^a-z0-9 ]", " ", (name or "").lower()).split() if t not in stop)
 
 
 def _quote_type_from_memory(value: str):

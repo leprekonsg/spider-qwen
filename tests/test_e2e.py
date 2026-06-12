@@ -275,6 +275,115 @@ def test_offline_judged_demo_builds_no_live_qwen_clients(tmp_path, monkeypatch):
     assert controller.verify_claims is True  # the trust surface itself stays on
 
 
+# --- regression: env wins over --judged-demo build flags ---------------------
+
+def test_judged_demo_env_zero_disables_structured_extraction(tmp_path, monkeypatch):
+    # Regression: QWEN_STRUCTURED_EXTRACTION_ENABLED=0 must win over the profile.
+    # Before the fix, _apply_judged_demo_profile set args.qwen_json=True
+    # unconditionally, so the extractor was built regardless of the env var.
+    import argparse
+
+    from spider_qwen.api.cli import _apply_judged_demo_profile, _build_controller, _restore_env
+
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("QWEN_STRUCTURED_EXTRACTION_ENABLED", "0")
+    for name in (
+        "QWEN_ROUTER_FALLBACK_ENABLED",
+        "QWEN_PAGE_JUDGE_ENABLED",
+        "SPIDER_QWEN_VERIFICATION_ENABLED",
+        "QWEN_NLI_ENABLED",
+        "QWEN_QUERY_REWRITER_ENABLED",
+        "QWEN_RFQ_DRAFTER_ENABLED",
+        "SPIDER_QWEN_FRONTIER_ENABLED",
+        "QWEN_FRONTIER_SCORER_ENABLED",
+        "SPIDER_QWEN_PAGE_CACHE_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    args = argparse.Namespace(offline=True, judged_demo=True, qwen_json=False,
+                              serendipity=False, require_review=None)
+    prior = _apply_judged_demo_profile(args)
+    try:
+        controller = _build_controller(args)
+    finally:
+        _restore_env(prior)
+
+    # env var explicitly set to 0 -> args.qwen_json must be False -> no extractor
+    assert args.qwen_json is False
+    assert controller.qwen_json_extractor is None
+
+
+def test_judged_demo_env_zero_disables_verification(tmp_path, monkeypatch):
+    # Regression: SPIDER_QWEN_VERIFICATION_ENABLED=0 must win over the profile.
+    # Before the fix, _build_controller hard-coded verify=True whenever
+    # judged_demo was set, bypassing the env var entirely.
+    import argparse
+
+    from spider_qwen.api.cli import _apply_judged_demo_profile, _build_controller, _restore_env
+
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("SPIDER_QWEN_VERIFICATION_ENABLED", "0")
+    for name in (
+        "QWEN_STRUCTURED_EXTRACTION_ENABLED",
+        "QWEN_ROUTER_FALLBACK_ENABLED",
+        "QWEN_PAGE_JUDGE_ENABLED",
+        "QWEN_NLI_ENABLED",
+        "QWEN_QUERY_REWRITER_ENABLED",
+        "QWEN_RFQ_DRAFTER_ENABLED",
+        "SPIDER_QWEN_FRONTIER_ENABLED",
+        "QWEN_FRONTIER_SCORER_ENABLED",
+        "SPIDER_QWEN_PAGE_CACHE_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    args = argparse.Namespace(offline=True, judged_demo=True, qwen_json=False,
+                              serendipity=False, require_review=None)
+    prior = _apply_judged_demo_profile(args)
+    try:
+        controller = _build_controller(args)
+    finally:
+        _restore_env(prior)
+
+    # env var explicitly set to 0 -> verify=None -> controller.verify_claims is False/None
+    assert not controller.verify_claims
+
+
+def test_judged_demo_unset_env_enables_both_surfaces(tmp_path, monkeypatch):
+    # When the env vars are unset, --judged-demo enables structured extraction
+    # and verification exactly as before.
+    import argparse
+
+    from spider_qwen.api.cli import _apply_judged_demo_profile, _build_controller, _restore_env
+    from spider_qwen.tools.qwen_json_extractor import MockQwenJsonExtractor
+
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    for name in (
+        "QWEN_STRUCTURED_EXTRACTION_ENABLED",
+        "SPIDER_QWEN_VERIFICATION_ENABLED",
+        "QWEN_ROUTER_FALLBACK_ENABLED",
+        "QWEN_PAGE_JUDGE_ENABLED",
+        "QWEN_NLI_ENABLED",
+        "QWEN_QUERY_REWRITER_ENABLED",
+        "QWEN_RFQ_DRAFTER_ENABLED",
+        "SPIDER_QWEN_FRONTIER_ENABLED",
+        "QWEN_FRONTIER_SCORER_ENABLED",
+        "SPIDER_QWEN_PAGE_CACHE_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    args = argparse.Namespace(offline=True, judged_demo=True, qwen_json=False,
+                              serendipity=False, require_review=None)
+    prior = _apply_judged_demo_profile(args)
+    try:
+        controller = _build_controller(args)
+    finally:
+        _restore_env(prior)
+
+    assert args.qwen_json is True
+    assert isinstance(controller.qwen_json_extractor, MockQwenJsonExtractor)
+    assert controller.verify_claims is True
+
+
 def test_controller_offline_is_self_sufficient(monkeypatch):
     # Direct construction, no injected providers, no keys: offline=True must
     # default to mock search/fetch instead of raising TinyFishError, and must

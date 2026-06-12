@@ -1,15 +1,21 @@
 """T-1.2: Step-Back + HyDE + Query2Doc query expansion for vague/obsolete parts.
 
-``expand_query(q)`` returns a deduped list of ``SearchQuery`` variants:
+``expand_query(q, mode=...)`` returns a deduped list of ``SearchQuery`` variants.
+The set of kinds emitted depends on the procurement mode:
 
-- ``original``        the query as typed
-- ``step_back``       a broader device-class abstraction (Step-Back prompting)
-- ``hyde``            a hypothetical pseudo-datasheet paragraph (HyDE)
-- ``query2doc``       original query concatenated with the pseudo-doc (Query2Doc)
-- ``obsolescence``    query + obsolescence vocabulary (EOL/NRND/LTB/...)
-- ``mpn_pattern``     an MPN/cross-reference variant (explicit MPN if present,
-                      else a device-class family scaffold)
-- ``broker_operator`` a long-tail broker/surplus operator variant
+- ``original``        always emitted
+- ``step_back``       always emitted (broadening)
+- ``hyde``            always emitted (hypothetical pseudo-doc)
+- ``query2doc``       always emitted (query + pseudo-doc concatenation)
+- ``obsolescence``    electronics_substitution only
+- ``mpn_pattern``     electronics_substitution only
+- ``broker_operator`` electronics_substitution only
+
+Rationale: obsolescence/MPN/broker kinds are electronics-distributor vocabulary.
+Emitting them for service_quote_required, contact_enrichment_only, revalidation,
+or product_exact_price wastes the search budget on electronics-distributor noise
+(see run_9fbe2f94d8d1 post-mortem). The kinds emitted are always recorded in the
+trace so off-subject queries remain visible.
 
 The implementation is deterministic and offline so the golden test runs with no
 API key. An optional ``llm`` callable (Qwen flash/max) can enrich the HyDE
@@ -60,6 +66,11 @@ _MANUFACTURERS = (
 # Long-tail / broker sources for the broker-operator variant (plan T-5.3).
 _BROKER_OPERATORS = ("rochester", "lansdale", "oemsecrets", "octopart", "avnet")
 
+# Modes where electronics-specific kinds (obsolescence, mpn_pattern, broker_operator)
+# are relevant. All other modes get only original/step_back/hyde/query2doc so the
+# search budget is not wasted on electronics-distributor vocabulary.
+_ELECTRONICS_MODES = frozenset({"electronics_substitution"})
+
 # An explicit manufacturer part number: letters then digits, optional suffixes.
 _EXPLICIT_MPN_RE = re.compile(r"\b[A-Z]{1,5}\d{2,}[A-Z0-9\-/.]*\b", re.IGNORECASE)
 _MAX_LEN = 200
@@ -104,7 +115,13 @@ def _explicit_mpns(q: str) -> list[str]:
     return out
 
 
-def _hyde_doc(query: str, device_class: str | None, llm: Callable[[str], str] | None) -> str:
+def _hyde_doc(
+    query: str,
+    device_class: str | None,
+    llm: Callable[[str], str] | None,
+    *,
+    electronics_mode: bool = False,
+) -> str:
     if llm is not None:
         try:
             doc = llm(query)
@@ -112,11 +129,17 @@ def _hyde_doc(query: str, device_class: str | None, llm: Callable[[str], str] | 
                 return _truncate(doc)
         except Exception:
             pass  # degrade to deterministic pseudo-doc
-    cls = device_class or "component"
+    if electronics_mode:
+        cls = device_class or "component"
+        return _truncate(
+            f"Datasheet: {cls}. {query}. Specifications include package, pinout, "
+            f"operating temperature, supply voltage, and cross-reference / equivalent "
+            f"replacement parts for obsolete or EOL devices."
+        )
+    # Non-electronics modes: service/contact procurement pseudo-document.
     return _truncate(
-        f"Datasheet: {cls}. {query}. Specifications include package, pinout, "
-        f"operating temperature, supply voltage, and cross-reference / equivalent "
-        f"replacement parts for obsolete or EOL devices."
+        f"Vendor profile: {query}. Services offered, contact details, "
+        f"quotation process, geographic coverage, certifications, and pricing."
     )
 
 
@@ -126,7 +149,13 @@ def expand_query(
     mode: str | None = None,
     llm: Callable[[str], str] | None = None,
 ) -> list[SearchQuery]:
-    """Expand a (possibly vague/obsolete) query into >=4 distinct search variants."""
+    """Expand query into distinct search variants; gates electronics kinds by mode.
+
+    Electronics-specific kinds (obsolescence, mpn_pattern, broker_operator) are
+    only emitted for electronics_substitution mode. All other modes receive only
+    original, step_back, hyde, and query2doc to avoid wasting the search budget
+    on distributor/lifecycle vocabulary that is irrelevant for services or contacts.
+    """
     base = " ".join((query or "").split())
     out: list[SearchQuery] = []
     seen: set[str] = set()
@@ -139,6 +168,8 @@ def expand_query(
 
     if not base:
         return out
+
+    electronics_mode = mode in _ELECTRONICS_MODES
 
     device = _detect_device_class(base)
     device_class = device[0] if device else None
@@ -155,34 +186,40 @@ def expand_query(
         add(f"{base} alternative supplier", "step_back", "generic broadening")
 
     # HyDE pseudo-doc + Query2Doc concatenation.
-    hyde = _hyde_doc(base, device_class, llm)
+    hyde = _hyde_doc(base, device_class, llm, electronics_mode=electronics_mode)
     add(hyde, "hyde", "hypothetical document embedding")
     add(f"{base} {hyde}", "query2doc", "query + pseudo-doc")
 
-    # Obsolescence vocabulary expansion.
-    add(f"{base} obsolete EOL NRND NLA LTB superseded by NOS",
-        "obsolescence", "lifecycle vocabulary")
+    # Electronics-specific kinds: only for electronics_substitution mode.
+    if electronics_mode:
+        # Obsolescence vocabulary expansion.
+        add(f"{base} obsolete EOL NRND NLA LTB superseded by NOS",
+            "obsolescence", "lifecycle vocabulary")
 
-    # MPN-pattern / cross-reference variant.
-    explicit = _explicit_mpns(base)
-    if explicit:
-        mpn_text = f"{explicit[0]} cross reference equivalent datasheet"
-    else:
-        family = families[0] if families else "series"
-        prefix = f"{mfr} " if mfr else ""
-        cls = device_class or "part"
-        mpn_text = f"{prefix}{family} {cls} cross reference equivalent"
-    add(mpn_text, "mpn_pattern", "manufacturer part-number cross-reference")
+        # MPN-pattern / cross-reference variant.
+        explicit = _explicit_mpns(base)
+        if explicit:
+            mpn_text = f"{explicit[0]} cross reference equivalent datasheet"
+        else:
+            family = families[0] if families else "series"
+            prefix = f"{mfr} " if mfr else ""
+            cls = device_class or "part"
+            mpn_text = f"{prefix}{family} {cls} cross reference equivalent"
+        add(mpn_text, "mpn_pattern", "manufacturer part-number cross-reference")
 
-    # Broker / long-tail operator variant.
-    operators = " OR ".join(_BROKER_OPERATORS)
-    add(f"{base} obsolete stock {operators}", "broker_operator", "long-tail broker sources")
+        # Broker / long-tail operator variant.
+        operators = " OR ".join(_BROKER_OPERATORS)
+        add(f"{base} obsolete stock {operators}", "broker_operator", "long-tail broker sources")
 
     return out
 
 
-# Kinds wired into the primary controller gather (T-1.2). HyDE alone is omitted — it is
-# long-form pseudo-doc text; query2doc carries the same signal in a search-friendly form.
+# Kinds wired into the primary controller gather (T-1.2), in priority order.
+# HyDE alone is omitted — it is long-form pseudo-doc text; query2doc carries the
+# same signal in a search-friendly form. Electronics kinds (obsolescence,
+# mpn_pattern, broker_operator) are only present in the expanded list when
+# mode == "electronics_substitution", so they contribute nothing here for other
+# modes — the interleave loop simply skips them safely.
 _GATHER_EXPANSION_KINDS = (
     "obsolescence", "mpn_pattern", "broker_operator", "step_back", "query2doc",
 )
