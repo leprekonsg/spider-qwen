@@ -5,11 +5,15 @@ four-way partition distinguishes *why* a claim failed:
 
 - ``grounded``       the cited span supports the claim          -> proceed
 - ``complementary``  the cited span does not, but another ledger
-                     span does (SAFE found it)                  -> regenerate
-                     (re-cite; candidate for ledger insertion)
+                     span does (SAFE found it)                  -> regenerate:
+                     the spine re-points the citation to the
+                     corroborating row (verifier._repoint_citations)
 - ``contradicted``   the cited span asserts a *different* value
-                     for the same subject/field                 -> replan
-- ``ungrounded``     supported nowhere in the corpus            -> regenerate
+                     for the same subject/field                 -> replan:
+                     drives the controller's one bounded CRAG round
+- ``ungrounded``     supported nowhere in the corpus            -> regenerate:
+                     no actuator; a critical ungrounded claim blocks
+                     the candidate via ``verified=False`` instead
 
 ``contradicted`` is the dispute-resolution driver: it means the source was
 read and disagrees, which no amount of re-citing fixes - the plan itself

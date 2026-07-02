@@ -182,6 +182,19 @@ class Policy:
         return float(self.data.get("rfq", {}).get("minimum_checklist_completeness", 0.65))
 
     @property
+    def rfq_grade_floor(self) -> str:
+        """Minimum evidence grade for auto-releasing an RFQ draft; a draft below
+        the floor is held for human review. 'very_low' (the default) keeps the
+        grade purely advisory. Misconfiguration fails loud, never silently
+        degrades to advisory."""
+        floor = str(self.data.get("rfq", {}).get("grade_floor", "very_low"))
+        if floor not in ("high", "moderate", "low", "very_low"):
+            raise ValueError(
+                f"rfq.grade_floor must be one of high/moderate/low/very_low, got {floor!r}"
+            )
+        return floor
+
+    @property
     def allow_disputed_facts_in_rfq(self) -> bool:
         return bool(self.data.get("memory", {}).get("allow_disputed_facts_in_rfq", False))
 

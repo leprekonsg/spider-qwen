@@ -36,7 +36,8 @@ from ..evidence.ledger import EvidenceLedger
 from ..evidence.graph import render_supplier_graph
 from ..evidence.models import EvidenceRef, sha256_hex, utc_now_iso
 from ..evidence.verifier import VerificationSpine
-from ..verification.minicheck import MiniCheck, value_grounded
+from ..verification.grade import grade_at_least
+from ..verification.minicheck import MiniCheck, relation_grounded, value_grounded
 from ..extraction.contact import ContactExtractor
 from ..extraction.dedupe import dedupe_candidates, normalize_vendor_name
 from ..extraction.pricing import PricingExtractor, PricingResult
@@ -221,15 +222,19 @@ class Controller:
             from ..verification.qwen_nli import QwenNliScorer
 
             self.minicheck = MiniCheck(model=QwenNliScorer(model=self.policy.qwen_nli_model()))
-        # Conformal emission gate over verifier scores. Calibrated (via env
-        # calibration file or injection) -> abstentions block candidates.
-        # Uncalibrated -> never gates; its "guarantee unavailable" rationale is
-        # surfaced in run metrics instead of fabricating a coverage claim.
+        # Statistical emission gate over verifier scores: LTT selective risk,
+        # bounding P(wrong | emitted) <= alpha with confidence 1-delta -- the
+        # risk an emission gate must control. Calibrated (via env calibration
+        # file or injection) -> abstentions block candidates. Uncalibrated ->
+        # never gates; its "guarantee unavailable" rationale is surfaced in run
+        # metrics instead of fabricating a claim. (The split-conformal coverage
+        # abstainer bounds the OPPOSITE risk -- false abstention on correct
+        # predictions -- and is advisory only; see verification/conformal.py.)
         self.conformal = conformal
         if self.conformal is None and self.verify_claims:
-            from ..verification.conformal import abstainer_from_env
+            from ..verification.conformal import gate_from_env
 
-            self.conformal = abstainer_from_env()
+            self.conformal = gate_from_env()
         # CRAG corrective rewriting: Qwen proposes pivot queries when retrieval
         # is judged off-target; everything downstream stays deterministic.
         self.qwen_query_rewriter = None
@@ -491,8 +496,20 @@ class Controller:
                 ranked = ranker.rank(candidates)
                 validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
                 validated = validated[: budget.max_validated_candidates]
+                pre_replan = verification_metrics
                 validated, verification_metrics = self._verify_candidates(ledger, validated, tracer)
                 verification_metrics["replan_rounds"] = 1
+                # The re-verify must not erase round-1 outcomes from RunResult
+                # metrics: candidates blocked or abstained before the replan
+                # would otherwise vanish from the record (trace-only).
+                verification_metrics["pre_replan"] = {
+                    "claims_verified": pre_replan.get("claims_verified", 0),
+                    "claims_unsupported": pre_replan.get("claims_unsupported", 0),
+                    "candidates_blocked_unverified": pre_replan.get(
+                        "candidates_blocked_unverified", 0),
+                    "candidates_abstained": (pre_replan.get("conformal") or {}).get(
+                        "candidates_abstained"),
+                }
         verification_metrics.setdefault("replan_rounds", 0)
         verify_done = time.perf_counter()
 
@@ -1351,15 +1368,26 @@ class Controller:
         ) if sm.matched else None
         qc_matches = self._extractors["quote_channel"].extract(page.text, page.links, page_url)
         if qwen:
+            # Untrusted model output: an empty-valued channel must not enter the
+            # pool -- the deterministic extractor enforces the same guard, and a
+            # critical claim with no concrete value can never verify.
             qc_matches.extend(
                 QuoteChannelMatch(type=q.type, value=q.value, matched_text=q.matched_text or q.value)
-                for q in qwen.quote_channels
+                for q in qwen.quote_channels if (q.value or "").strip()
             )
         best = self._extractors["quote_channel"].best(qc_matches)
         if self.verify_claims:
-            # Same groundedness the verification spine applies later, so a
-            # normalizable value (e.g. "S$ 129" vs "S$129") is not deprioritized.
-            grounded = [
+            # Same groundedness the verification spine applies later: quote
+            # channels are vendor-scoped relation claims, so prefer a match
+            # co-located with the vendor in one sentence, then a value-grounded
+            # one -- a value-only preference can pick a channel the spine then
+            # rejects while discarding one that would have verified.
+            subject = meta.vendor_name or ""
+            relation = [
+                m for m in qc_matches
+                if relation_grounded(subject, m.value or "", page.text or "")
+            ]
+            grounded = relation or [
                 m for m in qc_matches if value_grounded(m.value or "", page.text or "")
             ]
             best = self._extractors["quote_channel"].best(grounded) or best
@@ -1465,10 +1493,10 @@ class Controller:
                                   input_count=len(cv.claims), output_count=0,
                                   detail=cv.model_dump(mode="json"))
                 continue
-            # Conformal emission gate: a CALIBRATED abstention blocks the
-            # candidate (its verifier score falls below the split-conformal
-            # threshold). Uncalibrated decisions never gate -- no guarantee
-            # exists -- and the rationale surfaces in metrics below.
+            # Statistical emission gate: a CALIBRATED abstention blocks the
+            # candidate (its critical-claim verifier score falls below the LTT
+            # selective-risk threshold). Uncalibrated decisions never gate --
+            # no guarantee exists -- and the rationale surfaces in metrics below.
             if self.conformal is not None:
                 decision = self.conformal.decide(cv.verifier_score)
                 if decision.calibrated and decision.abstain:
@@ -1479,7 +1507,7 @@ class Controller:
                                       detail={"vendor": cv.vendor_name,
                                               **decision.model_dump(mode="json")})
                     continue
-            assessments[cv.vendor_name] = {
+            assessments[self._assessment_key(cand)] = {
                 "decision": cv.decision, "grade": cv.grade,
                 "verifier_score": cv.verifier_score,
                 "claims_verified": sum(1 for c in cv.claims if c.verified),
@@ -1497,18 +1525,43 @@ class Controller:
                    "replan_recommended": replan_recommended}
         if self.conformal is not None:
             calibrated = self.conformal.threshold is not None
+            delta = getattr(self.conformal, "delta", None)
+            emitted = getattr(self.conformal, "calibration_emitted", None)
+            wrong = getattr(self.conformal, "calibration_wrong", None)
             metrics["conformal"] = {
                 "calibrated": calibrated,
                 "threshold": self.conformal.threshold,
                 "alpha": self.conformal.alpha,
+                "delta": delta,
                 # Explicit None when uncalibrated: "abstained 0/N" must not be
-                # read as a coverage statement when no guarantee exists.
-                "coverage_guarantee": round(1.0 - self.conformal.alpha, 4) if calibrated else None,
+                # read as a guarantee statement when no guarantee exists.
+                # risk_bound is the LTT selective-risk target: with confidence
+                # 1-delta, P(wrong | emitted) <= alpha.
+                "risk_bound": self.conformal.alpha if calibrated else None,
+                "confidence": (
+                    round(1.0 - delta, 4) if calibrated and delta is not None else None
+                ),
                 "candidates_abstained": abstained,
                 "rationale": "; ".join(self.conformal.reasons)
-                or f"calibrated on {self.conformal.calibration_size} examples",
+                or (
+                    f"calibrated on {self.conformal.calibration_size} examples"
+                    + (
+                        f" ({emitted} emitted at threshold, {wrong} wrong)"
+                        if emitted is not None and wrong is not None else ""
+                    )
+                ),
             }
         return kept, metrics
+
+    @staticmethod
+    def _assessment_key(cand) -> str:
+        """Trust data keyed by vendor + registrable domain: dedupe keeps
+        same-name candidates on different domains as distinct candidates, so a
+        name-only key would attribute one candidate's grade and verdict to
+        another (and collide every "Unknown Vendor")."""
+        name = getattr(cand, "vendor_name", "") or ""
+        domain = _registrable(getattr(cand, "website", "") or "")
+        return f"{name}|{domain}" if domain else name
 
     def _memory_credit_verified_candidates(self, ledger: EvidenceLedger, candidates, tracer):
         """Narrow verification pass used only to credit recalled memory facts.
@@ -1601,16 +1654,18 @@ class Controller:
             drafter=self.qwen_rfq_drafter,
         )
         assessments = assessments or {}
+        grade_floor = self.policy.rfq_grade_floor
         drafts: list[dict] = []
         for cand in validated:
             if not isinstance(cand, ServiceCandidate):
                 continue
+            evidence_grade = (assessments.get(self._assessment_key(cand)) or {}).get("grade")
             draft = generator.generate(
                 query=query, candidate=cand, target_country=target_country,
                 # Trust surface on the draft itself: the spine's GRADE for this
                 # candidate (None when verification is off) and the DS interval
                 # fused over the quote channel's source reliabilities.
-                evidence_grade=(assessments.get(cand.vendor_name) or {}).get("grade"),
+                evidence_grade=evidence_grade,
                 belief_interval=quote_channel_interval(cand, ledger),
                 # Fact-check corpus for a Qwen-drafted body: the candidate's
                 # own ledger evidence, so unsourced numbers are flagged.
@@ -1619,15 +1674,23 @@ class Controller:
             metrics.rfq_drafts_total += 1
             if draft.status == "incomplete":
                 metrics.rfq_incomplete_total += 1
-            audit.record("rfq_draft_generated", vendor=cand.vendor_name, status=draft.status)
+            # GRADE-style two-axis policy: the grade is advisory metadata; the
+            # policy floor is the action. Default floor "very_low" holds
+            # nothing; a raised floor withholds low-certainty drafts for review.
+            below_floor = bool(evidence_grade) and not grade_at_least(evidence_grade, grade_floor)
+            audit.record("rfq_draft_generated", vendor=cand.vendor_name,
+                         status="held_below_grade_floor" if below_floor else draft.status)
             draft_dict = draft.model_dump(mode="json")
-            if review_store and self.require_review:
+            if review_store and (self.require_review or below_floor):
                 # Blocking checkpoint: withhold the polished RFQ until a human
                 # approves. The full draft is carried in the review event detail
                 # and released by `review approve <event_id>`.
                 event = review_store.create(
                     run_id=run_id,
-                    reason="rfq finalization",
+                    reason=(
+                        f"rfq finalization: evidence grade {evidence_grade} below "
+                        f"policy floor {grade_floor}" if below_floor else "rfq finalization"
+                    ),
                     proposed_action=f"review RFQ draft for {cand.vendor_name}",
                     detail={"vendor": cand.vendor_name, "status": draft.status, "rfq_draft": draft_dict},
                 )
@@ -1639,6 +1702,21 @@ class Controller:
                         "vendor": draft_dict.get("vendor"),
                         "quote_channel": draft_dict.get("quote_channel"),
                         "review_event_id": event.event_id,
+                    }
+                )
+            elif below_floor:
+                # No review store to hold the draft in: withhold the polished
+                # body and say why, rather than releasing it or dropping it
+                # silently.
+                metrics.held_for_review += 1
+                drafts.append(
+                    {
+                        "schema_version": draft.schema_version,
+                        "status": "held_below_grade_floor",
+                        "vendor": draft_dict.get("vendor"),
+                        "quote_channel": draft_dict.get("quote_channel"),
+                        "evidence_grade": evidence_grade,
+                        "grade_floor": grade_floor,
                     }
                 )
             else:
@@ -1686,7 +1764,7 @@ class Controller:
         verdicts: list[dict] = []
         for cand in validated:
             name = getattr(cand, "vendor_name", "") or ""
-            assessment = assessments.get(name) or {}
+            assessment = assessments.get(self._assessment_key(cand)) or {}
             interval = (
                 quote_channel_interval(cand, ledger)
                 if isinstance(cand, ServiceCandidate) else None
@@ -1709,11 +1787,14 @@ class Controller:
                     f"quote-channel belief [{interval.belief}, {interval.plausibility}]"
                 )
             if conformal_meta is not None:
-                parts.append(
-                    f"conformal coverage >= {conformal_meta['coverage_guarantee']}"
-                    if conformal_meta.get("calibrated")
-                    else "conformal guarantee unavailable (uncalibrated)"
-                )
+                if conformal_meta.get("calibrated"):
+                    confidence = conformal_meta.get("confidence")
+                    parts.append(
+                        f"selective risk: P(wrong|emitted) <= {conformal_meta['risk_bound']}"
+                        + (f" at confidence {confidence}" if confidence is not None else "")
+                    )
+                else:
+                    parts.append("statistical emission guarantee unavailable (uncalibrated)")
             parts.append(
                 f"{len(disputed)} disputed fact(s) flagged" if disputed else "no disputed facts"
             )

@@ -443,7 +443,11 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     each one. ``check`` validates a graded file and reports the fitted
     threshold, so a misconfigured set fails here instead of mid-run.
     """
-    from ..verification.conformal import CalibrationExample, ConformalAbstainer
+    from ..verification.conformal import (
+        CalibrationExample,
+        ConformalAbstainer,
+        SelectiveRiskGate,
+    )
 
     if args.calibrate_command == "template":
         if not args.run_ids:
@@ -535,21 +539,35 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        examples = [CalibrationExample.model_validate(e) for e in raw_examples]
-        abstainer = ConformalAbstainer.fit(examples, alpha=alpha)
+        graded = [CalibrationExample.model_validate(e) for e in raw_examples]
+        delta = float(payload.get("delta", 0.1))
+        # The EMISSION gate is the LTT selective-risk threshold; the coverage
+        # abstainer is fitted too but reported as advisory only.
+        gate = SelectiveRiskGate.fit(graded, alpha=alpha, delta=delta)
+        abstainer = ConformalAbstainer.fit(graded, alpha=alpha)
         print(json.dumps({
-            "calibrated": abstainer.threshold is not None,
-            "threshold": abstainer.threshold,
-            "alpha": abstainer.alpha,
-            "calibration_size": abstainer.calibration_size,
-            "correct_examples": sum(1 for e in examples if e.prediction_correct),
-            "reasons": abstainer.reasons,
+            "calibrated": gate.threshold is not None,
+            "threshold": gate.threshold,
+            "alpha": gate.alpha,
+            "delta": gate.delta,
+            "calibration_size": gate.calibration_size,
+            "correct_examples": sum(1 for e in graded if e.prediction_correct),
+            "calibration_emitted": gate.calibration_emitted,
+            "calibration_wrong": gate.calibration_wrong,
+            "reasons": gate.reasons,
+            "coverage_advisory": {
+                "calibrated": abstainer.threshold is not None,
+                "threshold": abstainer.threshold,
+                "calibration_correct": abstainer.calibration_correct,
+                "reasons": abstainer.reasons,
+            },
             "activate": (
-                f"set SPIDER_QWEN_CONFORMAL_CALIBRATION={path} to gate emission"
-                if abstainer.threshold is not None else None
+                f"set SPIDER_QWEN_CONFORMAL_CALIBRATION={path} to gate emission: "
+                f"P(wrong|emitted) <= {gate.alpha:g} at confidence {1.0 - gate.delta:g}"
+                if gate.threshold is not None else None
             ),
         }, indent=2))
-        return 0 if abstainer.threshold is not None else 1
+        return 0 if gate.threshold is not None else 1
 
     print("usage: spider-qwen calibrate [template|check] ...", file=sys.stderr)
     return 2

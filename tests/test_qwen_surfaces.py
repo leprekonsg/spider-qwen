@@ -75,9 +75,9 @@ def test_judged_demo_emits_composed_trust_verdicts(capsys, tmp_path, monkeypatch
     assert v["grade"]
     assert v["decision"] == "proceed"
     assert v["belief_interval"] is not None
-    # Uncalibrated conformal must state the absence of a guarantee explicitly.
+    # An uncalibrated emission gate must state the absence of a guarantee explicitly.
     assert v["conformal"]["calibrated"] is False
-    assert v["conformal"]["coverage_guarantee"] is None
+    assert v["conformal"]["risk_bound"] is None
     assert v["summary"].endswith(".")
 
 

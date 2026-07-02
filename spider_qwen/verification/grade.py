@@ -12,7 +12,10 @@ named downgrade/upgrade factors. The procurement mapping:
                   or grounded only via a non-cited corpus span
                   (complementary / citation drift)                (-1)
 - imprecision   <- wide Dempster-Shafer [Bel, Pl] interval        (-1)
-- upgrade       <- three or more independent corroborating spans  (+1)
+                  (reserved: the v1 spine never supplies
+                  ds_uncertainty; only direct callers/tests do)
+- upgrade       <- three or more corroborating spans on
+                  distinct registrable hosts                      (+1)
 
 Output is a per-claim grade in {high, moderate, low, very_low} with the
 reasons that produced it. Deterministic; every factor is a named rule.
@@ -30,17 +33,20 @@ _TIER_VALUE: dict[int, Grade] = {4: "high", 3: "moderate", 2: "low", 1: "very_lo
 _GRADE_VALUE: dict[str, int] = {g: t for t, g in _TIER_VALUE.items()}
 
 
-def _start_tier(source_class: str) -> int:
+def _start_tier(source_class: str, priors: dict[str, float] | None = None) -> int:
     """Starting tier derived from the T-2.4 reliability prior, so a source
     class added in governance/source_reliability.py gets a tier here without
     a second table to keep in sync (manufacturer/distributor/government 0.9+
     -> High; aggregator/business 0.6+ -> Moderate; broker/unknown 0.4+ -> Low;
-    marketplace -> Very Low)."""
+    marketplace -> Very Low). ``priors`` carries the run's policy overrides
+    (Policy.source_reliability), so a re-tiered source grades consistently
+    with how the ledger weighted it."""
     # Lazy import: governance/__init__ -> modes.contracts -> evidence.models
     # would cycle at module load (same reason ledger.py imports lazily).
     from ..governance.source_reliability import DEFAULT_RELIABILITY
 
-    r = DEFAULT_RELIABILITY.get(source_class, DEFAULT_RELIABILITY["unknown"])
+    table = {**DEFAULT_RELIABILITY, **(priors or {})}
+    r = table.get(source_class, table["unknown"])
     if r >= 0.9:
         return 4
     if r >= 0.6:
@@ -68,9 +74,10 @@ def grade_claim(
     grounding: str = "grounded",
     ds_uncertainty: float | None = None,
     corroborating_spans: int = 1,
+    reliability_priors: dict[str, float] | None = None,
 ) -> GradeAssessment:
     """Grade one claim from its provenance and verification outcome."""
-    tier = _start_tier(source_class)
+    tier = _start_tier(source_class, reliability_priors)
     reasons = [f"start: {source_class} source"]
 
     if grounding == "contradicted":
@@ -98,9 +105,14 @@ def grade_claim(
     tier = max(1, min(4, tier))
     return GradeAssessment(
         grade=_TIER_VALUE[tier],
-        start_tier=_TIER_VALUE[_start_tier(source_class)],
+        start_tier=_TIER_VALUE[_start_tier(source_class, reliability_priors)],
         reasons=reasons,
     )
+
+
+def grade_at_least(grade: str, floor: str) -> bool:
+    """True when ``grade`` meets ``floor``; unrecognized grades rank lowest."""
+    return _GRADE_VALUE.get(grade, 1) >= _GRADE_VALUE.get(floor, 1)
 
 
 def worst_grade(grades: list[str]) -> Grade:

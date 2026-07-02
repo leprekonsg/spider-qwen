@@ -41,7 +41,10 @@ class SafeReverifier:
                 field=claim.field, subject=claim.subject,
             )
             if result.score > best.score:
-                best = result.model_copy(update={"method": "safe_" + result.method})
+                # winning_span lets the spine re-point a complementary claim's
+                # citation to the span that actually grounded it.
+                best = result.model_copy(
+                    update={"method": "safe_" + result.method, "winning_span": span})
                 if best.supported and best.score >= 1.0:
                     break
         return best

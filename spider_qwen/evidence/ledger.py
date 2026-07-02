@@ -116,6 +116,16 @@ class EvidenceLedger:
         self._wal_append(item)
         return item.to_ref()
 
+    @property
+    def reliability_priors(self) -> dict[str, float] | None:
+        """Policy-driven source-reliability overrides this run was built with.
+
+        Graders and belief fusers must read the SAME table the ledger applied
+        when recording rows; a second hardcoded table would let one source
+        carry two different reliabilities inside a single trust verdict.
+        """
+        return self._reliability_priors
+
     def get(self, ledger_id: str) -> EvidenceItem | None:
         return self._items.get(ledger_id)
 

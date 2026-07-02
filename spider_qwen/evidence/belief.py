@@ -148,7 +148,7 @@ def fuse_disputed_fact(fact, ledger=None) -> list[BeliefInterval]:
     """
     sides = [fact] + list(getattr(fact, "disputed_alternatives", []) or [])
     if len(sides) == 1:
-        reliabilities = _side_reliabilities(fact, ledger.get if ledger else None)
+        reliabilities = _side_reliabilities(fact, ledger)
         fused, k, rule = fuse([bpa(r, supports=True) for r in reliabilities])
         return [_interval(fact.value, fused, k, rule, _distinct_sources(fact), 0)]
 
@@ -158,7 +158,7 @@ def fuse_disputed_fact(fact, ledger=None) -> list[BeliefInterval]:
         supporting = contradicting = 0
         for other in sides:
             supports = other is side
-            for r in _side_reliabilities(other, ledger.get if ledger else None):
+            for r in _side_reliabilities(other, ledger):
                 masses.append(bpa(r, supports=supports))
             count = _distinct_sources(other)
             if supports:
@@ -215,16 +215,17 @@ def _distinct_sources(side) -> int:
     return len({getattr(r, "url", "") or getattr(r, "ledger_id", "") for r in refs})
 
 
-def _side_reliabilities(side, ledger_get) -> list[float]:
+def _side_reliabilities(side, ledger) -> list[float]:
     """One reliability weight per evidence ref backing a side."""
     refs = list(getattr(side, "evidence_refs", []) or [])
+    priors = getattr(ledger, "reliability_priors", None)
     out: list[float] = []
     for ref in refs:
-        item = ledger_get(ref.ledger_id) if ledger_get else None
+        item = ledger.get(ref.ledger_id) if ledger else None
         if item is None:
             out.append(_own_confidence(side))
         elif getattr(item, "source_tool", "") == "semantic_memory":
-            out.extend(_memory_row_reliabilities(item))
+            out.extend(_memory_row_reliabilities(item, priors))
         else:
             out.append(float(item.reliability))
     if not out:  # evidence-free side: weight by its recorded confidence alone
@@ -232,7 +233,7 @@ def _side_reliabilities(side, ledger_get) -> list[float]:
     return out
 
 
-def _memory_row_reliabilities(item) -> list[float]:
+def _memory_row_reliabilities(item, priors: dict[str, float] | None = None) -> list[float]:
     """Weights for a synthetic semantic_memory recall row.
 
     The row's own T-2.4 tier reflects the vendor page the recall was attached
@@ -253,9 +254,11 @@ def _memory_row_reliabilities(item) -> list[float]:
     conf = getattr(item, "confidence", None)
     recall_conf = 0.5 if conf is None else float(conf)
     sources = (getattr(item, "metadata", {}) or {}).get("source_evidence_refs") or []
+    # Same policy-driven table the ledger applied (Policy.source_reliability),
+    # never a second hardcoded copy.
+    table = {**DEFAULT_RELIABILITY, **(priors or {})}
     tiers = [
-        DEFAULT_RELIABILITY.get(classify_source(host_of(s.get("url", ""))),
-                                DEFAULT_RELIABILITY["unknown"])
+        table.get(classify_source(host_of(s.get("url", ""))), table["unknown"])
         for s in sources if isinstance(s, dict) and s.get("url")
     ]
     if not tiers:

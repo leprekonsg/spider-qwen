@@ -56,12 +56,22 @@ _SUBJECT_STOP = frozenset({
 class MiniCheckResult(BaseModel):
     supported: bool
     score: float
-    method: str  # value_grounded | relation_grounded | token_overlap | no_evidence | model | subject_ungrounded
+    method: str  # value_grounded | relation_grounded | token_overlap | no_evidence | no_value | model | subject_ungrounded
     rationale: str = ""
+    # Set by SAFE re-verification only: the corpus span that produced this
+    # verdict, so a complementary claim's citation can be re-pointed to it.
+    winning_span: str = ""
 
 
 def _norm(text: str) -> str:
-    return re.sub(r"[\s,]", "", _CURRENCY.sub("", (text or "").lower()))
+    """Lowercase, strip currency marks, drop thousands separators, collapse
+    whitespace. Token boundaries are PRESERVED: "S$1,299 50 pcs" must become
+    "1299 50 pcs", never "129950pcs" -- merging adjacent digit runs makes the
+    real price (1299) unfindable while grounding a fabricated one (129950)."""
+    t = _CURRENCY.sub("", (text or "").lower())
+    t = re.sub(r"(?<=\d),(?=\d)", "", t)  # 1,299 -> 1299 (digit-group commas only)
+    t = t.replace(",", " ")
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def _tokens(text: str) -> set[str]:
@@ -74,17 +84,6 @@ def _subject_tokens(subject: str) -> list[str]:
     if strong:
         return strong
     return [t for t in raw if len(t) >= 2]
-
-
-def _subject_grounded(subject: str, premise: str) -> bool:
-    """True when distinctive vendor tokens appear anywhere in the span."""
-    tokens = _subject_tokens(subject)
-    if not tokens:
-        norm_sub = _norm(subject)
-        return bool(norm_sub) and norm_sub in _norm(premise)
-    premise_tokens = _tokens(premise)
-    hits = sum(1 for t in tokens if t in premise_tokens)
-    return hits >= max(1, (len(tokens) + 1) // 2)
 
 
 def _subject_in_sentence(tokens: list[str], sentence: str) -> bool:
@@ -131,17 +130,31 @@ def value_grounded(value: str, premise: str) -> bool:
     return bool(norm_value) and _value_grounded(norm_value, premise or "")
 
 
+def relation_grounded(subject: str, value: str, premise: str) -> bool:
+    """Public seam: the spine's relation gate (value + vendor in one sentence).
+
+    Callers pre-filtering vendor-scoped extractions (e.g. quote channels) must
+    use the SAME co-location notion the verification spine applies later; a
+    value-only pre-filter can prefer a match the spine then rejects.
+    """
+    norm_value = _norm(value)
+    return bool(norm_value) and _relation_grounded(subject, norm_value, premise or "")
+
+
 def _value_grounded(norm_value: str, premise: str) -> bool:
     """Is the (normalized) claim value present in the premise?
 
     Pure-numeric values match a whole number by value (so "129" matches "129.00"
-    but not "1290"); everything else uses a normalized substring match.
+    but not "1290"); everything else matches on token boundaries, so a short
+    value ("3M") cannot ground inside an unrelated run ("3 mm", "acme3m").
     """
     norm_premise = _norm(premise)
     if _NUMERIC.match(norm_value):
         target = float(norm_value)
         return any(abs(float(n) - target) < 1e-9 for n in _NUMBER_IN_TEXT.findall(norm_premise))
-    return norm_value in norm_premise
+    return bool(re.search(
+        rf"(?<![a-z0-9]){re.escape(norm_value)}(?![a-z0-9])", norm_premise
+    ))
 
 
 class MiniCheck:
@@ -190,18 +203,39 @@ class MiniCheck:
                     supported=True, score=1.0, method="value_grounded",
                     rationale=f"value '{value}' present in evidence",
                 )
+            # Generic business tokens (pte/ltd/trading/...) must not carry the
+            # overlap on their own: a wrong vendor name would verify against any
+            # page of legal boilerplate. Distinctive-token coverage is required
+            # IN ADDITION to overall coverage (min of the two ratios), so the
+            # rule only ever fails more closed than plain overlap. A value with
+            # ONLY generic tokens needs every token present.
             value_tokens = _tokens(value)
-            score = round(len(value_tokens & _tokens(premise)) / len(value_tokens), 4) if value_tokens else 0.0
-            if relation and score >= self.threshold and not _relation_grounded(subject, norm_value, premise):
+            premise_tokens = _tokens(premise)
+            strong = value_tokens - _SUBJECT_STOP
+            required = self.threshold if strong else 1.0
+            if not value_tokens:
+                score = 0.0
+            else:
+                score = len(value_tokens & premise_tokens) / len(value_tokens)
+                if strong:
+                    score = min(score, len(strong & premise_tokens) / len(strong))
+                score = round(score, 4)
+            if relation and score >= required and not _relation_grounded(subject, norm_value, premise):
                 score = 0.0
             return MiniCheckResult(
-                supported=score >= self.threshold, score=score, method="token_overlap",
+                supported=score >= required, score=score, method="token_overlap",
                 rationale=f"value '{value}' not grounded; token overlap {score}",
+            )
+        if relation:
+            # A relation claim with no concrete value (e.g. an empty-valued quote
+            # channel proposed upstream) has nothing to ground; template words
+            # ("accepts quote requests via") must not verify it. Fail closed.
+            return MiniCheckResult(
+                supported=False, score=0.0, method="no_value",
+                rationale="relation claim carries no concrete value to ground",
             )
         claim_tokens = _tokens(claim)
         score = round(len(claim_tokens & _tokens(premise)) / len(claim_tokens), 4) if claim_tokens else 0.0
-        if relation and score >= self.threshold and not _subject_grounded(subject, premise):
-            score = 0.0
         return MiniCheckResult(
             supported=score >= self.threshold, score=score, method="token_overlap",
             rationale=f"claim-text token overlap {score}",
@@ -216,6 +250,9 @@ class MiniCheck:
         premise: str,
         subject: str = "",
     ) -> MiniCheckResult:
+        norm_value_guard = _norm(value)
+        if (subject or "").strip() and not norm_value_guard:
+            return base  # nothing concrete to ground; the no_value verdict stands
         try:
             out = self.model(claim, premise)  # type: ignore[misc]
         except Exception:

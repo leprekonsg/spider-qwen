@@ -134,6 +134,13 @@ rfq:
   allow_vendor_submission: false
   default_tone: "SEA-neutral professional English; short and direct"
   minimum_checklist_completeness: 0.65
+  # GRADE floor for auto-releasing a draft. GRADE decouples evidence certainty
+  # from action strength: the per-claim grade is advisory input, this policy is
+  # the action. Drafts whose evidence_grade is BELOW the floor are held for
+  # human review instead of released. "very_low" (the lowest grade) means no
+  # draft is ever held on grade alone -- the grade stays advisory. Raise to
+  # "low" or "moderate" to gate RFQ-bound facts on evidence certainty.
+  grade_floor: very_low
 
 memory:
   semantic_promotion_requires_evidence: true

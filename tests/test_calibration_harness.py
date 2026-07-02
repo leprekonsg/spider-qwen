@@ -67,32 +67,54 @@ def test_run_startup_rejects_ungraded_calibration_file(capsys, judged_run, monke
     assert "SPIDER_QWEN_CONFORMAL_CALIBRATION" in err
 
 
-def _graded_file(tmp_path, scores: list[float], alpha: float = 0.1):
+def _graded_file(tmp_path, scores: list[float], alpha: float = 0.1,
+                 wrong: list[float] | None = None):
     path = tmp_path / "graded.json"
-    path.write_text(json.dumps({
-        "alpha": alpha,
-        "examples": [{"verifier_score": s, "prediction_correct": True} for s in scores],
-    }), encoding="utf-8")
+    examples = [{"verifier_score": s, "prediction_correct": True} for s in scores]
+    examples += [{"verifier_score": s, "prediction_correct": False} for s in (wrong or [])]
+    path.write_text(json.dumps({"alpha": alpha, "examples": examples}), encoding="utf-8")
     return path
 
 
 def test_check_reports_threshold_for_sufficient_grading(capsys, tmp_path):
-    scores = [0.95, 0.9, 0.88, 0.85, 0.8, 0.92, 0.91, 0.87, 0.83, 0.93, 0.89, 0.86]
+    # 40 error-free emitted examples clear the Bonferroni-grid LTT floor for
+    # alpha=delta=0.1 (needs >= 33): the selective-risk gate calibrates.
+    scores = [round(0.8 + 0.004 * i, 3) for i in range(40)]
     path = _graded_file(tmp_path, scores)
     report = _run_cli(capsys, ["calibrate", "check", str(path)])
     assert report["calibrated"] is True
     assert 0.0 < report["threshold"] <= 1.0
     assert report["calibration_size"] == len(scores)
+    assert report["calibration_wrong"] == 0
+    assert report["coverage_advisory"]["calibrated"] is True
     assert "SPIDER_QWEN_CONFORMAL_CALIBRATION" in report["activate"]
+    assert "P(wrong|emitted)" in report["activate"]
 
 
-def test_check_refuses_too_few_correct_examples(capsys, tmp_path):
-    path = _graded_file(tmp_path, [0.9, 0.8, 0.7])  # alpha=0.1 needs at least 9
+def test_check_refuses_insufficient_data_for_selective_gate(capsys, tmp_path):
+    # 12 correct-only examples calibrate the coverage ADVISORY (needs >= 9) but
+    # NOT the emission gate (zero-error certification needs >= 33 at 0.1/0.1):
+    # check must fail with the actionable floor, not activate on coverage alone.
+    scores = [0.95, 0.9, 0.88, 0.85, 0.8, 0.92, 0.91, 0.87, 0.83, 0.93, 0.89, 0.86]
+    path = _graded_file(tmp_path, scores)
     rc = main(["calibrate", "check", str(path)])
     report = json.loads(capsys.readouterr().out)
     assert rc == 1
     assert report["calibrated"] is False
-    assert any("need at least 9" in r for r in report["reasons"])
+    assert any("insufficient calibration data" in r for r in report["reasons"])
+    assert report["coverage_advisory"]["calibrated"] is True
+    assert report["activate"] is None
+
+
+def test_check_refuses_too_few_correct_examples(capsys, tmp_path):
+    path = _graded_file(tmp_path, [0.9, 0.8, 0.7])  # far below both gates' floors
+    rc = main(["calibrate", "check", str(path)])
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["calibrated"] is False
+    assert any("insufficient calibration data" in r for r in report["reasons"])
+    # The coverage advisory needs >= 9 correct examples for alpha=0.1.
+    assert any("need at least 9" in r for r in report["coverage_advisory"]["reasons"])
 
 
 def test_check_actionable_on_missing_file(capsys, tmp_path):
