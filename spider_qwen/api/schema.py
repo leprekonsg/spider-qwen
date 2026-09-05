@@ -55,5 +55,8 @@ class RunResult(BaseModel):
     # Discovery reasoning trace: initial queries, the CRAG retrieval verdict,
     # corrective/replan pivot queries, and which rewriter proposed them.
     reasoning: dict[str, Any] | None = None
+    # Application-owned search/fetch recipe pilot. Executions remain shadow and
+    # cannot alter candidates; reports expose evidence gates and divergence.
+    retrieval_recipes: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
     budget: dict[str, Any] = Field(default_factory=dict)

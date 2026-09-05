@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -259,15 +260,15 @@ def _operational_report(cases: list[dict[str, Any]], *, correctly_qualified: int
         model_cost = (metrics.get("cost") or {}).get("total_usd") if isinstance(metrics.get("cost"), dict) else None
         explicit_cost = (case.get("outcome_labels") or {}).get("total_attempted_cost_usd")
         latency = (metrics.get("latency_seconds") or {}).get("total") if isinstance(metrics.get("latency_seconds"), dict) else metrics.get("elapsed_seconds")
-        if isinstance(model_cost, (int, float)):
+        if _finite_number(model_cost):
             model_costs.append(float(model_cost))
         else:
             missing_model_cost = True
-        if isinstance(explicit_cost, (int, float)) and explicit_cost >= 0:
+        if _finite_nonnegative_number(explicit_cost):
             attempted_costs.append(float(explicit_cost))
         else:
             missing_attempted_cost = True
-        if isinstance(latency, (int, float)):
+        if _finite_nonnegative_number(latency):
             latencies.append(float(latency))
         else:
             missing_latency = True
@@ -276,15 +277,21 @@ def _operational_report(cases: list[dict[str, Any]], *, correctly_qualified: int
             fetch_urls += metrics["fetch_urls"]
         else:
             missing_attempt_counts = True
-    emitted = sum(bool(case.get("candidates")) for case in cases)
-    empty = len(cases) - emitted
+    failed = sum(bool(case.get("run_error")) for case in cases)
+    emitted = sum(bool(case.get("candidates")) and not case.get("run_error") for case in cases)
+    empty = sum(not case.get("candidates") and not case.get("run_error") for case in cases)
     reported_model_cost = round(sum(model_costs), 6) if not missing_model_cost else None
     total_attempted_cost = round(sum(attempted_costs), 6) if not missing_attempted_cost else None
     total_latency = round(sum(latencies), 3) if not missing_latency else None
     return {
         "attempted_runs": len(cases),
         "emitted_runs": emitted,
-        "empty_or_failed_runs": empty,
+        "emitted_run_rate": round(emitted / len(cases), 3) if cases else None,
+        "empty_successful_runs": empty,
+        "failed_runs": failed,
+        # Retained for consumers of the older aggregate field. It is the sum
+        # of the explicit partitions above, never an inferred failure count.
+        "empty_or_failed_runs": empty + failed,
         "reported_model_cost_usd": reported_model_cost,
         "reported_model_cost_scope": "model-token meter only; excludes provider and failed-attempt spend",
         "total_attempted_cost_usd": total_attempted_cost,
@@ -299,9 +306,37 @@ def _operational_report(cases: list[dict[str, Any]], *, correctly_qualified: int
         "mean_latency_seconds": (
             round(total_latency / len(cases), 3) if total_latency is not None and cases else None
         ),
+        "median_latency_seconds": _median_latency(latencies) if total_latency is not None else None,
+        "p95_latency_seconds": _p95_latency(latencies) if total_latency is not None else None,
+        "latency_percentile_method": "nearest_rank" if total_latency is not None and latencies else None,
         "attempted_search_calls": None if missing_attempt_counts else search_calls,
         "attempted_fetch_urls": None if missing_attempt_counts else fetch_urls,
     }
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _finite_nonnegative_number(value: Any) -> bool:
+    return _finite_number(value) and value >= 0
+
+
+def _median_latency(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    value = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+    return round(value, 3)
+
+
+def _p95_latency(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, math.ceil(len(ordered) * 0.95) - 1)
+    return round(ordered[index], 3)
 
 
 def score_human_outcomes(cases: list[dict[str, Any]]) -> dict[str, Any]:
@@ -322,6 +357,7 @@ def score_human_outcomes(cases: list[dict[str, Any]]) -> dict[str, Any]:
         or case["outcome_labels"].get(field) is None
     ]
     if missing:
+        operational = _operational_report(cases, correctly_qualified=None)
         return {
             "status": "unavailable",
             "reason": "Human outcome labels are incomplete.",
@@ -331,7 +367,9 @@ def score_human_outcomes(cases: list[dict[str, Any]]) -> dict[str, Any]:
             "shortlist_precision": None,
             "task_completion_rate": None,
             "reference_pool_recall": None,
-            "operational": _operational_report(cases, correctly_qualified=None),
+            "selective_shortlist_error_rate": None,
+            "emitted_run_rate": operational["emitted_run_rate"],
+            "operational": operational,
         }
 
     mandatory = offering_scope = completed = 0
@@ -346,7 +384,7 @@ def score_human_outcomes(cases: list[dict[str, Any]]) -> dict[str, Any]:
             raise ValueError(f"{case.get('case_id')}: task_completion must be boolean.")
         qualifying_ids = _label_supplier_ids(case, labels, "shortlist_qualifying_supplier_ids")
         reference_ids = _label_supplier_ids(case, labels, "reference_pool_supplier_ids")
-        returned_ids = {candidate.get("supplier_id") for candidate in case.get("candidates", []) if candidate.get("supplier_id")}
+        returned_ids = _returned_supplier_ids(case)
         if not qualifying_ids <= returned_ids:
             raise ValueError(f"{case.get('case_id')}: shortlist_qualifying_supplier_ids must be returned suppliers.")
         mandatory += labels["mandatory_requirements_satisfied"]
@@ -356,14 +394,20 @@ def score_human_outcomes(cases: list[dict[str, Any]]) -> dict[str, Any]:
         qualifying += len(qualifying_ids)
         reference += len(reference_ids)
         recalled += len(returned_ids & reference_ids)
+    shortlist_precision = round(qualifying / returned, 3) if returned else None
+    operational = _operational_report(cases, correctly_qualified=qualifying)
     return {
         "status": "available",
         "mandatory_requirement_satisfaction_rate": round(mandatory / len(cases), 3) if cases else None,
         "offering_scope_correctness_rate": round(offering_scope / len(cases), 3) if cases else None,
-        "shortlist_precision": round(qualifying / returned, 3) if returned else None,
+        "shortlist_precision": shortlist_precision,
         "task_completion_rate": round(completed / len(cases), 3) if cases else None,
         "reference_pool_recall": round(recalled / reference, 3) if reference else None,
-        "operational": _operational_report(cases, correctly_qualified=qualifying),
+        "selective_shortlist_error_rate": (
+            round(1 - shortlist_precision, 3) if shortlist_precision is not None else None
+        ),
+        "emitted_run_rate": operational["emitted_run_rate"],
+        "operational": operational,
     }
 
 
@@ -376,6 +420,19 @@ def _label_supplier_ids(case: dict[str, Any], labels: dict[str, Any], field: str
     normalized = [item.strip() for item in value]
     if len(normalized) != len(set(normalized)):
         raise ValueError(f"{case.get('case_id')}: {field} must not contain duplicate supplier IDs.")
+    return set(normalized)
+
+
+def _returned_supplier_ids(case: dict[str, Any]) -> set[str]:
+    candidates = case.get("candidates", [])
+    if not isinstance(candidates, list):
+        raise ValueError(f"{case.get('case_id')}: candidates must be a list.")
+    ids = [candidate.get("supplier_id") if isinstance(candidate, dict) else None for candidate in candidates]
+    if any(not isinstance(supplier_id, str) or not supplier_id.strip() for supplier_id in ids):
+        raise ValueError(f"{case.get('case_id')}: candidates must contain only non-empty supplier IDs.")
+    normalized = [supplier_id.strip() for supplier_id in ids]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"{case.get('case_id')}: candidates must not contain duplicate supplier IDs.")
     return set(normalized)
 
 

@@ -102,6 +102,11 @@ page_cache:
   enabled: false
   ttl_seconds: 86400
 
+retrieval_recipes:
+  # Versioned application-owned search/fetch recipes. Shadow findings are
+  # evaluated and retained for comparison but never alter candidate outputs.
+  enabled: false
+
 frontier:
   # Frontier gather: queries and 1-hop page links (same-domain contact pages,
   # directory entries) compete on one scored priority queue; the fetch budget

@@ -1,0 +1,297 @@
+{
+  "schema_version": "first-pass-annotations-1",
+  "label_provenance": "ai_provisional",
+  "reviewer": "Codex",
+  "reviewed_at": "2026-09-06",
+  "source_file": "live_sample_c.json",
+  "source_sha256": "58486cd3c488e088bfabf5eb70c2119723766ce2d8886b9c163c3ca2b3bfcb75",
+  "scope": "Manual first-pass review of supplied legacy excerpts and emitted fields; not live verification and not independent human labels. Prior grading notes were not treated as evidence.",
+  "release_eligible": false,
+  "limitations": [
+    "Five previously observed tasks, not untouched or representative held-out data.",
+    "Legacy output lacks stable supplier/offering IDs and complete evidence bundles.",
+    "No judged discovery reference pool, buyer-confirmed requirements, current validity, or all-attempt costs.",
+    "Source observations date from June 2026 and do not evaluate the September implementation."
+  ],
+  "mode_weights": {
+    "service_quote_required": 0.5,
+    "product_exact_price": 0.5
+  },
+  "tasks": [
+    {
+      "task_id": "live_sg_cleaning_001",
+      "query": "office cleaning Singapore quotation",
+      "mode": "service_quote_required",
+      "run_id": "run_131f72f8b913",
+      "outcome_labels": {
+        "mandatory_requirements_satisfied": null,
+        "offering_scope_correct": null,
+        "shortlist_qualifying_supplier_ids": null,
+        "task_completion": null,
+        "reference_pool_supplier_ids": null,
+        "total_attempted_cost_usd": null
+      },
+      "candidate_annotations": [
+        {
+          "row_index": 0,
+          "vendor_name": "City Cleaning",
+          "procurement_record_assessment": "contradicted",
+          "failure_category": "quotation_channel_not_actionable",
+          "reason": "The RFQ value is an instruction sentence, not a form URL. The excerpt says London; Singapore coverage remains unresolved.",
+          "evidence_ids_reviewed": [
+            "ev_af9e68f505b4",
+            "ev_f1379b3f367f"
+          ],
+          "evidence_bundle_sha256": "cd183793679108fb43003b571784d3e56f19a3fae7f8e9a0e74f7cfad78cf108",
+          "human_review_required": true
+        },
+        {
+          "row_index": 1,
+          "vendor_name": "GreenGarden.sg",
+          "procurement_record_assessment": "not_found",
+          "failure_category": "editorial_page",
+          "reason": "Pricing guide text does not establish supplier capability or that the contact page contains a quotation form.",
+          "evidence_ids_reviewed": [
+            "ev_61940d92f612",
+            "ev_ee7283fadf1e"
+          ],
+          "evidence_bundle_sha256": "bdced2d356d313ee370bc47683950c81ae6697f5c941d1b45c65368f8f2b9ba0",
+          "human_review_required": true
+        },
+        {
+          "row_index": 2,
+          "vendor_name": "Conrad",
+          "procurement_record_assessment": "contradicted",
+          "failure_category": "quotation_channel_not_actionable",
+          "reason": "Office cleaning in Singapore is supported, but the RFQ value is only contact form, not an actionable destination.",
+          "evidence_ids_reviewed": [
+            "ev_748582773818",
+            "ev_4cb303536a44"
+          ],
+          "evidence_bundle_sha256": "9fc46d3dc532ec0c49267c6d571c8acf9fd48859af52ef4adfc57bbddfa6178f",
+          "human_review_required": true
+        },
+        {
+          "row_index": 3,
+          "vendor_name": "Abba Maintenance Services",
+          "procurement_record_assessment": "not_found",
+          "failure_category": "truncated_evidence",
+          "reason": "Singapore office cleaning is supported. The excerpt does not show the contact form or price range.",
+          "evidence_ids_reviewed": [
+            "ev_838b741926c0",
+            "ev_4cd0fe250c2c"
+          ],
+          "evidence_bundle_sha256": "d1d63217d6a1a0072781f7e31dfa7d74959e27c0bc4a5d950657d3e5c07a6d90",
+          "human_review_required": true
+        },
+        {
+          "row_index": 4,
+          "vendor_name": "BNL",
+          "procurement_record_assessment": "not_found",
+          "failure_category": "truncated_evidence",
+          "reason": "BNL office-cleaning capability is supported. Singapore coverage and the quotation destination are not established by the excerpt.",
+          "evidence_ids_reviewed": [
+            "ev_d6586d9dd45b",
+            "ev_75d48c25c65b"
+          ],
+          "evidence_bundle_sha256": "40a070dc8fdf7d43348829e7b0be150003cfb491aee6daa71ed6dcdde81fca61",
+          "human_review_required": true
+        }
+      ]
+    },
+    {
+      "task_id": "live_sg_pest_002",
+      "query": "pest control Singapore RFQ",
+      "mode": "service_quote_required",
+      "run_id": "run_62f82527da98",
+      "outcome_labels": {
+        "mandatory_requirements_satisfied": null,
+        "offering_scope_correct": null,
+        "shortlist_qualifying_supplier_ids": null,
+        "task_completion": null,
+        "reference_pool_supplier_ids": null,
+        "total_attempted_cost_usd": null
+      },
+      "candidate_annotations": [
+        {
+          "row_index": 0,
+          "vendor_name": "Precision Pest.",
+          "procurement_record_assessment": "contradicted",
+          "failure_category": "quotation_channel_not_actionable",
+          "reason": "Pest-control capability is supported. Request a Free Site Assessment is button text, not an actionable form URL.",
+          "evidence_ids_reviewed": [
+            "ev_3b76e5ca8b7b",
+            "ev_dc89119ccb38"
+          ],
+          "evidence_bundle_sha256": "4a288f8b7b592d0cd8d4b36904165c79e246cdc51ef8c742133265425add6809",
+          "human_review_required": true
+        }
+      ]
+    },
+    {
+      "task_id": "live_my_fire_003",
+      "query": "fire alarm maintenance Malaysia quotation",
+      "mode": "service_quote_required",
+      "run_id": "run_13dd0f2d5e3a",
+      "outcome_labels": {
+        "mandatory_requirements_satisfied": null,
+        "offering_scope_correct": null,
+        "shortlist_qualifying_supplier_ids": null,
+        "task_completion": null,
+        "reference_pool_supplier_ids": null,
+        "total_attempted_cost_usd": null
+      },
+      "candidate_annotations": [
+        {
+          "row_index": 0,
+          "vendor_name": "Devices World Sdn. Bhd.",
+          "procurement_record_assessment": "not_found",
+          "failure_category": "historical_source",
+          "reason": "A 2004 seminar paper does not establish a current maintenance offer, current quotation contact, or starting price.",
+          "evidence_ids_reviewed": [
+            "ev_f776940ddf34",
+            "ev_3d02339431ba"
+          ],
+          "evidence_bundle_sha256": "7e858a0a0064621e217ffbe8658f27bccf3209c038aaf9c754592d667b59d708",
+          "human_review_required": true
+        },
+        {
+          "row_index": 1,
+          "vendor_name": "Maintenance & Servicing of Fire Protection Systems",
+          "procurement_record_assessment": "not_found",
+          "failure_category": "supplier_identity_unresolved",
+          "reason": "Maintenance capability is asserted, but the extracted vendor is a page title; legal/trading identity and current quotation contact need evidence.",
+          "evidence_ids_reviewed": [
+            "ev_71f4e3a6df91",
+            "ev_b0b15ab00739"
+          ],
+          "evidence_bundle_sha256": "c5ebe220d8d74be8c05aefb92ac431bc9131161a31ac6f770806b9cf21de61c8",
+          "human_review_required": true
+        }
+      ]
+    },
+    {
+      "task_id": "live_sg_chairs_004",
+      "query": "ergonomic office chairs Singapore public pricing",
+      "mode": "product_exact_price",
+      "run_id": "run_7de0306e2518",
+      "outcome_labels": {
+        "mandatory_requirements_satisfied": null,
+        "offering_scope_correct": null,
+        "shortlist_qualifying_supplier_ids": null,
+        "task_completion": null,
+        "reference_pool_supplier_ids": null,
+        "total_attempted_cost_usd": null
+      },
+      "candidate_annotations": [
+        {
+          "row_index": 0,
+          "vendor_name": "TakeAseat.sg",
+          "procurement_record_assessment": "contradicted",
+          "failure_category": "wrong_offering",
+          "reason": "49.90 belongs to an Ultima V2 headrest accessory, not an ergonomic chair.",
+          "evidence_ids_reviewed": [
+            "ev_d431416a3520",
+            "ev_63d9b8ef1a0b"
+          ],
+          "evidence_bundle_sha256": "e387d43f531bf138aeafd987f4bb82d7680c7972aef4ff4c6d9328ea90d2e5b3",
+          "human_review_required": true
+        },
+        {
+          "row_index": 1,
+          "vendor_name": "IUIGA",
+          "procurement_record_assessment": "not_found",
+          "failure_category": "offer_scope_incomplete",
+          "reason": "The excerpt supports chair models at 199 and 229. Output omits model, numeric price, and unit; cannot certify a coherent comparable offer.",
+          "evidence_ids_reviewed": [
+            "ev_8bce51eb4ea0",
+            "ev_fec152b24e5f"
+          ],
+          "evidence_bundle_sha256": "f68e74d23350bbb748e617f101126fd92de4f885f21d4f05b875eafc77efe94f",
+          "human_review_required": true
+        }
+      ]
+    },
+    {
+      "task_id": "live_sg_paper_005",
+      "query": "bulk printer paper Singapore price per unit",
+      "mode": "product_exact_price",
+      "run_id": "run_25ffe31f5844",
+      "outcome_labels": {
+        "mandatory_requirements_satisfied": null,
+        "offering_scope_correct": null,
+        "shortlist_qualifying_supplier_ids": null,
+        "task_completion": null,
+        "reference_pool_supplier_ids": null,
+        "total_attempted_cost_usd": null
+      },
+      "candidate_annotations": [
+        {
+          "row_index": 0,
+          "vendor_name": "Accea Singapore Pte. Ltd.",
+          "procurement_record_assessment": "contradicted",
+          "failure_category": "wrong_offering",
+          "reason": "0.18 is A4 colour printing for 10000+ pages, not bulk blank printer paper.",
+          "evidence_ids_reviewed": [
+            "ev_7469c413a3c9",
+            "ev_5ec4409988b9"
+          ],
+          "evidence_bundle_sha256": "356c7e3f79c58b06b101545ddd8f23627f07066090797aa3c8cb5343236e6474",
+          "human_review_required": true
+        },
+        {
+          "row_index": 1,
+          "vendor_name": "Million Parcel",
+          "procurement_record_assessment": "not_found",
+          "failure_category": "offer_scope_incomplete",
+          "reason": "The excerpt shows 7.90 with multiple paper variants and pack quantities. Output omits the selected variant and per-ream unit; bulk price is unresolved.",
+          "evidence_ids_reviewed": [
+            "ev_8cff66f79281",
+            "ev_6493e7ca048b"
+          ],
+          "evidence_bundle_sha256": "8d7d0b6e1eaf950dd983d59d32bb799dfcdf266489beea1a9340c97def63f615",
+          "human_review_required": true
+        },
+        {
+          "row_index": 2,
+          "vendor_name": "Home n Office",
+          "procurement_record_assessment": "contradicted",
+          "failure_category": "quantity_condition_omitted",
+          "reason": "4.70 is the Fujifilm 70gsm A4 bulk tier at 50 or more. Output omits the product and minimum quantity, so its unscoped exact-price claim is incomplete.",
+          "evidence_ids_reviewed": [
+            "ev_66c8ac956730",
+            "ev_4eb49575d5e0"
+          ],
+          "evidence_bundle_sha256": "86d2d7c811ac76007ef5297fd67206e656cc1b160727e78d3fce9f6fffedb5d5",
+          "human_review_required": true
+        },
+        {
+          "row_index": 3,
+          "vendor_name": "Bulk Paper Products Singapore | Trusted Wholesale Supplies",
+          "procurement_record_assessment": "not_found",
+          "failure_category": "supplier_identity_and_unit_unresolved",
+          "reason": "The excerpt lists separate A3/A4/A5 ranges but no named supplier or pack unit. A generic page title and range are insufficient.",
+          "evidence_ids_reviewed": [
+            "ev_6d120bc31125",
+            "ev_8243fc9393f8"
+          ],
+          "evidence_bundle_sha256": "ea84ef6882c805fdf14ba13877df574e8fba22d22376121fcd00abce6c51619d",
+          "human_review_required": true
+        },
+        {
+          "row_index": 4,
+          "vendor_name": "Lazada",
+          "procurement_record_assessment": "contradicted",
+          "failure_category": "marketplace_shell",
+          "reason": "The evidence is marketplace navigation, without an identified seller, paper offering, or price. PRICE_RANGE is unsupported.",
+          "evidence_ids_reviewed": [
+            "ev_ab8a893b5e69",
+            "ev_327d818524ac"
+          ],
+          "evidence_bundle_sha256": "7651429eae6fb6ad040b8b589d9595967ebe8770afae9a8b9604082b2f19b5b6",
+          "human_review_required": true
+        }
+      ]
+    }
+  ]
+}

@@ -17,7 +17,7 @@ from .. import SCHEMA_VERSION, __version__
 
 PIPELINE_VERSION = (
     f"spider-qwen/{__version__};schema={SCHEMA_VERSION};"
-    "identity=3;ranking=3;profiles=1;execution=2;verification=3;requirements=1;offerings=1"
+    "identity=3;ranking=3;profiles=1;execution=2;verification=3;requirements=1;offerings=1;recipes=1"
 )
 
 
@@ -84,6 +84,7 @@ class OperatorProfile:
                 "frontier": policy.frontier_enabled(),
                 "frontier_scorer": policy.qwen_frontier_scorer_enabled(),
                 "page_cache": policy.page_cache_enabled(),
+                "retrieval_recipes": policy.retrieval_recipes_enabled(),
                 "mandatory_review": self.require_review,
                 "rfq_grade_floor": self.rfq_grade_floor,
             },

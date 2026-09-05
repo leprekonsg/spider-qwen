@@ -442,9 +442,55 @@ are conflicts. Warm memory joins by supplier ID or an explicitly evidence-backed
 
 Benchmarks distinguish channel yield from labelled precision and actual routing
 from the classifier baseline. Human outcome metrics remain unavailable until labelled.
-The next held-out corpus targets mixed services and products; synthetic test labels
-are regression fixtures, not release evidence. Recipe promotion and checkpointed
-entity research remain gated on measured outcomes and shared resource accounting.
+The held-out corpus targets mixed services and products; synthetic test labels
+are regression fixtures, not release evidence. `benchmarks/first_pass_annotations.json`
+contains AI-provisional reviews of 15 historical records across five tasks. Those
+excerpts cannot establish current pipeline quality or discovery recall.
+
+`python -m spider_qwen.benchmarks.stage3 --help` exposes label validation, family-disjoint
+splits, weighted reports and release gates. AI labels remain diagnostic; release
+review requires independent human labels and explicit acceptance thresholds.
+Prepare membership before collecting outcome labels:
+
+```bash
+python -m spider_qwen.benchmarks.stage3 prepare tasks.json > prepared.json
+python -m spider_qwen.benchmarks.stage3 report labelled.json --weights '{"service_quote_required":0.5,"product_exact_price":0.5}'
+```
+
+`gate` also requires `--manifest prepared.json` and `--thresholds` for all reported
+quality metrics. The checksum binds task inputs and split membership; it is not
+independent proof of when the manifest was created. Cold evaluations isolate each
+case; warm evaluations selectively seed memory or `page_cache` in fresh case roots.
+
+Set `SPIDER_QWEN_RETRIEVAL_RECIPES_ENABLED=1` to pilot application-owned search/fetch
+recipes in shadow mode. They consume remaining run capacity, record evidence and
+URL divergence, and quarantine failed postconditions or drift. They never change
+the shortlist or RFQs. Retrieval shape checks do not prove supplier qualification;
+measured outcome/cost comparisons are still required before active use.
+
+Targeted requirement refresh is available without repeating discovery:
+
+```bash
+python -m spider_qwen.application.requirement_research request.json --fixtures pages.json
+```
+
+```json
+{"dataset_id":"cleaning","input_version":"v1","limits":{"max_provider_calls":2,"max_cost_micros":0},"tasks":[{"candidate_kind":"service","candidate":{"supplier_id":"sup_acme","offering_id":"off_cleaning","vendor_name":"Acme","website":"https://acme.example","service_name":"cleaning"},"requirement":{"text":"overnight work"},"approved_origins":["https://acme.example"],"urls":["https://acme.example/services"]}]}
+```
+
+`pages.json` maps each URL to a fixture such as `{"text":"We provide overnight work."}`.
+Repeated invocations reuse completed claims; `--retry-failed` retries failed items.
+Use a new `input_version` for an intentional refresh. SQLite retains checkpoints,
+evidence and conservative reservations after interruption. Live mode requires
+`--live`, `SPIDER_QWEN_ALLOW_LIVE=1`, and a positive
+`--max-cost-micros-per-fetch` upper bound (USD millionths). Reservations include
+failed attempts and cover only this runner's acquisition calls, not all application
+spend. Custom handlers must route acquisitions through `EntityWorkContext`.
+Owner scope is fixed by the local operator; this CLI is not a remote API.
+
+Browser specialisation and model training remain deferred: the reviewed historical
+failures do not establish incremental value over fixing attribution and offer scope.
+No supplier-facing actions are introduced.
 
 `SPIDER_QWEN_DEFAULT_PROFILE` selects `offline_demo` (default), `live_research`,
 or `reviewed_procurement`. Live profiles require `SPIDER_QWEN_ALLOW_LIVE=1` and

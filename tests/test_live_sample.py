@@ -6,6 +6,7 @@ it came from; an ungraded file must never produce a number.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,7 @@ def test_score_computes_precision_and_recall():
     assert report["per_mode"]["service_quote_required"]["missed"] == 2
     assert report["human_outcomes"]["status"] == "unavailable"
     assert report["human_outcomes"]["shortlist_precision"] is None
+    assert report["human_outcomes"]["selective_shortlist_error_rate"] is None
 
 
 def test_score_reports_outcomes_only_from_explicit_human_labels():
@@ -147,6 +149,7 @@ def test_score_reports_outcomes_only_from_explicit_human_labels():
     outcomes = score_human_outcomes(payload["cases"])
     assert outcomes["status"] == "available"
     assert outcomes["shortlist_precision"] == round(2 / 3, 3)
+    assert outcomes["selective_shortlist_error_rate"] == round(1 / 3, 3)
     assert outcomes["reference_pool_recall"] == round(2 / 3, 3)
     assert outcomes["operational"]["total_attempted_cost_usd"] is None
     assert outcomes["operational"]["cost_per_correctly_qualified_supplier_usd"] is None
@@ -204,6 +207,9 @@ def test_synthetic_human_outcomes_include_empty_runs_cost_and_latency():
     assert outcomes["operational"] == {
         "attempted_runs": 2,
         "emitted_runs": 1,
+        "emitted_run_rate": 0.5,
+        "empty_successful_runs": 1,
+        "failed_runs": 0,
         "empty_or_failed_runs": 1,
         "reported_model_cost_usd": 4.0,
         "reported_model_cost_scope": "model-token meter only; excludes provider and failed-attempt spend",
@@ -211,14 +217,58 @@ def test_synthetic_human_outcomes_include_empty_runs_cost_and_latency():
         "total_attempted_cost_status": "available: explicit human/operator supplied all-attempt cost",
         "cost_per_correctly_qualified_supplier_usd": 7.0,
         "mean_latency_seconds": 4.0,
+        "median_latency_seconds": 4.0,
+        "p95_latency_seconds": 6.0,
+        "latency_percentile_method": "nearest_rank",
         "attempted_search_calls": 3,
         "attempted_fetch_urls": 6,
     }
 
 
+def test_operational_dashboard_separates_explicit_failures_and_latency_distribution():
+    cases = []
+    for index, latency in enumerate((1.0, 2.0, 3.0, 4.0, 20.0)):
+        emitted = index < 3
+        case = {
+            "case_id": f"synthetic-{index}",
+            "candidates": [{"supplier_id": f"supplier-{index}"}] if emitted else [],
+            "operational_metrics": {
+                "cost": {"total_usd": 1.0}, "latency_seconds": {"total": latency},
+                "search_calls": 1, "fetch_urls": 1,
+            },
+            "outcome_labels": {
+                "mandatory_requirements_satisfied": True,
+                "offering_scope_correct": True,
+                "shortlist_qualifying_supplier_ids": [f"supplier-{index}"] if emitted else [],
+                "task_completion": True,
+                "reference_pool_supplier_ids": [f"supplier-{index}"] if emitted else [],
+                "total_attempted_cost_usd": 1.0,
+            },
+        }
+        if index == 4:
+            case["run_error"] = "TimeoutError: adapter stalled"
+        cases.append(case)
+
+    outcomes = score_human_outcomes(cases)
+    operational = outcomes["operational"]
+
+    assert operational["emitted_runs"] == 3
+    assert operational["emitted_run_rate"] == 0.6
+    assert operational["empty_successful_runs"] == 1
+    assert operational["failed_runs"] == 1
+    assert operational["empty_or_failed_runs"] == 2
+    assert operational["mean_latency_seconds"] == 6.0
+    assert operational["median_latency_seconds"] == 3.0
+    assert operational["p95_latency_seconds"] == 20.0
+    assert operational["latency_percentile_method"] == "nearest_rank"
+    assert outcomes["emitted_run_rate"] == 0.6
+    assert outcomes["selective_shortlist_error_rate"] == 0.0
+
+
 def test_outcome_supplier_labels_reject_invalid_ids():
     payload = _graded_payload()
     for case in payload["cases"]:
+        case["candidates"] = []
         case["outcome_labels"] = {
             "mandatory_requirements_satisfied": True,
             "offering_scope_correct": True,
@@ -230,6 +280,49 @@ def test_outcome_supplier_labels_reject_invalid_ids():
     payload["cases"][0]["outcome_labels"]["shortlist_qualifying_supplier_ids"] = ["supplier-a", "supplier-a"]
     with pytest.raises(ValueError, match="duplicate supplier IDs"):
         score_human_outcomes(payload["cases"])
+
+
+def test_outcome_scorer_rejects_invalid_or_duplicate_returned_supplier_ids():
+    payload = _graded_payload()
+    for case in payload["cases"]:
+        case["outcome_labels"] = {
+            "mandatory_requirements_satisfied": True,
+            "offering_scope_correct": True,
+            "shortlist_qualifying_supplier_ids": [],
+            "task_completion": True,
+            "reference_pool_supplier_ids": [],
+        }
+    payload["cases"][0]["candidates"] = [{"supplier_id": {"not": "an id"}}]
+    with pytest.raises(ValueError, match="non-empty supplier IDs"):
+        score_human_outcomes(payload["cases"])
+
+    payload["cases"][0]["candidates"] = [{"supplier_id": "supplier-a"}, {"supplier_id": "supplier-a"}]
+    with pytest.raises(ValueError, match="duplicate supplier IDs"):
+        score_human_outcomes(payload["cases"])
+
+
+def test_operational_cost_rejects_boolean_and_nonfinite_values():
+    payload = _graded_payload()
+    for case in payload["cases"]:
+        case["candidates"] = []
+        case["outcome_labels"] = {
+            "mandatory_requirements_satisfied": True,
+            "offering_scope_correct": True,
+            "shortlist_qualifying_supplier_ids": [],
+            "task_completion": True,
+            "reference_pool_supplier_ids": [],
+            "total_attempted_cost_usd": True,
+        }
+        case["operational_metrics"] = {
+            "cost": {"total_usd": math.nan}, "latency_seconds": {"total": math.inf},
+            "search_calls": 0, "fetch_urls": 0,
+        }
+
+    operational = score_human_outcomes(payload["cases"])["operational"]
+
+    assert operational["reported_model_cost_usd"] is None
+    assert operational["total_attempted_cost_usd"] is None
+    assert operational["mean_latency_seconds"] is None
 
 
 def test_score_refuses_ungraded_file_with_case_ids():

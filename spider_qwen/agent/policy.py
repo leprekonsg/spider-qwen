@@ -276,6 +276,14 @@ class Policy:
         # consume no fetch budget. Off by default so every base run is cold.
         return _env_bool("SPIDER_QWEN_PAGE_CACHE_ENABLED", self.data.get("page_cache", {}).get("enabled", False))
 
+    def retrieval_recipes_enabled(self) -> bool:
+        # Application-controlled search/fetch recipes stay shadow-only. The
+        # flag is off by default so existing runs spend no additional budget.
+        return _env_bool(
+            "SPIDER_QWEN_RETRIEVAL_RECIPES_ENABLED",
+            self.data.get("retrieval_recipes", {}).get("enabled", False),
+        )
+
     def page_cache_ttl_seconds(self) -> int:
         raw = os.getenv("SPIDER_QWEN_PAGE_CACHE_TTL_SECONDS")
         if raw is not None:

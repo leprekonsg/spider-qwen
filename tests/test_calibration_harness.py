@@ -141,6 +141,7 @@ def test_run_metrics_include_latency_breakdown(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
     result = _run_cli(capsys, ["run", "office cleaning Singapore", "--offline"])
     latency = result["metrics"]["latency_seconds"]
-    assert set(latency) == {"gather", "verify", "rfq", "total"}
+    assert set(latency) == {"gather", "verify", "rfq", "recipe_shadow", "total"}
+    assert latency["recipe_shadow"] == 0.0
     assert all(v >= 0 for v in latency.values())
     assert latency["total"] >= latency["gather"]

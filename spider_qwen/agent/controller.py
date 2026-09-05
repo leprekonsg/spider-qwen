@@ -33,6 +33,7 @@ from .frontier import (
 from .planner import Planner
 from .policy import Policy, load_policy
 from ..api.schema import Classification, RunResult
+from ..application.retrieval_recipes import RecipePilot, build_default_recipe_pilot
 from ..evidence.ledger import EvidenceLedger
 from ..evidence.graph import render_supplier_graph
 from ..evidence.models import EvidenceRef, sha256_hex, utc_now_iso
@@ -147,6 +148,7 @@ class Controller:
         qwen_router: object | None = None,
         memory_mcp: SemanticMemoryMcpAdapter | None = None,
         identity_registry: SupplierIdentityRegistry | None = None,
+        recipe_pilot: RecipePilot | None = None,
         state_dir: str | Path | None = None,
         persist: bool = True,
         require_review: bool | None = None,
@@ -182,6 +184,11 @@ class Controller:
                 self.fetch_fallback = fallback
         self.state_dir = Path(state_dir) if state_dir else None
         self.persist = persist and self.state_dir is not None
+        self.recipe_pilot = recipe_pilot
+        if self.recipe_pilot is None and self.policy.retrieval_recipes_enabled():
+            self.recipe_pilot = build_default_recipe_pilot(
+                self.state_dir if self.persist else None
+            )
         self.require_review = self.policy.hitl_require_review() if require_review is None else require_review
         self.classifier = ModeClassifier()
         # Fail loud at init, not mid-run, when a live Qwen path is enabled with
@@ -464,7 +471,8 @@ class Controller:
             else:
                 tracer.record(step="geo_fallback", tool="search", status="success")
                 more = await self._gather(
-                    ctx, route, query, search, fetch, region="global", target_country=target_country
+                    ctx, route, query, search, fetch, region="global", target_country=target_country,
+                    pages_out=sea_pages,
                 )
             candidates, fallback_merges = dedupe_candidates(candidates + more)
             self._record_consolidation(
@@ -599,6 +607,20 @@ class Controller:
             )
         rfq_done = time.perf_counter()
 
+        # Stage 4 pilot: recipes run only after baseline acquisition,
+        # verification, and RFQ drafting. They share the hard run tracker but
+        # can consume only capacity the baseline left unused. Their evidence is
+        # evaluated and reported in shadow; it never enters candidate outputs.
+        retrieval_recipes: dict = {}
+        recipe_start = time.perf_counter()
+        if self.recipe_pilot is not None:
+            retrieval_recipes = await self.recipe_pilot.run_shadow(
+                run_id=run_id, query=query, mode=chosen.value, country=target_country,
+                search=search, fetch=fetch, tracker=tracker,
+                baseline_pages=sea_pages, tracer=tracer,
+            )
+        recipe_done = time.perf_counter()
+
         metrics.search_calls_total = tracker.search_calls
         metrics.fetch_urls_total = tracker.fetch_urls
         metrics.validated_candidates_total = len(validated)
@@ -680,6 +702,7 @@ class Controller:
                     if self.qwen_query_rewriter is not None else "deterministic"
                 ),
             },
+            retrieval_recipes=retrieval_recipes,
             serendipity=serendipity_result.model_dump(mode="json"),
             serendipity_discovery=discovery.model_dump(mode="json") if discovery else None,
             pricing_status_summary=self._pricing_summary(candidates),
@@ -718,6 +741,10 @@ class Controller:
                     "gather": round(gather_done - phase_start, 3),
                     "verify": round(verify_done - gather_done, 3),
                     "rfq": round(rfq_done - rfq_start, 3),
+                    "recipe_shadow": (
+                        round(recipe_done - recipe_start, 3)
+                        if self.recipe_pilot is not None else 0.0
+                    ),
                     "total": round(time.perf_counter() - phase_start, 3),
                 },
                 **verification_metrics,

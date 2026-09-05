@@ -53,6 +53,7 @@ class CompletedRunQueries:
                 "run_id", "query", "mode", "stop_reason", "schema_version",
                 "execution", "profile", "pipeline_version", "effective_config",
                 "procurement_request", "qualification_summary",
+                "retrieval_recipes",
             ) if key in result}
         if operation == "list_candidates":
             return {"run_id": run_id, "candidates": deepcopy(candidates),

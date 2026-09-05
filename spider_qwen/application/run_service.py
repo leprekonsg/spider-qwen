@@ -32,6 +32,7 @@ _TRACE_STEPS = {
     "page_judge", "page_role_gate", "qwen_json_extract", "pricing_subject_gate",
     "verify_claims", "conformal_gate", "memory_credit_verify", "supplier_consolidation",
     "memory_recall",
+    "retrieval_recipe_shadow",
 }
 _TRACE_TOOLS = {
     "mcp_search", "mock", "tinyfish_search", "tinyfish_fetch", "page_judge",
@@ -39,6 +40,7 @@ _TRACE_TOOLS = {
     "frontier", "qwen_frontier_scorer", "semantic_memory", "url_heuristic",
     "qwen_json_extractor", "minicheck_verifier", "conformal_abstainer", "supplier_identity",
     "query_rewrite",
+    "retrieval_recipe",
 }
 _TRACE_STATUSES = {"success", "error", "blocked", "rejected"}
 
@@ -48,7 +50,8 @@ def _trace_phase(step: str) -> str:
                 "verification_replan", "compiler_execute", "frontier_drain", "frontier_score",
                 "frontier_rescore", "reasoning_trajectory"}:
         return "discovery"
-    if step in {"fetch", "fetch_fallback", "wayback_recover", "page_judge", "page_role_gate"}:
+    if step in {"fetch", "fetch_fallback", "wayback_recover", "page_judge", "page_role_gate",
+                "retrieval_recipe_shadow"}:
         return "retrieval"
     if step in {"qwen_json_extract", "pricing_subject_gate"}:
         return "extraction"
