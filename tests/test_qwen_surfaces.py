@@ -205,6 +205,158 @@ def test_zero_claim_candidate_recommends_replan():
     assert metrics["replan_recommended"] is True
 
 
+class _SixResultSearch(_TwoResultSearch):
+    _VENDORS = [
+        {
+            "url": f"https://reserve-vendor-{i}.sg/cleaning",
+            "title": f"Reserve Vendor {i} Pte Ltd - office cleaning Singapore",
+            "snippet": "Office cleaning Singapore. Request a quotation via our contact page.",
+        }
+        for i in range(1, 9)
+    ]
+
+
+def test_verification_refills_from_fetched_reserve_before_research(monkeypatch):
+    """The sixth fetched supplier is checked before a corrective search spends.
+
+    The first visible batch is rejected.  Three lower-ranked candidates already
+    fetched in the same run pass verification, meeting the output minimum without
+    invoking the one allowed verification-replan search round.
+    """
+    controller = Controller(
+        offline=True, state_dir=None, persist=False, verify=True,
+        search_provider=_SixResultSearch(),
+    )
+    batches: list[int] = []
+
+    def fake_verify(ledger, batch, tracer):
+        batches.append(len(batch))
+        if len(batch) > 1:
+            return [], {
+                "claims_verified": 0,
+                "claims_unsupported": len(batch),
+                "candidates_blocked_unverified": len(batch),
+                "verification_assessments": {},
+                "replan_recommended": True,
+            }
+        return list(batch), {
+            "claims_verified": 1,
+            "claims_unsupported": 0,
+            "candidates_blocked_unverified": 0,
+            "verification_assessments": {},
+            "replan_recommended": False,
+        }
+
+    monkeypatch.setattr(controller, "_verify_candidates", fake_verify)
+    result = asyncio.run(controller.run("office cleaning Singapore", mode="service_quote_required"))
+    assert batches[0] == 5
+    assert batches[1:] == [1, 1, 1]
+    assert result.metrics["reserve_candidates_verified"] == 3
+    assert len(result.validated_candidates) == 3
+    assert result.reasoning["replan_queries"] == []
+
+
+class _ConsolidatedSupplierSearch:
+    provider_name = "mock"
+    search_source_tool = "mock"
+    rate_limited = False
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def search(self, query, location, language, limit):
+        from spider_qwen.tools.provider_types import SearchResult, SearchResultSet
+
+        return SearchResultSet(
+            query=query,
+            provider="mock",
+            total_results=len(self._rows),
+            results=[SearchResult(rank=index, source_tool="mock", **row)
+                     for index, row in enumerate(self._rows)],
+        )
+
+
+def test_controller_withholds_consolidated_pricing_conflict_from_rfq():
+    """A merged supplier with incompatible pricing states never reaches RFQ output."""
+    from spider_qwen.tools.fetch_service import MockFetchProvider
+
+    first = "https://origin.example/services"
+    second = "https://origin.example/contact"
+    rows = [
+        {"url": first, "title": "Origin Exterminators Pte Ltd",
+         "snippet": "Pest control Singapore. Request a quotation."},
+        {"url": second, "title": "Origin Exterminators Pte Ltd | Contact",
+         "snippet": "Pest control Singapore. Contact sales."},
+    ]
+    fetch = MockFetchProvider(fixtures={
+        first: {
+            "title": rows[0]["title"],
+            "text": "Origin Exterminators Pte Ltd provides pest control across Singapore. "
+                    "Pest control service is S$100 per visit. Request a quotation at sales@origin.example.",
+            "links": [],
+        },
+        second: {
+            "title": rows[1]["title"],
+            "text": "Origin Exterminators Pte Ltd provides pest control across Singapore. "
+                    "Request a quotation at sales@origin.example.",
+            "links": [],
+        },
+    })
+    result = asyncio.run(Controller(
+        offline=True, persist=False,
+        search_provider=_ConsolidatedSupplierSearch(rows), fetch_provider=fetch,
+    ).run("pest control Singapore", mode="service_quote_required"))
+
+    assert result.validated_candidates == []
+    assert result.rfq_drafts == []
+    assert result.metrics["candidates_considered"] == 1
+    assert result.serendipity["primary_answer"] is None
+    assert len(result.withheld_candidates) == 1
+    withheld = result.withheld_candidates[0]
+    assert withheld["withheld_reason"] == "unresolved conflicting field claim"
+    assert "pricing_status" in withheld["withheld_fields"]
+    claims = withheld["field_claims"]["pricing_status"]
+    assert {claim["value"] for claim in claims} == {"EXACT_PRICE", "QUOTE_REQUIRED"}
+    assert all(claim["evidence_refs"] for claim in claims)
+
+
+def test_controller_recomputes_completeness_for_complementary_supplier_pages():
+    """Service evidence and a quote channel from separate pages form one supplier."""
+    from spider_qwen.tools.fetch_service import MockFetchProvider
+
+    service = "https://origin.example/services"
+    contact = "https://origin.example/contact"
+    rows = [
+        {"url": service, "title": "Origin Exterminators Pte Ltd",
+         "snippet": "Pest control Singapore."},
+        {"url": contact, "title": "Origin Exterminators Pte Ltd | Contact",
+         "snippet": "Contact Origin Exterminators."},
+    ]
+    result = asyncio.run(Controller(
+        offline=True, persist=False,
+        search_provider=_ConsolidatedSupplierSearch(rows),
+        fetch_provider=MockFetchProvider(fixtures={
+            service: {
+                "title": rows[0]["title"],
+                "text": "Origin Exterminators Pte Ltd provides pest control across Singapore.",
+                "links": [],
+            },
+            contact: {
+                "title": rows[1]["title"],
+                "text": "Origin Exterminators Pte Ltd. Request a quotation at sales@origin.example.",
+                "links": [],
+            },
+        }),
+    ).run("pest control Singapore", mode="service_quote_required"))
+
+    assert result.metrics["candidates_considered"] == 1
+    assert len(result.validated_candidates) == 1
+    candidate = result.validated_candidates[0]
+    assert candidate["evidence_completeness"] == 1.0
+    assert len(candidate["evidence_refs"]) >= 2
+    assert len(result.rfq_drafts) == 1
+
+
 # --- RFQ drafter + deterministic fact-check ------------------------------------------
 
 def test_unsourced_numeric_claims_flags_only_ungrounded_numbers():

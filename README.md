@@ -405,6 +405,30 @@ uvicorn spider_qwen.api.server:app --host 0.0.0.0 --port 8000
 
 The included `Dockerfile` serves the same offline-safe API path.
 
+The UI uses durable runs: `POST /runs`, `GET /runs/{id}`, `/result`, `/events`,
+and `POST /runs/{id}/cancel`. Stop waits for worker acknowledgement. SQLite
+persists results and events; interrupted runs are marked on restart. Run one
+server process per state directory. Memory and evidence are isolated by owner.
+
+`SPIDER_QWEN_DEFAULT_PROFILE` selects `offline_demo` (default), `live_research`,
+or `reviewed_procurement`. Live profiles require `SPIDER_QWEN_ALLOW_LIVE=1` and
+authentication. Supply `SPIDER_QWEN_API_TOKENS` as an environment-only JSON map
+from bearer tokens to owners. Browser deployments can instead use
+`SPIDER_QWEN_TRUST_OWNER_HEADER=1` behind an authenticated proxy that strips and
+sets `X-Spider-Qwen-Owner`; block direct access to that backend.
+
+`GET /config` describes profiles and admission limits. Defaults: two workers,
+eight queued runs, one active live run and 20 admitted live runs per UTC day.
+The daily limit counts runs, not currency. Completed results include the
+effective policy fingerprint; calibration must match both `pipeline_version`
+and `config_fingerprint` for verified profile runs. Re-evaluate changed pipelines.
+
+Supported browsers expose five read-only WebMCP tools over the displayed completed
+run: `get_current_run`, `list_candidates`, `get_candidate_evidence`,
+`compare_candidates`, `get_rfq_draft`. The server MCP exposes the same projections;
+bind its owner with `SPIDER_QWEN_MCP_OWNER` (default `local`). Supplier-site tool
+consumption remains deferred pending approved sites and measured coverage.
+
 ## Docs
 
 - `docs/architecture.md`

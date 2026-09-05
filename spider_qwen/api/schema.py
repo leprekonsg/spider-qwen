@@ -24,6 +24,10 @@ class RunResult(BaseModel):
     stop_reason: str
     classification: Classification
     validated_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    # Consolidated candidates with unresolved conflicting field claims. These
+    # are inspection-only records and never participate in final ranking, RFQs,
+    # or memory promotion.
+    withheld_candidates: list[dict[str, Any]] = Field(default_factory=list)
     # T-1.1: four-slot serendipity view (primary_answer + s1/s2/s3 + score).
     serendipity: dict[str, Any] | None = None
     # T-8.2: opt-in (--serendipity) discovery sidecar -- S1/S2/S3 populated from

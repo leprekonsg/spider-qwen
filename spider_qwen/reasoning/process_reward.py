@@ -13,19 +13,21 @@ from .trajectory import TrajectoryBundle
 
 SERVICE_WEIGHTS: dict[str, float] = {
     "service_match": 0.25,
-    "quote_channel": 0.25,
-    "geo": 0.20,
-    "contact_reliability": 0.15,
+    "quote_channel": 0.20,
+    "geo": 0.15,
     "checklist": 0.10,
+    "evidence_quality": 0.15,
+    "qualified_supplier_coverage": 0.10,
     "evidence_diversity": 0.05,
 }
 ELECTRONICS_WEIGHTS: dict[str, float] = {
-    "fff_similarity": 0.30,
-    "lifecycle_safety": 0.20,
+    "fff_similarity": 0.25,
+    "lifecycle_safety": 0.15,
     "authorized_source": 0.15,
     "stock": 0.15,
     "datasheet_evidence": 0.10,
     "risk": 0.10,
+    "qualified_supplier_coverage": 0.10,
 }
 
 _SERVICE_MODES = {"service_quote_required", "contact_enrichment_only"}

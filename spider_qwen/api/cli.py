@@ -540,6 +540,8 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
             )
             return 1
         graded = [CalibrationExample.model_validate(e) for e in raw_examples]
+        from ..application.profiles import PIPELINE_VERSION
+        pipeline_matches = payload.get("pipeline_version") == PIPELINE_VERSION
         delta = float(payload.get("delta", 0.1))
         # The EMISSION gate is the LTT selective-risk threshold; the coverage
         # abstainer is fitted too but reported as advisory only.
@@ -555,6 +557,9 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
             "calibration_emitted": gate.calibration_emitted,
             "calibration_wrong": gate.calibration_wrong,
             "reasons": gate.reasons,
+            "pipeline_matches": pipeline_matches,
+            "pipeline_version": payload.get("pipeline_version"),
+            "required_pipeline_version": PIPELINE_VERSION,
             "coverage_advisory": {
                 "calibrated": abstainer.threshold is not None,
                 "threshold": abstainer.threshold,
@@ -564,10 +569,10 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
             "activate": (
                 f"set SPIDER_QWEN_CONFORMAL_CALIBRATION={path} to gate emission: "
                 f"P(wrong|emitted) <= {gate.alpha:g} at confidence {1.0 - gate.delta:g}"
-                if gate.threshold is not None else None
+                if gate.threshold is not None and pipeline_matches else None
             ),
         }, indent=2))
-        return 0 if gate.threshold is not None else 1
+        return 0 if gate.threshold is not None and pipeline_matches else 1
 
     print("usage: spider-qwen calibrate [template|check] ...", file=sys.stderr)
     return 2

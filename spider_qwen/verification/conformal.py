@@ -246,7 +246,8 @@ def _load_calibration(path: str) -> tuple[list[CalibrationExample], dict]:
     return examples, payload
 
 
-def gate_from_env() -> SelectiveRiskGate:
+def gate_from_env(*, expected_pipeline_version: str | None = None,
+                  expected_config_fingerprint: str | None = None) -> SelectiveRiskGate:
     """Build the run's EMISSION GATE from SPIDER_QWEN_CONFORMAL_CALIBRATION.
 
     Same file as the coverage abstainer -- ``examples`` with correct/incorrect
@@ -260,6 +261,21 @@ def gate_from_env() -> SelectiveRiskGate:
             _NO_CALIBRATION_REASON + "; selective-risk guarantee unavailable"
         ])
     examples, payload = _load_calibration(path)
+    if expected_pipeline_version is None:
+        from ..application.profiles import PIPELINE_VERSION
+        expected_pipeline_version = PIPELINE_VERSION
+    if payload.get("pipeline_version") != expected_pipeline_version:
+        return SelectiveRiskGate(reasons=[
+            "Calibration pipeline_version is missing or differs from the active pipeline; "
+            f"collect and hand-grade new evaluations for {expected_pipeline_version}. "
+            "Selective-risk guarantee unavailable."
+        ])
+    if expected_config_fingerprint is not None and payload.get("config_fingerprint") != expected_config_fingerprint:
+        return SelectiveRiskGate(reasons=[
+            "Calibration config_fingerprint is missing or differs from this run's configuration; "
+            "collect and hand-grade evaluations with the same providers, models and policy. "
+            "Selective-risk guarantee unavailable."
+        ])
     return SelectiveRiskGate.fit(
         examples,
         alpha=float(payload.get("alpha", 0.1)),

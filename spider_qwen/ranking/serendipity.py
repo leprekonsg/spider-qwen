@@ -24,13 +24,13 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 from typing import Any
-from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
 from .. import SCHEMA_VERSION
 from ..evidence.belief import UNCERTAINTY_TAU, fuse_disputed_fact
 from ..evidence.models import EvidenceRef
+from ..identity import registrable_domain
 from ..modes.contracts import PricingStatus
 
 # Geo score saturates at EXACT_COUNTRY (20.0); a fully-local result is the least
@@ -77,13 +77,7 @@ def _clamp(x: float) -> float:
 
 
 def _registrable(url: str | None) -> str:
-    if not url:
-        return ""
-    host = urlparse(url).netloc.lower() or (url or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+    return registrable_domain(url)
 
 
 def _identity(candidate) -> str:

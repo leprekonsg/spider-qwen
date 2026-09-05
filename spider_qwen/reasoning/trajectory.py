@@ -107,8 +107,9 @@ class BundleMetrics(BaseModel):
     service_match: float = 0.0
     quote_channel: float = 0.0
     geo: float = 0.0
-    contact_reliability: float = 0.0
     checklist: float = 0.0
+    evidence_quality: float = 0.0
+    qualified_supplier_coverage: float = 0.0
     evidence_diversity: float = 0.0
     # electronics
     fff_similarity: float = 0.0
@@ -134,3 +135,6 @@ class TrajectoryBundle(BaseModel):
     counterfeit_penalty: float = 0.0
     reward: float | None = None
     reward_breakdown: dict[str, float] = Field(default_factory=dict)
+    # Number of individually qualifying candidates contributing to ``metrics``.
+    # This is audit data, not an unbounded candidate payload.
+    qualified_candidate_count: int = 0

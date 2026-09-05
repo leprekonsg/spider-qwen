@@ -20,6 +20,7 @@
 
 <!-- API client + result->view-model mapper (plain JS, no JSX) -->
 <script src="api.js"></script>
+<script src="webmcp.js"></script>
 
 <!-- tweaks panel starter -->
 <script type="text/babel" src="tweaks-panel.jsx"></script>
@@ -91,11 +92,24 @@
     }
     useEffect(() => () => clearAllTimers(), []);
 
-    // -------- Start a hunt: drive the theatre, fire the real /run + /classify --
-    function startHunt() {
+    const activeRunRef = useRef(null);
+    const generationRef = useRef(0);
+    const cancelRequestedRef = useRef(false);
+    const [profileLabel, setProfileLabel] = useState("Loading deployment profile…");
+    useEffect(() => {
+      window.SQAPI.config().then(c => {
+        const profile = (c.profiles || []).find(p => p.name === c.default_profile);
+        setProfileLabel(`${c.default_profile} · ${profile && profile.offline ? "fixture results" : "live research"}`);
+      }).catch(() => setProfileLabel("Deployment profile unavailable"));
+    }, []);
+
+    async function startHunt() {
       const q = query.trim();
-      if (!q) return;
+      if (!q || activeRunRef.current || running) return;
+      const generation = ++generationRef.current;
+      cancelRequestedRef.current = false;
       clearAllTimers();
+      window.SQWebMCP.clear();
       setError(null);
       resultRef.current = null;
       classifyRef.current = null;
@@ -105,78 +119,71 @@
       setStream([]);
       setEvidence([]);
       setProgress(0);
-      setActivePhase("classify");
+      setActivePhase(null);
       setFocusId(null);
-
-      const speed = t.agentTheatre === "minimal" ? 0.55
-                  : t.agentTheatre === "heavy"   ? 1.7
-                  : 1.0;
-      const D = 2600 * speed;                       // theatre window
-      const phases = window.SQDATA.PHASE_ORDER;
-      const step = D / phases.length;
-      const push = (id) => timeoutsRef.current.push(id);
-
-      // Fire the real backend. classify is a cheap deterministic call for the
-      // Insights signal panel; run is the full pipeline.
-      const t0 = Date.now();
-      window.SQAPI.classify(q).then(c => { classifyRef.current = c; }).catch(() => {});
-      window.SQAPI.run(q)
-        .then(r => {
-          resultRef.current = window.SQMAP.mapResult(r);
-          // Append the real discovery trace (initial queries, CRAG verdict,
-          // replan pivots) as soon as the run lands.
-          const lines = window.SQMAP.traceLines(r).map(l => ({ ...l, t: Date.now() - t0 }));
-          if (lines.length) setStream(prev => [...prev, ...lines]);
-        })
-        .catch(err => failRun(err));
-
-      // Reveal reasoning lines on a cadence; text is the real per-phase summary
-      // once the result lands, otherwise a generic process line.
-      phases.forEach((p, i) => {
-        push(setTimeout(() => {
-          setActivePhase(p);
-          setStream(prev => [...prev, { phase: p, t: Date.now() - t0, text: window.SQMAP.reasoningLine(p, resultRef.current && resultRef.current.result) }]);
-        }, step * (i + 1)));
-      });
-
-      // Progress bar across the window.
-      const startedAt = Date.now();
-      const intId = setInterval(() => {
-        const p = Math.min(1, (Date.now() - startedAt) / D);
-        setProgress(p);
-        if (p >= 1) clearInterval(intId);
-      }, 60);
-      intervalsRef.current.push(intId);
-
-      // Stream evidence cards in as soon as the ledger is available.
-      let shown = 0;
-      const evId = setInterval(() => {
-        const led = resultRef.current && resultRef.current.ledger;
-        if (!led) return;
-        if (shown >= led.length) { clearInterval(evId); return; }
-        // Read the item now: the state updater runs after `shown` increments,
-        // so `led[shown]` inside it would skip rows and push undefined at the end.
-        const item = led[shown];
-        shown += 1;
-        setEvidence(prev => [item, ...prev]);
-      }, 240 * speed);
-      intervalsRef.current.push(evId);
-
-      // Finalise once the window elapsed AND the result is ready.
-      const finalize = () => {
-        if (error) return;
-        if (resultRef.current) return commitResult(resultRef.current);
-        // Keep polling until the run lands: live runs take minutes. The fetch
-        // rejecting (failRun) or the user halting clears this timer chain.
-        push(setTimeout(finalize, 200));
-      };
-      push(setTimeout(finalize, D + 300));
+      const started = Date.now();
+      let after = 0;
+      try {
+        const config = await window.SQAPI.config();
+        const run = await window.SQAPI.start(q, {
+          profile: config.default_profile,
+          idempotencyKey: crypto.randomUUID(),
+        });
+        activeRunRef.current = run.run_id;
+        if (cancelRequestedRef.current) await window.SQAPI.cancel(run.run_id);
+        const poll = async () => {
+          try {
+            const [status, response] = await Promise.all([
+              window.SQAPI.status(run.run_id), window.SQAPI.events(run.run_id, after),
+            ]);
+            if (generation !== generationRef.current) return;
+            const events = Array.isArray(response) ? response : response.events || [];
+            if (events.length) {
+              after = Math.max(after, ...events.map(e => e.id || e.event_id || 0));
+              setStream(prev => [...prev, ...events.map(e => ({
+                phase: e.phase || e.kind || e.type || e.status || "run",
+                t: Date.now() - started,
+                text: e.message || e.detail || e.kind || e.type || e.status || "Run updated",
+              }))]);
+            }
+            const state = status.status.toLowerCase();
+            if (state === "completed") {
+              const result = await window.SQAPI.result(run.run_id);
+              if (generation !== generationRef.current) return;
+              activeRunRef.current = null;
+              resultRef.current = window.SQMAP.mapResult(result);
+              setEvidence(resultRef.current.ledger);
+              return commitResult(resultRef.current);
+            }
+            if (["cancelled", "canceled"].includes(state)) {
+              activeRunRef.current = null;
+              setRunning(false);
+              setScreen("idle");
+              setProgress(0);
+              return;
+            }
+            if (["failed", "timed_out", "interrupted"].includes(state)) {
+              activeRunRef.current = null;
+              throw new Error(status.error || `Run ${state}. Start a new run to retry.`);
+            }
+            timeoutsRef.current.push(setTimeout(poll, 300));
+          } catch (err) {
+            if (generation !== generationRef.current) return;
+            if (activeRunRef.current) {
+              setError(`Unable to refresh run status: ${err.message}. Retrying; cancellation remains available.`);
+              timeoutsRef.current.push(setTimeout(poll, 2000));
+            } else failRun(err);
+          }
+        };
+        await poll();
+      } catch (err) { if (generation === generationRef.current) failRun(err); }
     }
 
     function commitResult(v) {
       clearAllTimers();
       if (classifyRef.current) v.classify = classifyRef.current;
       setView(v);
+      window.SQWebMCP.setCurrentRun(v.result.run_id);
       setRunning(false);
       setProgress(1);
       setActivePhase("persist");
@@ -201,15 +208,17 @@
       setScreen("idle");
     }
 
-    function haltHunt() {
-      clearAllTimers();
-      setRunning(false);
-      if (resultRef.current) return commitResult(resultRef.current);
-      setScreen("idle");
-      setProgress(0);
+    async function haltHunt() {
+      cancelRequestedRef.current = true;
+      setStream(prev => [...prev, { phase: "run", t: 0, text: "Cancellation requested; waiting for the worker to stop." }]);
+      if (!activeRunRef.current) return;
+      try { await window.SQAPI.cancel(activeRunRef.current); }
+      catch (err) { setError(String(err.message || err)); }
     }
 
     function backToIdle() {
+      if (running || activeRunRef.current) { haltHunt(); return; }
+      window.SQWebMCP.clear();
       clearAllTimers();
       setScreen("idle");
       setRunning(false);
@@ -244,10 +253,7 @@
               options={[{ value: "rail", label: "Side rail" }, { value: "toast", label: "Toast only" }]}
               onChange={v => setTweak("signalFeed", v)} />
           </TweakSection>
-          <TweakSection label="Agent theatre">
-            <TweakRadio label="Run speed" value={t.agentTheatre}
-              options={[{ value: "minimal", label: "Fast" }, { value: "moderate", label: "Mid" }, { value: "heavy", label: "Cinematic" }]}
-              onChange={v => setTweak("agentTheatre", v)} />
+          <TweakSection label="Signals">
             <TweakToggle label="Show rail on idle" value={t.showRailIdle} onChange={v => setTweak("showRailIdle", v)} />
           </TweakSection>
           <TweakSection label="Demo">
@@ -267,10 +273,11 @@
           } : null} />
 
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+          <div role="status" style={{ padding: "6px 28px", fontSize: 11, color: "var(--sq-slate-taupe)" }}>{profileLabel}</div>
           {screen !== "idle" && (
             <>
               <CommandBar query={query} setQuery={setQuery} mode="auto" onRun={startHunt} running={running} onPause={haltHunt} />
-              <Pipeline activePhase={activePhase} progress={progress} running={running} />
+              <Pipeline activePhase={activePhase} progress={progress} running={running} budget={view && !running ? view.budget : null} />
             </>
           )}
 
@@ -280,7 +287,7 @@
               borderBottom: "1px solid rgba(182,92,74,0.45)", color: "#D67F6B",
               fontFamily: "var(--sq-font-mono)", fontSize: 12, display: "flex", alignItems: "center", gap: 10,
             }}>
-              <SQIcon name="info" size={14}/> Run failed — {error}. Is the API running? (uvicorn spider_qwen.api.server:app)
+              <SQIcon name="info" size={14}/> {error}
             </div>
           )}
 
@@ -315,7 +322,7 @@
           onDraft={(v) => { setDetailVendor(null); setDraftVendor(v); }} />
 
         <RfqDrawer vendor={draftVendor}
-          draft={draftVendor && view ? view.rfqByVendor[draftVendor.name] : null}
+          draft={draftVendor && view ? view.rfqByVendor[draftVendor.id] : null}
           onClose={() => setDraftVendor(null)} />
 
         <SignalToast signal={toast} onDismiss={() => setToast(null)} onOpen={() => setToast(null)} />

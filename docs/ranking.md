@@ -16,12 +16,14 @@ a visible status but receives low price quality.
 
 ## Service ranker
 
-- `service_match_quality`: 25
-- `quote_channel_quality`: 25
-- `geo_relevance`: 20
-- `contact_reliability`: 15
-- `checklist_completeness`: 10
+- `suitability`: service match 25 + geography 20 + checklist 10
+- `contactability`: quote channel 25
+- `evidence_quality`: evidence completeness 20
 - `conflict_penalty`: up to `-20`
+
+Sort by suitability first, then total score. The backend publishes
+`score_components`; interfaces do not recompute weights. Consolidated conflicts
+are preserved in `withheld_candidates` and excluded from finalized output.
 
 No evidenced quote channel means the service candidate cannot produce a polished
 RFQ. A recalled memory quote channel is first re-recorded into the current run

@@ -16,6 +16,7 @@ Setup (skipped automatically when anything is missing):
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import socket
 import threading
@@ -28,6 +29,10 @@ pytest.importorskip("fastapi")
 uvicorn = pytest.importorskip("uvicorn")
 
 HUNT_TIMEOUT_MS = 30_000  # offline run + ~3s UI theatre window
+
+
+class _ServerURL(str):
+    service = None
 
 
 def _free_port() -> int:
@@ -54,7 +59,9 @@ def server_url(tmp_path_factory):
             if time.time() > deadline:
                 raise RuntimeError("uvicorn did not start within 15s")
             time.sleep(0.05)
-        yield f"http://127.0.0.1:{port}"
+        url = _ServerURL(f"http://127.0.0.1:{port}")
+        url.service = app.state.run_service
+        yield url
         server.should_exit = True
         thread.join(timeout=5)
     finally:
@@ -123,7 +130,7 @@ def test_hunt_renders_results_from_real_run(page, server_url):
     _expect(page.get_by_text("offline · deterministic").first)
     # Shortlist rendered real validated candidates from /run.
     _expect(page.get_by_role("heading", level=3, name="Example Vendor 1 Pte Ltd").first)
-    _expect(page.get_by_text("score · /95").first)
+    _expect(page.get_by_text("score · /100").first)
     assert page.errors == []
 
 
@@ -157,42 +164,83 @@ def run_payload(server_url):
     return resp.json()
 
 
-def test_instant_result_streams_ledger_without_crash(page, server_url, run_payload):
-    """A /run that resolves before the theatre window ends must not crash.
-
-    Regression: the evidence ticker read ``led[shown]`` inside the React state
-    updater, which runs after ``shown += 1`` -- the final tick pushed
-    ``undefined`` and HuntInProgress threw on ``e.id``. Six ledger rows at
-    240ms/row exhaust the ticker inside the ~2.9s theatre window, hitting the
-    exact tick the old code crashed on.
-    """
-    payload = dict(run_payload)
-    payload["evidence_refs"] = payload["evidence_refs"][:6]
-    page.route("**/run", lambda route: route.fulfill(
-        status=200, content_type="application/json", body=json.dumps(payload)))
-    page.goto(server_url)
-    page.get_by_role("button", name="Begin hunt").click()
-    _expect(page.get_by_text("stop ·"), timeout=HUNT_TIMEOUT_MS)
+def test_webmcp_reads_completed_run_and_unregisters_on_reset(page, server_url):
+    # Emulate only the browser registration surface; every tool invocation
+    # still calls the real HTTP application and persisted offline result.
+    page.add_init_script("""(() => {
+      window.registeredTools = {};
+      Object.defineProperty(document, 'modelContext', {value: {
+        async registerTool(tool, {signal}) {
+          window.registeredTools[tool.name] = tool;
+          signal.addEventListener('abort', () => delete window.registeredTools[tool.name]);
+        }
+      }, configurable: true});
+    })();""")
+    _run_hunt(page, server_url)
+    page.wait_for_function("Object.keys(window.registeredTools).length === 5")
+    actual = page.evaluate("""async () => {
+      const tools = window.registeredTools;
+      const run = await tools.get_current_run.execute({});
+      const listed = await tools.list_candidates.execute({});
+      const supplier = listed.candidates[0];
+      const evidence = await tools.get_candidate_evidence.execute({supplier_id: supplier.supplier_id});
+      const draft = await tools.get_rfq_draft.execute({supplier_id: supplier.supplier_id});
+      const stored = await (await fetch(`/runs/${run.run_id}/result`)).json();
+      return {run, listed, evidence, draft, stored,
+        readOnly: Object.values(tools).every(t => t.annotations.readOnlyHint),
+        names: Object.keys(tools)};
+    }""")
+    assert actual["listed"]["candidates"] == actual["stored"]["validated_candidates"]
+    assert actual["evidence"]["evidence_refs"] == actual["listed"]["candidates"][0]["evidence_refs"]
+    assert actual["draft"]["submission_status"] == "unsent"
+    assert actual["readOnly"] is True
+    assert set(actual["names"]) == {"get_current_run", "list_candidates", "get_candidate_evidence", "compare_candidates", "get_rfq_draft"}
+    page.evaluate("window.SQWebMCP.clear()")
+    assert page.evaluate("Object.keys(window.registeredTools).length") == 0
     assert page.errors == []
 
 
-def test_slow_result_still_commits_after_theatre_window(page, server_url, run_payload):
-    """A run that lands long after the theatre window must still commit.
+def test_webmcp_registration_failure_keeps_ui_functional(page, server_url):
+    page.add_init_script("""Object.defineProperty(document, 'modelContext', {
+      value: {registerTool: async () => {throw new Error('Unsupported API revision');}}, configurable: true
+    });""")
+    _run_hunt(page, server_url)
+    _expect(page.get_by_role("heading", level=3, name="Example Vendor 1 Pte Ltd").first)
+    assert page.errors == []
 
-    Regression: finalize() stopped polling after a 12s ceiling, stranding the
-    hunt screen forever on live runs (which take minutes). 16s clears the old
-    ceiling plus the theatre window.
-    """
-    body = json.dumps(run_payload)
 
-    def slow(route):
-        time.sleep(16)
-        route.fulfill(status=200, content_type="application/json", body=body)
+def test_halt_waits_for_real_worker_cancellation(page, server_url, monkeypatch):
+    import httpx
 
-    page.route("**/run", slow)
+    builder = server_url.service.controller_builder
+    cancelled = threading.Event()
+
+    def delayed_builder(**kwargs):
+        controller = builder(**kwargs)
+        class DelayedController:
+            async def run(self, *args, **options):
+                try:
+                    await asyncio.sleep(30)
+                    return await controller.run(*args, **options)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+        return DelayedController()
+
+    monkeypatch.setattr(server_url.service, "controller_builder", delayed_builder)
     page.goto(server_url)
-    page.get_by_role("button", name="Begin hunt").click()
-    _expect(page.get_by_text("stop ·"), timeout=40_000)
+    with page.expect_response(lambda response: response.url.endswith("/runs") and response.request.method == "POST") as started:
+        page.get_by_role("button", name="Begin hunt").click()
+    run_id = started.value.json()["run_id"]
+    page.get_by_role("button", name="Halt run").click()
+    _expect(page.get_by_role("button", name="Begin hunt"))
+    response = httpx.get(f"{server_url}/runs/{run_id}")
+    assert response.json()["status"] == "cancelled"
+    assert cancelled.wait(1)
+    events = httpx.get(f"{server_url}/runs/{run_id}/events").json()["events"]
+    assert any(e["kind"] == "cancellation_acknowledged" for e in events)
+    assert not any(e["kind"] == "completed" for e in events)
+    assert page.get_by_text("stop ·").count() == 0
     assert page.errors == []
 
 

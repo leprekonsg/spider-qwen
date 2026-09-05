@@ -41,23 +41,24 @@ class Revalidator:
         new_confidence: float,
         new_refs: list[EvidenceRef],
     ) -> SemanticFact:
-        if new_value is None or not new_refs:
-            fact.status = "stale"
-            self.memory._persist()
-            return fact
+        def mutation(current: SemanticFact) -> None:
+            if new_value is None or not new_refs:
+                current.status = "stale"
+            elif new_value == current.value:
+                current.confidence = max(current.confidence, new_confidence)
+                current.last_verified_at = utc_now_iso()
+                current.status = "active"
+                current.evidence_refs = SemanticMemory._merge_refs(current.evidence_refs, new_refs)
+            elif new_confidence > current.confidence + 0.1:
+                current.value = new_value
+                current.confidence = new_confidence
+                current.evidence_refs = new_refs
+                current.last_verified_at = utc_now_iso()
+                current.status = "active"
+            else:
+                current.status = "disputed"
 
-        if new_value == fact.value:
-            fact.confidence = max(fact.confidence, new_confidence)
-            fact.last_verified_at = utc_now_iso()
-            fact.status = "active"
-            fact.evidence_refs = SemanticMemory._merge_refs(fact.evidence_refs, new_refs)
-        elif new_confidence > fact.confidence + 0.1:
-            fact.value = new_value
-            fact.confidence = new_confidence
-            fact.evidence_refs = new_refs
-            fact.last_verified_at = utc_now_iso()
-            fact.status = "active"
-        else:
-            fact.status = "disputed"
-        self.memory._persist()
-        return fact
+        refreshed = self.memory._mutate_fact(fact.fact_id, mutation)
+        if refreshed is None:
+            raise ValueError(f"Semantic fact {fact.fact_id!r} no longer exists")
+        return refreshed

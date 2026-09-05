@@ -68,13 +68,35 @@ class ReasoningResult(BaseModel):
 
 
 def _merge(base: TrajectoryBundle, repair: TrajectoryBundle) -> TrajectoryBundle:
-    """Fold a repair-round bundle into the base: metrics improve (max), evidence
-    unions, rounds advance. Repair never lowers a sub-score."""
+    """Fold a repair round into the base without assembling a fictitious supplier.
+
+    A field-wise maximum could previously take capability from one supplier,
+    contactability from another, and geography from a third.  Bundle metrics are
+    already aggregates of *individually qualified* candidates, so preserve that
+    invariant by taking a count-weighted aggregate across rounds instead.
+    """
+    base_count = base.qualified_candidate_count
+    repair_count = repair.qualified_candidate_count
+    total_qualified = base_count + repair_count
     merged = base.metrics.model_dump()
-    for key, value in repair.metrics.model_dump().items():
-        if isinstance(value, (int, float)):
-            merged[key] = max(merged.get(key, 0.0), value)
-    base.metrics = BundleMetrics(**merged)
+    if total_qualified:
+        for key, value in repair.metrics.model_dump().items():
+            if key in {"qualified_supplier_coverage", "evidence_diversity"}:
+                continue
+            if isinstance(value, (int, float)):
+                merged[key] = round(
+                    ((merged.get(key, 0.0) * base_count) + (value * repair_count))
+                    / total_qualified,
+                    4,
+                )
+        merged["qualified_supplier_coverage"] = round(min(1.0, total_qualified / 3.0), 4)
+    else:
+        # Compatibility for externally constructed bundles predating explicit
+        # qualification counts. Controller-produced bundles always take the
+        # count-weighted path above.
+        for key, value in repair.metrics.model_dump().items():
+            if isinstance(value, (int, float)):
+                merged[key] = max(merged.get(key, 0.0), value)
 
     seen = {r.ledger_id for r in base.evidence_refs}
     for ref in repair.evidence_refs:
@@ -82,7 +104,12 @@ def _merge(base: TrajectoryBundle, repair: TrajectoryBundle) -> TrajectoryBundle
             seen.add(ref.ledger_id)
             base.evidence_refs.append(ref)
 
+    hosts = {ref.url.split("/", 3)[2] for ref in base.evidence_refs if ref.url and "://" in ref.url}
+    merged["evidence_diversity"] = round(min(1.0, len(hosts) / 3.0), 4) if hosts else 0.0
+    base.metrics = BundleMetrics(**merged)
+
     base.candidate_count += repair.candidate_count
+    base.qualified_candidate_count = total_qualified
     # A repair round can only surface new disputes, never silently clear an
     # unresolved one: its disputed_count reflects contradictions within the repair
     # subset, not whether round 1's dispute was resolved (we model no resolution

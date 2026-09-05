@@ -23,7 +23,8 @@ from spider_qwen.reasoning.trajectory_runner import TrajectoryRunner, strategy_q
 def test_runner_runs_multiple_trajectories_and_selects_winner():
     def executor(traj: ReasoningTrajectory) -> TrajectoryBundle:
         m = BundleMetrics(
-            service_match=0.8, geo=0.8, checklist=0.7, contact_reliability=0.6, evidence_diversity=0.5,
+            service_match=0.8, geo=0.8, checklist=0.7, evidence_quality=0.6,
+            qualified_supplier_coverage=0.5, evidence_diversity=0.5,
             quote_channel=1.0 if traj.strategy == TrajectoryStrategy.QUOTE_CHANNEL_FIRST else 0.0,
         )
         return TrajectoryBundle(trajectory=traj, metrics=m, searches_used=2, fetches_used=4, candidate_count=2)
@@ -62,7 +63,8 @@ def test_round2_repair_triggers_on_gap_and_merges_improvement():
 def test_runner_awaits_async_executor():
     async def executor(traj: ReasoningTrajectory) -> TrajectoryBundle:
         return TrajectoryBundle(trajectory=traj, metrics=BundleMetrics(service_match=1.0, quote_channel=1.0, geo=1.0,
-                                checklist=1.0, contact_reliability=1.0, evidence_diversity=1.0),
+                                checklist=1.0, evidence_quality=1.0,
+                                qualified_supplier_coverage=1.0, evidence_diversity=1.0),
                                 searches_used=2, fetches_used=4)
 
     res = asyncio.run(TrajectoryRunner().run("q", "service_quote_required", executor=executor))

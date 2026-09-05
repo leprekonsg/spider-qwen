@@ -50,8 +50,7 @@ function HuntInProgress({ stream, evidence, candidates, query, activePhase, prog
           fontFamily: "var(--sq-font-mono)", fontSize: 11, color: "var(--sq-slate-taupe)",
           letterSpacing: "0.06em", textAlign: "right", lineHeight: 1.8,
         }}>
-          <div>phase · <span style={{ color: "var(--sq-bone)" }}>{activePhase}</span></div>
-          <div>completeness · <span style={{ color: "var(--sq-bone)" }}>{progress.toFixed(2)}</span></div>
+          <div>phase · <span style={{ color: "var(--sq-bone)" }}>{activePhase || "awaiting worker result"}</span></div>
         </div>
       </div>
 

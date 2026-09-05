@@ -8,7 +8,7 @@ and by ranking, which refuses to score evidence-less candidates).
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -111,14 +111,47 @@ class Contact(BaseModel):
     evidence_ref: EvidenceRef
 
 
+class CandidateFieldClaim(BaseModel):
+    """One observed value for a candidate field and its supporting evidence."""
+
+    value: Any
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    evidence_scope: Literal["field", "candidate"] = "field"
+    is_selected: bool = False
+
+
 class _BaseCandidate(BaseModel):
     schema_version: str = SCHEMA_VERSION
+    supplier_id: str = ""
     vendor_name: str
+    legal_name: str | None = None
+    trading_name: str | None = None
+    branch: str | None = None
+    marketplace_storefront: str | None = None
     website: str | None = None
     country: str | None = None
     geo_score: float = 0.0
     evidence_completeness: float = 0.0
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    field_claims: dict[str, list[CandidateFieldClaim]] = Field(default_factory=dict)
+    conflicting_fields: list[str] = Field(default_factory=list)
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.supplier_id:
+            from ..identity import stable_supplier_id
+
+            object.__setattr__(
+                self,
+                "supplier_id",
+                stable_supplier_id(
+                    self.vendor_name,
+                    self.website,
+                    self.country,
+                    legal_name=self.legal_name,
+                    branch=self.branch,
+                    marketplace_storefront=self.marketplace_storefront,
+                ),
+            )
 
     def has_evidence(self) -> bool:
         return len(self.evidence_refs) > 0
@@ -143,6 +176,7 @@ class ServiceCandidate(_BaseCandidate):
     checklist_completeness: float = 0.0
     conflict_penalty: float = 0.0
     score: float = 0.0
+    score_components: dict[str, float] = Field(default_factory=dict)
 
 
 class ContactCandidate(_BaseCandidate):

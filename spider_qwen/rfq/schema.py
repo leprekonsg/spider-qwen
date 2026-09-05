@@ -24,6 +24,7 @@ class ChecklistItem(BaseModel):
 
 
 class RFQVendor(BaseModel):
+    supplier_id: str = ""
     vendor_name: str
     website: str = ""
     country: str | None = None

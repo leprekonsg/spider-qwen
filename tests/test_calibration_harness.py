@@ -69,10 +69,12 @@ def test_run_startup_rejects_ungraded_calibration_file(capsys, judged_run, monke
 
 def _graded_file(tmp_path, scores: list[float], alpha: float = 0.1,
                  wrong: list[float] | None = None):
+    from spider_qwen.application.profiles import PIPELINE_VERSION
     path = tmp_path / "graded.json"
     examples = [{"verifier_score": s, "prediction_correct": True} for s in scores]
     examples += [{"verifier_score": s, "prediction_correct": False} for s in (wrong or [])]
-    path.write_text(json.dumps({"alpha": alpha, "examples": examples}), encoding="utf-8")
+    path.write_text(json.dumps({"alpha": alpha, "examples": examples,
+                                "pipeline_version": PIPELINE_VERSION}), encoding="utf-8")
     return path
 
 

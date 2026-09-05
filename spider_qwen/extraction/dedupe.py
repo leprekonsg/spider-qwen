@@ -1,131 +1,282 @@
-"""Candidate dedupe by registrable domain, falling back to vendor name.
-
-When two candidates collapse, the one with more evidence_refs is kept (richer
-candidate wins). Evidence refs are NOT unioned — the richer candidate already
-holds the superset in practice; if that assumption ever changes, union here.
-
-Legal-name normalization: case-fold, strip punctuation, strip trailing
-corporate-suffix tokens so name variants like "ORIGIN Exterminators Pte. Ltd."
-and "ORIGIN Exterminators" map to the same key.
-"""
+"""Conservative supplier identity resolution and claim-level consolidation."""
 
 from __future__ import annotations
 
-import re
-from urllib.parse import urlparse
+import json
+from enum import Enum
+from typing import Any, Literal
 
-# Trailing corporate-suffix tokens to strip (order matters: longer first so
-# "pte ltd" is consumed as a unit before "ltd" would re-fire).
-_SUFFIX_TOKENS: list[tuple[str, ...]] = [
-    ("pte", "ltd"),
-    ("sdn", "bhd"),
-    ("pvt", "ltd"),
-    ("private", "limited"),
-    ("incorporated",),
-    ("corporation",),
-    ("company",),
-    ("limited",),
-    ("gmbh",),
-    ("corp",),
-    ("inc",),
-    ("llp",),
-    ("llc",),
-    ("plc",),
-    ("ltd",),
-    ("co",),
-]
+from pydantic import BaseModel
 
+from ..evidence.models import EvidenceRef
+from ..identity import candidates_same_supplier, ensure_supplier_id, normalize_vendor_name, registrable_domain
+from ..modes.contracts import CandidateFieldClaim
 
-def normalize_vendor_name(name: str) -> str:
-    """Return a canonical, suffix-stripped key for a vendor name.
-
-    Rules (applied in order):
-    1. Case-fold.
-    2. Strip all punctuation (replace with space).
-    3. Tokenize on whitespace.
-    4. Strip *trailing* corporate-suffix tokens (possibly more than one pass,
-       e.g. "pte" then "ltd" or both together).
-    5. Collapse whitespace.
-
-    A name that reduces to an empty string (e.g. "Pte Ltd") returns "" — the
-    caller is responsible for NOT using an empty key for deduplication.
-    """
-    if not name:
-        return ""
-    # Step 1+2: case-fold and replace punctuation with spaces.
-    lowered = re.sub(r"[^a-z0-9\s]", " ", name.lower())
-    tokens = lowered.split()
-    if not tokens:
-        return ""
-
-    # Step 4: repeatedly strip trailing suffix sequences until none match.
-    changed = True
-    while changed and tokens:
-        changed = False
-        for suffix_seq in _SUFFIX_TOKENS:
-            if len(tokens) < len(suffix_seq):
-                continue
-            tail = tuple(tokens[-len(suffix_seq):])
-            if tail == suffix_seq:
-                tokens = tokens[: -len(suffix_seq)]
-                changed = True
-                break  # restart from the top after any strip
-
-    return " ".join(tokens)
+_IDENTITY_FIELDS = {
+    "schema_version", "supplier_id", "vendor_name", "website",
+    "evidence_refs", "field_claims", "conflicting_fields",
+}
+_DERIVED_MAX_FIELDS = {"geo_score", "service_match_score", "service_match_evidence"}
+_DERIVED_RESET_FIELDS = {
+    "evidence_completeness", "checklist_completeness", "conflict_penalty",
+    "score", "score_components",
+}
+_MULTIVALUED_FIELDS = {"quote_channel", "country", "product_url", "trading_name"}
 
 
 def _registrable(website: str | None) -> str:
-    if not website:
-        return ""
-    host = urlparse(website).netloc.lower() or website.lower()
-    if host.startswith("www."):
-        host = host[4:]
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+    """Compatibility shim for callers that used the old private helper."""
+    return registrable_domain(website)
 
 
-def _key(candidate: object) -> str:
-    domain = _registrable(getattr(candidate, "website", None))
-    if domain:
-        return f"d:{domain}"
-    raw = (getattr(candidate, "vendor_name", "") or "").strip()
-    normalized = normalize_vendor_name(raw)
-    # Guard: if normalization reduced the name to nothing (suffix-only name),
-    # fall back to the lowercased raw name so distinct suffix-only strings are
-    # kept separate rather than collapsed into one empty-key bucket.
-    key_body = normalized if normalized else raw.lower()
-    return f"n:{key_body}"
+def _merge_refs(left: list[EvidenceRef], right: list[EvidenceRef]) -> list[EvidenceRef]:
+    seen = {ref.ledger_id for ref in left}
+    return left + [ref for ref in right if ref.ledger_id not in seen]
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    return value
+
+
+def _claim_key(value: Any) -> str:
+    return json.dumps(_json_value(value), ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _value_evidence(
+    candidate: object,
+    field: str,
+    value: Any,
+) -> tuple[list[EvidenceRef], Literal["field", "candidate"]]:
+    existing = (getattr(candidate, "field_claims", {}) or {}).get(field, [])
+    for claim in existing:
+        if _claim_key(claim.value) == _claim_key(value):
+            return list(claim.evidence_refs), claim.evidence_scope
+    if field == "quote_channel" and value is not None:
+        ref = getattr(value, "evidence_ref", None)
+        return ([ref] if ref is not None else []), "field"
+    if field == "contacts" and isinstance(value, list):
+        refs = _merge_refs([], [item.evidence_ref for item in value if hasattr(item, "evidence_ref")])
+        return refs, "field"
+    # Legacy candidates only carried candidate-level evidence. Preserve that
+    # coarse relationship explicitly rather than claiming an exact field span.
+    return list(getattr(candidate, "evidence_refs", []) or []), "candidate"
+
+
+def _is_present(value: Any) -> bool:
+    if isinstance(value, Enum) and value.value == "NOT_FOUND":
+        return False
+    return value is not None and value != "" and value != [] and value != {} and value is not False
+
+
+def _record_claim(
+    candidate: object,
+    field: str,
+    value: Any,
+    refs: list[EvidenceRef],
+    *,
+    selected: bool,
+    evidence_scope: Literal["field", "candidate"] = "field",
+) -> None:
+    claims = candidate.field_claims.setdefault(field, [])
+    if selected:
+        for claim in claims:
+            claim.is_selected = False
+    key = _claim_key(value)
+    for claim in claims:
+        if _claim_key(claim.value) == key:
+            claim.evidence_refs = _merge_refs(claim.evidence_refs, refs)
+            if evidence_scope == "field":
+                claim.evidence_scope = "field"
+            claim.is_selected = claim.is_selected or selected
+            return
+    claims.append(CandidateFieldClaim(
+        value=_json_value(value),
+        evidence_refs=list(refs),
+        evidence_scope=evidence_scope,
+        is_selected=selected,
+    ))
+
+
+def _merge_contacts(selected: list, incoming: list) -> list:
+    merged = list(selected)
+    seen = {(getattr(item, "type", ""), getattr(item, "value", "")) for item in merged}
+    for item in incoming:
+        key = (getattr(item, "type", ""), getattr(item, "value", ""))
+        if key not in seen:
+            merged.append(item)
+            seen.add(key)
+    return merged
+
+
+def _merge_dict_field(
+    candidate: object,
+    field: str,
+    incoming: dict,
+    selected_source: object,
+    incoming_source: object,
+) -> None:
+    selected = dict(getattr(candidate, field) or {})
+    for key, value in incoming.items():
+        if key not in selected:
+            selected[key] = value
+            continue
+        if selected[key] != value:
+            nested = f"{field}.{key}"
+            selected_refs, selected_scope = _value_evidence(selected_source, field, selected[key])
+            incoming_refs, incoming_scope = _value_evidence(incoming_source, field, value)
+            _record_claim(
+                candidate, nested, selected[key], selected_refs,
+                selected=True, evidence_scope=selected_scope,
+            )
+            _record_claim(
+                candidate, nested, value, incoming_refs,
+                selected=False, evidence_scope=incoming_scope,
+            )
+            if nested not in candidate.conflicting_fields:
+                candidate.conflicting_fields.append(nested)
+    setattr(candidate, field, selected)
+
+
+def _recompute_completeness(candidate: object) -> float:
+    has_vendor = bool(candidate.evidence_refs and candidate.vendor_name != "Unknown Vendor")
+    if hasattr(candidate, "service_match_evidence"):
+        backed = [has_vendor, bool(candidate.service_match_evidence), candidate.quote_channel is not None]
+    elif hasattr(candidate, "contacts"):
+        backed = [has_vendor, bool(candidate.contacts)]
+    else:
+        status = getattr(getattr(candidate, "pricing_status", None), "value", "NOT_FOUND")
+        backed = [has_vendor, status != "NOT_FOUND", bool(getattr(candidate, "product_url", ""))]
+    return round(sum(backed) / len(backed), 3)
+
+
+def _consolidate(selected: object, incoming: object) -> object:
+    """Merge observations into a deep copy of the selected representative."""
+    merged = selected.model_copy(deep=True)
+    merged.evidence_refs = _merge_refs(
+        list(getattr(selected, "evidence_refs", []) or []),
+        list(getattr(incoming, "evidence_refs", []) or []),
+    )
+    merged.conflicting_fields = list(dict.fromkeys([
+        *getattr(selected, "conflicting_fields", []),
+        *getattr(incoming, "conflicting_fields", []),
+    ]))
+    for field, claims in (getattr(incoming, "field_claims", {}) or {}).items():
+        for claim in claims:
+            _record_claim(
+                merged,
+                field,
+                claim.value,
+                claim.evidence_refs,
+                selected=claim.is_selected,
+                evidence_scope=claim.evidence_scope,
+            )
+
+    for field in merged.__class__.model_fields:
+        if field in _IDENTITY_FIELDS:
+            continue
+        selected_value = getattr(merged, field)
+        incoming_value = getattr(incoming, field)
+        if field in _DERIVED_MAX_FIELDS:
+            if isinstance(selected_value, bool):
+                setattr(merged, field, selected_value or incoming_value)
+            elif isinstance(selected_value, (int, float)) and isinstance(incoming_value, (int, float)):
+                setattr(merged, field, max(selected_value, incoming_value))
+            continue
+        if field in _DERIVED_RESET_FIELDS:
+            continue
+        if field == "contacts":
+            setattr(merged, field, _merge_contacts(selected_value, incoming_value))
+            continue
+        if isinstance(selected_value, dict) and isinstance(incoming_value, dict):
+            _merge_dict_field(merged, field, incoming_value, selected, incoming)
+            continue
+        if not _is_present(incoming_value):
+            continue
+        incoming_refs, incoming_scope = _value_evidence(incoming, field, incoming_value)
+        if not _is_present(selected_value):
+            setattr(merged, field, incoming_value)
+            _record_claim(
+                merged, field, incoming_value, incoming_refs,
+                selected=True, evidence_scope=incoming_scope,
+            )
+            continue
+        selected_refs, selected_scope = _value_evidence(selected, field, selected_value)
+        _record_claim(
+            merged, field, selected_value, selected_refs,
+            selected=True, evidence_scope=selected_scope,
+        )
+        if _claim_key(selected_value) == _claim_key(incoming_value):
+            _record_claim(
+                merged, field, incoming_value, incoming_refs,
+                selected=True, evidence_scope=incoming_scope,
+            )
+            continue
+        _record_claim(
+            merged, field, incoming_value, incoming_refs,
+            selected=False, evidence_scope=incoming_scope,
+        )
+        if field not in _MULTIVALUED_FIELDS and field not in merged.conflicting_fields:
+            merged.conflicting_fields.append(field)
+
+    if not merged.website and getattr(incoming, "website", None):
+        merged.website = incoming.website
+    merged.evidence_completeness = _recompute_completeness(merged)
+    if hasattr(merged, "checklist_completeness"):
+        merged.checklist_completeness = 0.0
+    if hasattr(merged, "conflict_penalty"):
+        merged.conflict_penalty = 0.0
+    merged.score = 0.0
+    if hasattr(merged, "score_components"):
+        merged.score_components = {}
+    ensure_supplier_id(merged)
+    return merged
+
+
+def _richness(candidate: object) -> tuple[int, int]:
+    refs = len(getattr(candidate, "evidence_refs", []) or [])
+    populated = sum(
+        1
+        for field in candidate.__class__.model_fields
+        if field not in _IDENTITY_FIELDS
+        and field not in _DERIVED_RESET_FIELDS
+        and _is_present(getattr(candidate, field))
+    )
+    return refs, populated
 
 
 def dedupe_candidates(candidates: list) -> tuple[list, int]:
-    """Collapse duplicate vendors; keep the candidate with the most evidence.
-
-    Returns (deduplicated_list, merge_count) so callers can observe merges.
-    Merge policy: when two candidates share a key, keep the one with more
-    evidence_refs. Tie-break: longer original vendor_name (more specific name
-    is likely the richer fetch), then stable insertion order (first seen wins).
-    """
-    best: dict[str, object] = {}
+    """Resolve identities and consolidate duplicate candidate observations."""
+    consolidated: list[object] = []
     merge_count = 0
-    for cand in candidates:
-        key = _key(cand)
-        existing = best.get(key)
-        if existing is None:
-            best[key] = cand
+    for raw in candidates:
+        candidate = raw.model_copy(deep=True)
+        ensure_supplier_id(candidate)
+        match_index = next((
+            index for index, existing in enumerate(consolidated)
+            if candidates_same_supplier(existing, candidate)
+        ), None)
+        if match_index is None:
+            consolidated.append(candidate)
             continue
-        # Richer candidate wins.
-        cand_refs = len(getattr(cand, "evidence_refs", []) or [])
-        exist_refs = len(getattr(existing, "evidence_refs", []) or [])
-        if cand_refs > exist_refs:
-            best[key] = cand
-            merge_count += 1
-        elif cand_refs == exist_refs:
-            # Tie-break: longer original name (more qualified name wins).
-            cand_name = (getattr(cand, "vendor_name", "") or "")
-            exist_name = (getattr(existing, "vendor_name", "") or "")
-            if len(cand_name) > len(exist_name):
-                best[key] = cand
-            merge_count += 1
-        else:
-            merge_count += 1
-    return list(best.values()), merge_count
+        existing = consolidated[match_index]
+        candidate_wins = _richness(candidate) > _richness(existing) or (
+            _richness(candidate) == _richness(existing)
+            and len(candidate.vendor_name) > len(existing.vendor_name)
+        )
+        consolidated[match_index] = (
+            _consolidate(candidate, existing)
+            if candidate_wins else _consolidate(existing, candidate)
+        )
+        merge_count += 1
+    return consolidated, merge_count
+
+
+__all__ = ["dedupe_candidates", "normalize_vendor_name"]

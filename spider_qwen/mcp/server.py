@@ -57,6 +57,31 @@ def build_server():
         """Distil reflections over the learned facts and run episodes."""
         return handlers.memory_reflect().model_dump(mode="json")
 
+    @server.tool()
+    def get_current_run(run_id: str) -> dict:
+        """Read metadata for a completed procurement run."""
+        return handlers.inspect_run(run_id, "get_current_run")
+
+    @server.tool()
+    def list_candidates(run_id: str) -> dict:
+        """List recorded suppliers with stable IDs, scores and evidence."""
+        return handlers.inspect_run(run_id, "list_candidates")
+
+    @server.tool()
+    def get_candidate_evidence(run_id: str, supplier_id: str) -> dict:
+        """Read a supplier's recorded evidence, conflicts and citation proofs."""
+        return handlers.inspect_run(run_id, "get_candidate_evidence", supplier_id=supplier_id)
+
+    @server.tool()
+    def compare_candidates(run_id: str, supplier_ids: list[str]) -> dict:
+        """Compare 2 to 10 suppliers from one completed run."""
+        return handlers.inspect_run(run_id, "compare_candidates", supplier_ids=supplier_ids)
+
+    @server.tool()
+    def get_rfq_draft(run_id: str, supplier_id: str) -> dict:
+        """Read an existing unsent RFQ draft; never submits or approves it."""
+        return handlers.inspect_run(run_id, "get_rfq_draft", supplier_id=supplier_id)
+
     return server
 
 

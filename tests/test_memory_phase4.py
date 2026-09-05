@@ -10,6 +10,8 @@ and 1-3 agentic links.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import get_context
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -34,6 +36,20 @@ def _aged_fact(days: float, **kw) -> SemanticFact:
     )
     base.update(kw)
     return SemanticFact(**base)
+
+
+def _process_memory_insert(args: tuple[str, int]) -> str:
+    state_dir, index = args
+    memory = SemanticMemory(state_dir)
+    fact = memory.upsert(SemanticFact(
+        entity_type="vendor",
+        entity_name=f"Process Vendor {index}",
+        supplier_id=f"sup_process_{index}",
+        field="quote_channel",
+        value=f"process{index}@example.sg",
+        evidence_refs=[_ref(f"ev_process_{index}")],
+    ))
+    return fact.fact_id
 
 
 # --- MemoryBank decay -------------------------------------------------------
@@ -99,6 +115,72 @@ def test_semantic_memory_rejects_schema_drift_on_load(tmp_path):
     path.write_text(json.dumps([fact]), encoding="utf-8")
     with pytest.raises(ValueError, match="schema_version"):
         SemanticMemory(tmp_path)
+
+
+def test_vendor_memory_keys_use_supplier_identity(tmp_path):
+    memory = SemanticMemory(tmp_path)
+    first = _aged_fact(0.0, supplier_id="sup_alpha_sg", value="sales@alpha.sg")
+    second = _aged_fact(0.0, supplier_id="sup_alpha_my", value="sales@alpha.my")
+    memory.upsert(first)
+    memory.upsert(second)
+    assert len(memory.all()) == 2
+    assert {fact.supplier_id for fact in memory.all()} == {"sup_alpha_sg", "sup_alpha_my"}
+
+
+def test_legacy_vendor_fact_gets_stable_supplier_id_migration(tmp_path):
+    path = tmp_path / "memory" / "semantic.json"
+    path.parent.mkdir(parents=True)
+    raw = _aged_fact(0.0).model_dump(mode="json")
+    raw.pop("supplier_id")
+    path.write_text(json.dumps([raw]), encoding="utf-8")
+    loaded = SemanticMemory(tmp_path).all()
+    assert len(loaded) == 1
+    assert loaded[0].supplier_id.startswith("sup_")
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted[0]["supplier_id"] == loaded[0].supplier_id
+
+
+def test_concurrent_memory_instances_do_not_lose_updates(tmp_path):
+    memories = [SemanticMemory(tmp_path) for _ in range(8)]
+
+    def insert(index: int) -> None:
+        memories[index].upsert(_aged_fact(
+            0.0,
+            entity_name=f"Vendor {index}",
+            supplier_id=f"sup_{index}",
+            value=f"sales{index}@example.sg",
+            evidence_refs=[_ref(f"ev_{index}")],
+        ))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(insert, range(8)))
+
+    stored = SemanticMemory(tmp_path).all()
+    assert len(stored) == 8
+    assert {fact.supplier_id for fact in stored} == {f"sup_{index}" for index in range(8)}
+
+
+def test_concurrent_processes_do_not_lose_memory_updates(tmp_path):
+    from concurrent.futures import ProcessPoolExecutor
+
+    work = [(str(tmp_path), index) for index in range(4)]
+    with ProcessPoolExecutor(max_workers=4, mp_context=get_context("spawn")) as executor:
+        fact_ids = list(executor.map(_process_memory_insert, work))
+    assert len(set(fact_ids)) == 4
+    stored = SemanticMemory(tmp_path).all()
+    assert len(stored) == 4
+    assert {fact.supplier_id for fact in stored} == {
+        f"sup_process_{index}" for index in range(4)
+    }
+
+
+def test_concurrent_citation_updates_are_atomic(tmp_path):
+    memory = SemanticMemory(tmp_path)
+    fact = memory.upsert(_aged_fact(0.0))
+    instances = [SemanticMemory(tmp_path) for _ in range(20)]
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        assert all(executor.map(lambda item: item.record_citation(fact.fact_id), instances))
+    assert SemanticMemory(tmp_path).get(fact.fact_id).citation_count == 20
 
 
 # --- Reflections ------------------------------------------------------------

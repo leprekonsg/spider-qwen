@@ -44,6 +44,7 @@ from ..extraction.pricing import PricingExtractor, PricingResult
 from ..extraction.quote_channel import QuoteChannelExtractor, QuoteChannelMatch
 from ..extraction.service_match import ServiceMatchExtractor
 from ..extraction.vendor_metadata import VendorMetadataExtractor
+from ..identity import registrable_domain
 from ..governance.audit import AuditLog
 from ..governance.review_events import ReviewStore
 from ..memory.episodic import EpisodicMemory, EpisodicRecord
@@ -125,13 +126,8 @@ _PRICED_STATUSES = {
 
 
 def _registrable(url: str | None) -> str:
-    if not url:
-        return ""
-    host = urlparse(url).netloc.lower() or url.lower()
-    if host.startswith("www."):
-        host = host[4:]
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+    """Compatibility wrapper while controller callers migrate to shared identity."""
+    return registrable_domain(url)
 
 
 class Controller:
@@ -361,7 +357,8 @@ class Controller:
         return routed
 
     async def run(self, query: str, mode: str = "auto", target_country: str | None = None,
-                  high_risk: bool = False, serendipity: bool = False) -> RunResult:
+                  high_risk: bool = False, serendipity: bool = False,
+                  run_id: str | None = None) -> RunResult:
         phase_start = time.perf_counter()
         classification = self._classify(query, forced_mode=mode)
         chosen = classification.mode
@@ -369,7 +366,7 @@ class Controller:
         budget = self.policy.budget_for(chosen, route.budget_key)
         run_reference_ts = utc_now_iso()
 
-        run_id = new_run_id()
+        run_id = run_id or new_run_id()
         ledger = EvidenceLedger(run_id, self.state_dir,
                                 reliability_priors=self.policy.source_reliability())
         tracker = BudgetTracker(budget)
@@ -410,6 +407,7 @@ class Controller:
         )
         candidates, _sea_merges = dedupe_candidates(candidates)
         candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
+        candidates = self._apply_consolidation_safety(candidates)
         ranker = self._rankers[route.ranker]
         ranked = ranker.rank(candidates)
         validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
@@ -454,22 +452,30 @@ class Controller:
                 )
             candidates, _fb_merges = dedupe_candidates(candidates + more)
             candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
+            candidates = self._apply_consolidation_safety(candidates)
             ranked = ranker.rank(candidates)
             validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
 
-        validated = validated[: budget.max_validated_candidates]
+        # Keep the complete already-fetched qualification pool.  Verification
+        # starts with the presentation cap, then can refill from this reserve
+        # before any paid corrective search is considered.
+        qualified_candidates = list(validated)
+        validated = qualified_candidates[: budget.max_validated_candidates]
         gather_done = time.perf_counter()
 
         # T-2.2: verification spine. Block candidates whose critical claims are not
         # entailed by their cited evidence; write verified/verifier_score onto the
         # claim ledger rows. Opt-in, so the default offline pipeline is unchanged.
         verification_metrics = {"claims_verified": 0, "claims_unsupported": 0,
-                                "candidates_blocked_unverified": 0,
-                                "verification_assessments": {},
-                                "replan_recommended": False}
+                                 "candidates_blocked_unverified": 0,
+                                 "verification_assessments": {},
+                                 "replan_recommended": False,
+                                 "reserve_candidates_verified": 0}
         replan_queries: list[str] = []
         if self.verify_claims:
-            validated, verification_metrics = self._verify_candidates(ledger, validated, tracer)
+            validated, verification_metrics = self._verify_with_reserve(
+                ledger, qualified_candidates, tracer, budget,
+            )
             # Bounded replan: the spine's worst GSAR decision plays the CRAG
             # retrieval evaluator (Yan et al. 2024) -- "replan" means the cited
             # corpus cannot ground the critical claims, so re-retrieve once
@@ -493,11 +499,15 @@ class Controller:
                 )
                 candidates, _rp_merges = dedupe_candidates(candidates + more)
                 candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
+                candidates = self._apply_consolidation_safety(candidates)
                 ranked = ranker.rank(candidates)
-                validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
-                validated = validated[: budget.max_validated_candidates]
+                qualified_candidates = [
+                    c for c in ranked if self._is_validated(c, chosen, budget)
+                ]
                 pre_replan = verification_metrics
-                validated, verification_metrics = self._verify_candidates(ledger, validated, tracer)
+                validated, verification_metrics = self._verify_with_reserve(
+                    ledger, qualified_candidates, tracer, budget,
+                )
                 verification_metrics["replan_rounds"] = 1
                 # The re-verify must not erase round-1 outcomes from RunResult
                 # metrics: candidates blocked or abstained before the replan
@@ -542,9 +552,16 @@ class Controller:
         # T-1.1: reshape the ranked candidates into the four-slot serendipity view.
         # Disputed memory facts about this run's vendors whose fused [Bel, Pl]
         # gap exceeds UNCERTAINTY_TAU surface as explicit S3 risk signals.
-        disputed_signals = self._disputed_belief_signals(ledger, ranked, audit)
+        # A contradictory consolidated claim stays in the evidence ledger and
+        # candidate diagnostics, but cannot become the serendipity primary
+        # answer while it is withheld from validated output.
+        ranked_for_surface = [
+            candidate for candidate in ranked
+            if not self._has_finalization_conflict(candidate)
+        ]
+        disputed_signals = self._disputed_belief_signals(ledger, ranked_for_surface, audit)
         serendipity_result = build_serendipity_result(
-            ranked, mode=chosen.value,
+            ranked_for_surface, mode=chosen.value,
             extra_risk_signals=disputed_signals,
         )
 
@@ -611,6 +628,10 @@ class Controller:
                 mode=chosen.value, confidence=classification.confidence, rationale=classification.rationale
             ),
             validated_candidates=[self._public_candidate_dump(c) for c in validated],
+            withheld_candidates=[
+                self._public_withheld_candidate_dump(c)
+                for c in candidates if self._has_finalization_conflict(c)
+            ],
             trust_verdicts=self._build_trust_verdicts(
                 validated, verification_metrics, ledger, disputed_signals,
             ),
@@ -719,8 +740,12 @@ class Controller:
             cands = await self._gather_queries(
                 ctx, route, traj.queries, search, fetch, location=None, target_country=target_country,
             )
+            cands, _trajectory_merges = dedupe_candidates(cands)
+            cands = self._apply_consolidation_safety(cands)
             ranked = ranker.rank(cands)
-            metrics, refs, disputed, conflict = self._bundle_metrics(chosen.value, ranked or cands)
+            metrics, refs, disputed, conflict, qualified_count = self._bundle_metrics(
+                chosen.value, ranked or cands
+            )
             tracer.record(
                 step="reasoning_trajectory", tool="search", status="success",
                 detail={"trajectory_id": traj.trajectory_id, "strategy": traj.strategy.value,
@@ -731,52 +756,99 @@ class Controller:
                 trajectory=traj, metrics=metrics, evidence_refs=refs, candidate_count=len(cands),
                 disputed_count=disputed, searches_used=tracker.search_calls,
                 fetches_used=tracker.fetch_urls, conflict_penalty=conflict,
+                qualified_candidate_count=qualified_count,
             )
 
         return await TrajectoryRunner(budget=rbudget).run(query, chosen.value, executor=executor)
 
     def _bundle_metrics(self, mode: str, candidates: list):
-        """Map ranked candidates -> normalized PPRM BundleMetrics + evidence refs."""
+        """Aggregate metrics from individually qualifying suppliers only.
+
+        The previous implementation took independent maxima across every candidate.
+        That could score a trajectory as if one supplier had another supplier's
+        service fit, quote channel, and geography.  Each vector below belongs to
+        one candidate; dimensions are then averaged across candidates that meet
+        the mode's minimum qualification condition.  Coverage rewards multiple
+        genuinely qualified suppliers without inventing a composite supplier.
+        """
         from ..reasoning.trajectory import BundleMetrics
+
+        if mode == "service_quote_required":
+            qualified = [
+                c for c in candidates
+                if (isinstance(c, ServiceCandidate) and c.has_evidence()
+                    and c.service_match_evidence and not self._has_finalization_conflict(c))
+            ]
+        elif mode == "contact_enrichment_only":
+            qualified = [
+                c for c in candidates
+                if (isinstance(c, ContactCandidate) and c.has_evidence()
+                    and c.contacts and not self._has_finalization_conflict(c))
+            ]
+        else:
+            qualified = [
+                c for c in candidates
+                if isinstance(c, ProductCandidate)
+                and c.has_evidence()
+                and c.pricing_status in _PRICED_STATUSES
+                and not self._has_finalization_conflict(c)
+            ]
 
         refs: list[EvidenceRef] = []
         seen: set[str] = set()
-        for cand in candidates:
+        for cand in qualified:
             for ref in cand.evidence_refs:
                 if ref.ledger_id not in seen:
                     seen.add(ref.ledger_id)
                     refs.append(ref)
         hosts = {urlparse(r.url).netloc for r in refs if r.url}
         diversity = round(min(1.0, len(hosts) / 3.0), 4) if refs else 0.0
-        metrics = BundleMetrics(evidence_diversity=diversity)
+        count = len(qualified)
+        metrics = BundleMetrics(
+            evidence_diversity=diversity,
+            qualified_supplier_coverage=round(min(1.0, count / 3.0), 4),
+        )
         disputed, conflict = 0, 0.0
 
-        if mode in {"service_quote_required", "contact_enrichment_only"}:
-            svc = [c for c in candidates if isinstance(c, ServiceCandidate)]
+        if mode == "service_quote_required":
+            svc = [c for c in qualified if isinstance(c, ServiceCandidate)]
             if svc:
-                metrics.service_match = round(min(1.0, max(c.service_match_score for c in svc)), 4)
-                metrics.quote_channel = 1.0 if any(c.quote_channel for c in svc) else 0.0
-                metrics.geo = round(min(1.0, max(c.geo_score for c in svc)), 4)
-                metrics.checklist = round(min(1.0, max(c.checklist_completeness for c in svc)), 4)
-                metrics.contact_reliability = round(min(1.0, max(c.evidence_completeness for c in svc)), 4)
+                # Each input is candidate-local.  The quote channel appears in
+                # exactly one metric (contactability), never evidence quality.
+                metrics.service_match = round(sum(
+                    min(1.0, max(0.0, c.service_match_score)) for c in svc
+                ) / len(svc), 4)
+                metrics.quote_channel = round(sum(
+                    self._rankers["service"].components(c)["contactability"] / 25.0
+                    for c in svc
+                ) / len(svc), 4)
+                metrics.geo = round(sum(
+                    min(1.0, max(0.0, c.geo_score) / 20.0) for c in svc
+                ) / len(svc), 4)
+                metrics.checklist = round(sum(
+                    min(1.0, max(0.0, c.checklist_completeness)) for c in svc
+                ) / len(svc), 4)
+                metrics.evidence_quality = round(sum(
+                    min(1.0, max(0.0, c.evidence_completeness)) for c in svc
+                ) / len(svc), 4)
                 conflict = round(max((c.conflict_penalty for c in svc), default=0.0), 4)
                 disputed = sum(1 for c in svc if c.conflict_penalty > 0)
+        elif mode == "contact_enrichment_only":
+            contacts = [c for c in qualified if isinstance(c, ContactCandidate)]
+            if contacts:
+                metrics.geo = round(sum(
+                    min(1.0, max(0.0, c.geo_score) / 20.0) for c in contacts
+                ) / len(contacts), 4)
+                metrics.evidence_quality = round(sum(
+                    min(1.0, max(0.0, c.evidence_completeness)) for c in contacts
+                ) / len(contacts), 4)
         else:
-            prod = [c for c in candidates if isinstance(c, ProductCandidate)]
-            if prod:
-                metrics.fff_similarity = round(min(1.0, max((c.score for c in prod), default=0.0)), 4)
-                metrics.authorized_source = round(min(1.0, max(c.geo_score for c in prod)), 4)
-                metrics.stock = 1.0 if any(c.pricing_status != PricingStatus.NOT_FOUND for c in prod) else 0.0
-                metrics.datasheet_evidence = diversity
-                # Known limit (disclosed): the remaining two electronics PPRM dims --
-                # lifecycle_safety (0.20) and risk (0.10) -- need PER-SUBSTITUTE
-                # lifecycle/FFF/counterfeit signals from the T-5.x miners, which are a
-                # v2 deferral. A blunt detect_lifecycle over the mixed evidence here
-                # would return the OBSOLETE original's state and wrongly penalise the
-                # very substitute-finding trajectories the mode targets, so we leave
-                # both unset (default 0.0) rather than fabricate a score. This caps a
-                # perfect electronics bundle at ~0.7 by design until the miners land.
-        return metrics, refs, disputed, conflict
+            # Product candidates currently carry neither authorised-distributor
+            # nor current-stock claims.  Geography and a discovered price are not
+            # substitutes for those facts, so these evidence-dependent metrics
+            # deliberately remain zero until dedicated extractors provide them.
+            pass
+        return metrics, refs, disputed, conflict, count
 
     # --- pipeline phases --------------------------------------------------
     async def _gather(
@@ -1255,6 +1327,35 @@ class Controller:
                 break
         return candidates
 
+    @staticmethod
+    def _apply_consolidation_safety(candidates: list) -> list:
+        """Downgrade unresolved merged claims before ranking or finalization.
+
+        Consolidation can legitimately combine complementary pages, but competing
+        field values are unresolved observations, not a stronger selected fact.
+        Keep them visible on the candidate for review while preventing a conflict
+        from meeting the normal completeness gate.  Service rankers also receive
+        the bounded penalty before their score is calculated.
+        """
+        for candidate in candidates:
+            if not Controller._has_finalization_conflict(candidate):
+                continue
+            candidate.evidence_completeness = min(candidate.evidence_completeness, 0.5)
+            if isinstance(candidate, ServiceCandidate):
+                candidate.conflict_penalty = min(candidate.conflict_penalty, -20.0)
+        return candidates
+
+    @staticmethod
+    def _has_finalization_conflict(candidate) -> bool:
+        """A true consolidated conflict is withheld from finalized output.
+
+        Identity consolidation keeps compatible alternatives (for example, two
+        RFQ-form paths) in ``field_claims`` without placing them here. Every
+        entry in ``conflicting_fields`` is therefore an unresolved assertion
+        that must not become a validated supplier, RFQ, or memory fact.
+        """
+        return bool(getattr(candidate, "conflicting_fields", None))
+
     def _build_candidate(self, ctx: ExecutionContext, route: RoutePlan, query: str, page, target_country: str | None):
         meta = self._extractors["vendor_metadata"].extract(
             page_url=page.url, final_url=page.final_url, title=page.title, text=page.text
@@ -1470,6 +1571,52 @@ class Controller:
         return cand
 
     # --- verification (T-2.2) ---------------------------------------------
+    def _verify_with_reserve(self, ledger: EvidenceLedger, qualified, tracer, budget):
+        """Verify visible candidates, then refill from already-fetched evidence.
+
+        The output cap is a presentation bound, not a reason to discard lower
+        ranked candidates before their existing evidence has been checked.  This
+        stays entirely inside the controller's extraction/search/fetch budget:
+        reserve verification creates no provider calls and stops as soon as the
+        minimum qualified output is restored.
+        """
+        initial = list(qualified[: budget.max_validated_candidates])
+        kept, metrics = self._verify_candidates(ledger, initial, tracer)
+        reserve_checked = 0
+        for candidate in qualified[budget.max_validated_candidates:]:
+            if len(kept) >= budget.min_validated_candidates:
+                break
+            refill, refill_metrics = self._verify_candidates(ledger, [candidate], tracer)
+            kept.extend(refill)
+            metrics = self._merge_verification_metrics(metrics, refill_metrics)
+            reserve_checked += 1
+        metrics["reserve_candidates_verified"] = reserve_checked
+        return kept[: budget.max_validated_candidates], metrics
+
+    @staticmethod
+    def _merge_verification_metrics(first: dict, second: dict) -> dict:
+        """Combine sequential verification batches without losing audit counts."""
+        merged = dict(first)
+        for key in ("claims_verified", "claims_unsupported", "candidates_blocked_unverified"):
+            merged[key] = first.get(key, 0) + second.get(key, 0)
+        merged["replan_recommended"] = bool(
+            first.get("replan_recommended") or second.get("replan_recommended")
+        )
+        merged["verification_assessments"] = {
+            **(first.get("verification_assessments") or {}),
+            **(second.get("verification_assessments") or {}),
+        }
+        first_conformal = first.get("conformal")
+        second_conformal = second.get("conformal")
+        if first_conformal or second_conformal:
+            conformal = dict(first_conformal or second_conformal or {})
+            conformal["candidates_abstained"] = (
+                (first_conformal or {}).get("candidates_abstained", 0)
+                + (second_conformal or {}).get("candidates_abstained", 0)
+            )
+            merged["conformal"] = conformal
+        return merged
+
     def _verify_candidates(self, ledger: EvidenceLedger, validated, tracer):
         """Verify each candidate's claims; drop those with unsupported critical claims."""
         spine = VerificationSpine(ledger, minicheck=self.minicheck or MiniCheck())
@@ -1555,10 +1702,10 @@ class Controller:
 
     @staticmethod
     def _assessment_key(cand) -> str:
-        """Trust data keyed by vendor + registrable domain: dedupe keeps
-        same-name candidates on different domains as distinct candidates, so a
-        name-only key would attribute one candidate's grade and verdict to
-        another (and collide every "Unknown Vendor")."""
+        """Trust data keyed by stable supplier identity when available."""
+        supplier_id = getattr(cand, "supplier_id", "") or ""
+        if supplier_id:
+            return supplier_id
         name = getattr(cand, "vendor_name", "") or ""
         domain = _registrable(getattr(cand, "website", "") or "")
         return f"{name}|{domain}" if domain else name
@@ -1611,6 +1758,10 @@ class Controller:
     # --- validation / stop ------------------------------------------------
     def _is_validated(self, candidate, mode: ProcurementMode, budget) -> bool:
         if not candidate.has_evidence():
+            return False
+        # A consolidated conflict preserves both evidenced alternatives for
+        # review. It cannot become a finalized supplier, RFQ, or memory fact.
+        if self._has_finalization_conflict(candidate):
             return False
         if candidate.evidence_completeness < budget.evidence_completeness_threshold:
             return False
@@ -1799,6 +1950,7 @@ class Controller:
                 f"{len(disputed)} disputed fact(s) flagged" if disputed else "no disputed facts"
             )
             verdicts.append({
+                "supplier_id": getattr(cand, "supplier_id", "") or None,
                 "vendor_name": name,
                 "verification_enabled": self.verify_claims,
                 "claims_verified": assessment.get("claims_verified"),
@@ -1878,6 +2030,13 @@ class Controller:
                 redacted += 1
         if redacted:
             data.setdefault("validation_signals", {})["redacted_contacts"] = redacted
+        return data
+
+    def _public_withheld_candidate_dump(self, candidate) -> dict:
+        """Serialize an audit-only conflicted candidate without promoting it."""
+        data = self._public_candidate_dump(candidate)
+        data["withheld_reason"] = "unresolved conflicting field claim"
+        data["withheld_fields"] = list(getattr(candidate, "conflicting_fields", []) or [])
         return data
 
     def _record_extraction_ref(
@@ -2042,6 +2201,7 @@ class Controller:
                         SemanticFact(
                             entity_type="vendor",
                             entity_name=cand.vendor_name,
+                            supplier_id=cand.supplier_id,
                             field=f"contact_{contact.type}",
                             value=contact.value,
                             confidence=contact.confidence,
@@ -2055,6 +2215,7 @@ class Controller:
                     SemanticFact(
                         entity_type="vendor",
                         entity_name=cand.vendor_name,
+                        supplier_id=cand.supplier_id,
                         field="quote_channel",
                         value=cand.quote_channel.value,
                         confidence=0.85,

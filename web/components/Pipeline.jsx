@@ -1,8 +1,8 @@
 /* global React, SQIcon */
 
-function Pipeline({ activePhase, progress, running, budget = 18 }) {
+function Pipeline({ activePhase, progress, running, budget = null }) {
   const steps = window.SQDATA.PIPELINE_STEPS;
-  const activeIdx = Math.max(0, steps.findIndex(s => s.k === activePhase));
+  const activeIdx = steps.findIndex(s => s.k === activePhase);
   return (
     <div style={{
       borderBottom: "1px solid var(--sq-border)",
@@ -53,8 +53,8 @@ function Pipeline({ activePhase, progress, running, budget = 18 }) {
         color: "var(--sq-slate-taupe)", letterSpacing: "0.06em",
         display: "flex", gap: 18,
       }}>
-        <span>budget · {Math.min(Math.round(progress * budget), budget)}/{budget}</span>
-        <span>fetches · {Math.min(Math.round(progress * 14), 14)}</span>
+        <span>{running ? "worker running · awaiting result" : "worker idle"}</span>
+        {budget && <span>fetches · {budget.fetch_urls ?? 0}/{budget.max_fetch_urls ?? "—"}</span>}
       </div>
     </div>
   );

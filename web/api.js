@@ -3,8 +3,7 @@
  *
  * Every UI value traces back to a real backend field. Derived visuals (the
  * 6-spoke radial, "why this rank") are computed from the actual service-ranker
- * decomposition — service_match*25 + channel*25 + geo*20 + contact*15 +
- * checklist*10 + conflict_penalty — never invented narrative.
+ * decomposition — backend score_components — never invented narrative.
  *
  * Plain ES (no JSX) so it loads before Babel compiles the components. */
 
@@ -12,11 +11,12 @@
   "use strict";
 
   // ---- HTTP -----------------------------------------------------------------
-  async function postJSON(path, body) {
+  async function requestJSON(path, body, signal) {
     const res = await fetch(path, {
-      method: "POST",
+      method: body === undefined ? "GET" : "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
     if (!res.ok) {
       let detail = "";
@@ -27,9 +27,20 @@
   }
 
   const SQAPI = {
-    classify: (query) => postJSON("/classify", { query, offline: true }),
+    classify: (query) => requestJSON("/classify", { query, offline: true }),
     run: (query, opts = {}) =>
-      postJSON("/run", { query, mode: opts.mode || "auto", country: opts.country || null, offline: opts.offline !== false }),
+      requestJSON("/run", { query, mode: opts.mode || "auto", country: opts.country || null, offline: opts.offline !== false }),
+    config: () => requestJSON("/config"),
+    start: (query, opts = {}) => requestJSON("/runs", {
+      query, mode: opts.mode || "auto", country: opts.country || null,
+      profile: opts.profile, idempotency_key: opts.idempotencyKey,
+    }),
+    status: (id) => requestJSON(`/runs/${encodeURIComponent(id)}`),
+    result: (id) => requestJSON(`/runs/${encodeURIComponent(id)}/result`),
+    events: (id, after = 0) => requestJSON(`/runs/${encodeURIComponent(id)}/events?after=${after}`),
+    cancel: (id) => requestJSON(`/runs/${encodeURIComponent(id)}/cancel`, {}),
+    inspect: (id, operation, args, signal) => requestJSON(
+      `/runs/${encodeURIComponent(id)}/inspect/${encodeURIComponent(operation)}`, args, signal),
   };
 
   // ---- helpers --------------------------------------------------------------
@@ -48,11 +59,6 @@
     if (!url) return "";
     try { return new URL(url).host.replace(/^www\./, ""); }
     catch (_) { return String(url).replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0]; }
-  }
-  function registrable(url) {
-    const h = hostOf(url);
-    const parts = h.split(".");
-    return parts.length >= 2 ? parts.slice(-2).join(".") : h;
   }
   function shortenUrl(url) {
     const h = hostOf(url);
@@ -118,17 +124,11 @@
   }
 
   function serviceBreakdown(c) {
-    // Each axis 0..100, normalised against its point cap in the service ranker.
-    const channelQ = c.quote_channel ? (CHANNEL_QUALITY[c.quote_channel.type] || 0) : 0;
-    const contactPts = c.quote_channel ? (c.quote_channel.type === "contact_email" ? 15 : 10) : 0;
-    const integrity = (20 + Math.max(-20, c.conflict_penalty || 0)) / 20 * 100;
+    const parts = c.score_components || {};
     return {
-      match: pct(Math.min(1, c.service_match_score || 0) * 100),
-      channel: pct(channelQ * 100),
-      geo: pct(Math.max(0, c.geo_score || 0) / 20 * 100),
-      contact: pct(contactPts / 15 * 100),
-      checklist: pct(Math.min(1, c.checklist_completeness || 0) * 100),
-      integrity: pct(integrity),
+      suitability: pct((parts.suitability || 0) / 55 * 100),
+      contactability: pct((parts.contactability || 0) / 25 * 100),
+      evidence: pct((parts.evidence_quality || 0) / 20 * 100),
     };
   }
 
@@ -139,15 +139,7 @@
   }
 
   function serviceScoreParts(c) {
-    const channelQ = c.quote_channel ? (CHANNEL_QUALITY[c.quote_channel.type] || 0) : 0;
-    return {
-      match: +(Math.min(1, c.service_match_score || 0) * 25).toFixed(1),
-      channel: +(channelQ * 25).toFixed(1),
-      geo: +(Math.max(0, c.geo_score || 0) / 20 * 20).toFixed(1),
-      contact: c.quote_channel ? (c.quote_channel.type === "contact_email" ? 15 : 10) : 0,
-      checklist: +(Math.min(1, c.checklist_completeness || 0) * 10).toFixed(1),
-      penalty: Math.max(-20, c.conflict_penalty || 0),
-    };
+    return c.score_components || {};
   }
 
   function deriveTags(c, kind) {
@@ -155,7 +147,7 @@
     const country = c.country || "Global";
     tags.push({ t: SEA.includes(country) ? country + " · SEA" : country, kind: "plain" });
     const comp = c.evidence_completeness || 0;
-    tags.push(comp >= 1 ? { t: "Fully evidenced", kind: "ok" }
+    tags.push(comp >= 1 ? { t: "All fields sourced", kind: "ok" }
             : comp >= 0.65 ? { t: "Evidence " + comp.toFixed(2), kind: "plain" }
             : { t: "Thin evidence", kind: "warn" });
     if (kind === "service" && c.quote_channel) tags.push({ t: c.quote_channel.type, kind: "plain" });
@@ -164,20 +156,17 @@
   }
 
   function deriveWhy(c, kind, parts) {
-    if (kind !== "service") {
-      const why = [`Evidence completeness ${(c.evidence_completeness || 0).toFixed(2)} across ${(c.evidence_refs || []).length} ledger refs`];
-      if (c.country) why.push(`Geo: ${c.country} (SEA-first boost applied)`);
-      if (c.pricing_status) why.push(`Pricing status: ${c.pricing_status}`);
-      return why;
-    }
-    const why = [
-      `Service match ${c.service_match_evidence ? "evidence-backed" : "weak"} · score ${(c.service_match_score || 0).toFixed(2)} → ${parts.match} / 25 pts`,
+    if (kind !== "service") return [
+      `Evidence completeness ${(c.evidence_completeness || 0).toFixed(2)} across ${(c.evidence_refs || []).length} ledger refs`,
+      `Geography: ${c.country || "unknown"}`,
     ];
-    if (c.quote_channel) why.push(`Quote channel ${c.quote_channel.type} → ${parts.channel} / 25 pts (+${parts.contact} reliability)`);
-    else why.push("No quote channel found — not RFQ-ready");
-    why.push(`Geo relevance ${c.country || "unknown"} → ${parts.geo} / 20 pts`);
-    why.push(`Evidence completeness ${(c.evidence_completeness || 0).toFixed(2)} across ${(c.evidence_refs || []).length} ledger refs`);
-    if (parts.penalty < 0) why.push(`Conflict penalty ${parts.penalty} pts applied — revalidate before RFQ`);
+    const why = [
+      `Suitability ${parts.suitability ?? "unavailable"} / 55 pts · evidenced service, geography and checklist`,
+      `Contactability ${parts.contactability ?? "unavailable"} / 25 pts`,
+      `Evidence quality ${parts.evidence_quality ?? "unavailable"} / 20 pts across ${(c.evidence_refs || []).length} refs`,
+    ];
+    if (!c.quote_channel) why.push("No quotation channel recorded");
+    if ((c.conflict_penalty || 0) < 0) why.push(`Conflict penalty ${c.conflict_penalty} pts · review competing claims`);
     return why;
   }
 
@@ -207,15 +196,15 @@
       : kind === "contact" ? ((c.contacts || [])[0] || {}).value
       : c.website;
     return {
-      id: "v" + (i + 1),
+      id: c.supplier_id || "v" + (i + 1),
       rank: i + 1,
       kind,
       name: c.vendor_name,
       country: c.country || "—",
       website: c.website || "",
-      domain: registrable(c.website),
+      domain: hostOf(c.website),
       score: Math.round((c.score || 0) * 10) / 10,
-      scoreCap: kind === "service" ? 95 : 100,
+      scoreCap: 100,
       breakdown,
       scoreParts: parts,
       reliability: pct((c.evidence_completeness || 0) * 100),
@@ -232,7 +221,7 @@
       ledger: refs.map((r) => ledgerById.get(r.ledger_id)).filter(Boolean),
       summary: deriveSummary(c, kind),
       why: deriveWhy(c, kind, parts || {}),
-      trust: (trustByVendor && trustByVendor[c.vendor_name]) || null,
+      trust: (trustByVendor && trustByVendor[c.supplier_id || c.vendor_name]) || null,
       raw: c,
     };
   }
@@ -341,7 +330,11 @@
   function toSignals(result, vendors) {
     const sig = [];
     const top = vendors[0];
-    if (top) sig.push({ id: "sig_top", kind: "ok", ovl: "Top match validated", title: top.name, meta: `score ${top.score} · ${top.evidence.length} refs` });
+    if (top) sig.push({ id: "sig_top", kind: "ok", ovl: "Top ranked supplier", title: top.name, meta: `score ${top.score} · ${top.evidence.length} refs` });
+    for (const c of result.withheld_candidates || []) {
+      sig.push({ id: "withheld_" + c.supplier_id, kind: "risk", ovl: "Supplier withheld",
+        title: c.vendor_name, meta: `Conflicting claims: ${(c.conflicting_fields || []).join(", ")}` });
+    }
     for (const v of vendors) {
       if (v.tags.some((t) => t.kind === "risk")) {
         sig.push({ id: "sig_" + v.id, kind: "risk", ovl: "Conflicting evidence", title: `${v.name} · pricing`, meta: "Action required · revalidate" });
@@ -361,7 +354,7 @@
     const ledger = toLedger(result);
     const trustByVendor = {};
     for (const t of result.trust_verdicts || []) {
-      if (t && t.vendor_name) trustByVendor[t.vendor_name] = t;
+      if (t && (t.supplier_id || t.vendor_name)) trustByVendor[t.supplier_id || t.vendor_name] = t;
     }
     const vendors = (result.validated_candidates || []).map((c, i) => toVendor(c, i, ledger, trustByVendor));
     const m = result.metrics || {};
@@ -388,8 +381,13 @@
   function indexRfqByVendor(result) {
     const map = {};
     for (const d of result.rfq_drafts || []) {
-      const name = d.vendor && d.vendor.vendor_name;
-      if (name) map[name] = d;
+      const vendor = d.vendor || {};
+      if (vendor.supplier_id) map[vendor.supplier_id] = d;
+      else {
+        const matches = (result.validated_candidates || []).filter(c =>
+          c.vendor_name === vendor.vendor_name && c.website === vendor.website);
+        if (matches.length === 1 && matches[0].supplier_id) map[matches[0].supplier_id] = d;
+      }
     }
     return map;
   }

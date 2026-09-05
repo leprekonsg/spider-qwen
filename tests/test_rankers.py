@@ -42,6 +42,54 @@ def test_service_ranker_rewards_email_channel():
                             service_match_evidence=True, geo_score=6, evidence_completeness=0.5, evidence_refs=[_ref()])
     ranked = ServiceRanker().rank([weak, strong])
     assert ranked[0].vendor_name == "A" and ranked[0].score > ranked[1].score
+    assert ranked[0].score_components == {
+        "suitability": 55.0,
+        "contactability": 22.5,
+        "evidence_quality": 20.0,
+        "conflict_penalty": 0.0,
+        "total": 97.5,
+    }
+
+
+def test_service_quote_channel_is_counted_only_as_contactability():
+    ref = _ref()
+    email = ServiceCandidate(
+        vendor_name="Email", website="https://email.sg", service_match_score=0.6,
+        service_match_evidence=True, geo_score=10, checklist_completeness=0.5,
+        evidence_completeness=0.8, evidence_refs=[ref],
+        quote_channel=QuoteChannel(type=QuoteChannelType.CONTACT_EMAIL,
+                                   value="sales@email.sg", evidence_ref=ref),
+    )
+    page = email.model_copy(update={
+        "vendor_name": "Page",
+        "quote_channel": QuoteChannel(type=QuoteChannelType.CONTACT_PAGE,
+                                       value="https://email.sg/contact", evidence_ref=ref),
+    })
+    ranker = ServiceRanker()
+    email_parts = ranker.components(email)
+    page_parts = ranker.components(page)
+    assert email_parts["suitability"] == page_parts["suitability"]
+    assert email_parts["evidence_quality"] == page_parts["evidence_quality"]
+    assert email_parts["contactability"] > page_parts["contactability"]
+    assert ranker.score(email) - ranker.score(page) == email_parts["contactability"] - page_parts["contactability"]
+
+
+def test_service_ranker_prioritises_suitability_over_contact_convenience():
+    ref = _ref()
+    stronger_fit = ServiceCandidate(
+        vendor_name="Stronger fit", website="https://fit.sg", evidence_refs=[ref],
+        service_match_score=1.0, service_match_evidence=True, geo_score=20,
+        checklist_completeness=1.0, evidence_completeness=0.8,
+    )
+    convenient_contact = ServiceCandidate(
+        vendor_name="Convenient contact", website="https://contact.sg", evidence_refs=[ref],
+        service_match_score=0.5, service_match_evidence=True, geo_score=0,
+        checklist_completeness=0.0, evidence_completeness=1.0,
+        quote_channel=QuoteChannel(type=QuoteChannelType.CONTACT_EMAIL,
+                                   value="sales@contact.sg", evidence_ref=ref),
+    )
+    ranked = ServiceRanker().rank([convenient_contact, stronger_fit])
+    assert ranked[0].vendor_name == "Stronger fit"
 
 
 def test_contact_ranker_scores_business_contact():

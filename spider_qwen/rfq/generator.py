@@ -38,6 +38,7 @@ class RFQGenerator:
         evidence_corpus: str | None = None,
     ) -> RFQDraft:
         vendor = RFQVendor(
+            supplier_id=candidate.supplier_id,
             vendor_name=candidate.vendor_name,
             website=candidate.website or "",
             country=candidate.country,

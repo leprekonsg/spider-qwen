@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 
+from ..api.run_queries import CompletedRunQueries, Operation, load_candidate_observations
+
 from ..evidence.ledger import EvidenceLedger
 from ..evidence.verifier import verify_ledger
 from ..memory.episodic import EpisodicMemory
@@ -29,6 +31,20 @@ from .schemas import (
 
 def _state_dir(state_dir: str | None = None) -> str:
     return state_dir or os.getenv("SPIDER_QWEN_STATE_DIR", ".spider_qwen")
+
+
+def inspect_run(run_id: str, operation: Operation, *, supplier_id: str | None = None,
+                supplier_ids: list[str] | None = None, state_dir: str | None = None) -> dict:
+    """Inspect a completed run in the operator-bound stdio owner's workspace."""
+    from ..application.run_service import load_run_result
+
+    owner = os.getenv("SPIDER_QWEN_MCP_OWNER", "local")
+    def load(identifier: str, *, owner: str):
+        return load_run_result(_state_dir(state_dir), identifier, owner=owner)
+    def evidence(identifier: str, *, owner: str, ledger_ids: set[str]):
+        return load_candidate_observations(_state_dir(state_dir), identifier, owner=owner, ledger_ids=ledger_ids)
+    return CompletedRunQueries(load, evidence).inspect(run_id, operation, owner=owner,
+                                             supplier_id=supplier_id, supplier_ids=supplier_ids)
 
 
 def procurement_classify(query: str) -> ClassifyResult:

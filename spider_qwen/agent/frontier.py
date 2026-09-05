@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from ..evidence.dedupe import canonicalize_url
 from ..governance.source_reliability import host_of, reliability_for
+from ..identity import registrable_domain
 
 # Leads below the floor are never worth a fetch; popping stops there (the
 # marginal-value stopping rule, kept as a constant in v1).
@@ -204,9 +205,7 @@ def apply_scorer_deltas(leads: list[Lead], deltas: dict[str, float]) -> int:
 
 
 def _registrable(url: str) -> str:
-    host = host_of(url)
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+    return registrable_domain(url)
 
 
 def _key(lead: Lead) -> str:
