@@ -30,6 +30,20 @@ uvicorn = pytest.importorskip("uvicorn")
 
 HUNT_TIMEOUT_MS = 30_000  # real offline worker and lifecycle polling
 
+_MODEL_CONTEXT_SHIM = """(() => {
+  window.registeredTools = {};
+  window.registrationAborts = 0;
+  Object.defineProperty(document, 'modelContext', {value: {
+    async registerTool(tool, {signal}) {
+      window.registeredTools[tool.name] = tool;
+      signal.addEventListener('abort', () => {
+        if (window.registeredTools[tool.name] === tool) delete window.registeredTools[tool.name];
+        window.registrationAborts += 1;
+      });
+    }
+  }, configurable: true});
+})();"""
+
 
 class _ServerURL(str):
     service = None
@@ -169,15 +183,7 @@ def run_payload(server_url):
 def test_webmcp_reads_completed_run_and_unregisters_on_reset(page, server_url):
     # Emulate only the browser registration surface; every tool invocation
     # still calls the real HTTP application and persisted offline result.
-    page.add_init_script("""(() => {
-      window.registeredTools = {};
-      Object.defineProperty(document, 'modelContext', {value: {
-        async registerTool(tool, {signal}) {
-          window.registeredTools[tool.name] = tool;
-          signal.addEventListener('abort', () => delete window.registeredTools[tool.name]);
-        }
-      }, configurable: true});
-    })();""")
+    page.add_init_script(_MODEL_CONTEXT_SHIM)
     _run_hunt(page, server_url)
     page.wait_for_function("Object.keys(window.registeredTools).length === 5")
     actual = page.evaluate("""async () => {
@@ -185,8 +191,10 @@ def test_webmcp_reads_completed_run_and_unregisters_on_reset(page, server_url):
       const run = await tools.get_current_run.execute({});
       const listed = await tools.list_candidates.execute({});
       const supplier = listed.candidates[0];
-      const evidence = await tools.get_candidate_evidence.execute({supplier_id: supplier.supplier_id});
-      const draft = await tools.get_rfq_draft.execute({supplier_id: supplier.supplier_id});
+      const selector = {supplier_id: supplier.supplier_id};
+      if (supplier.offering_id) selector.offering_id = supplier.offering_id;
+      const evidence = await tools.get_candidate_evidence.execute(selector);
+      const draft = await tools.get_rfq_draft.execute(selector);
       const stored = await (await fetch(`/runs/${run.run_id}/result`)).json();
       return {run, listed, evidence, draft, stored,
         readOnly: Object.values(tools).every(t => t.annotations.readOnlyHint),
@@ -210,6 +218,138 @@ def test_webmcp_registration_failure_keeps_ui_functional(page, server_url):
     });""")
     _run_hunt(page, server_url)
     _expect(page.get_by_role("heading", level=3, name="Example Vendor 1 Pte Ltd").first)
+    assert page.errors == []
+
+
+def test_buyer_requirements_round_trip_and_remain_unresolved_in_dossier(page, server_url):
+    page.goto(server_url)
+    page.locator("summary").filter(has_text="Supplier requirements").click()
+    page.get_by_role("textbox", name="Supplier requirements", exact=True).fill("overnight work\nsafety documentation")
+    page.get_by_role("checkbox", name="This checklist includes all supplier conditions in my request").check()
+    with page.expect_response(lambda r: r.url.endswith("/runs") and r.request.method == "POST") as started:
+        page.get_by_role("button", name="Begin hunt").click()
+    request = started.value.json()["procurement_request"]
+    assert request["requirements_confirmed"] is True
+    assert [r["text"] for r in request["requirements"]] == ["overnight work", "safety documentation"]
+    _expect(page.get_by_text("stop ·"), timeout=HUNT_TIMEOUT_MS)
+    page.get_by_role("button", name="Evidence", exact=True).first.click()
+    _expect(page.get_by_text("Supplier qualification: unresolved"))
+    _expect(page.get_by_text("overnight work", exact=True))
+    _expect(page.get_by_text("safety documentation", exact=True))
+    assert page.get_by_text("Review-ready", exact=True).count() == 0
+    assert page.errors == []
+
+
+def test_webmcp_switches_between_two_completed_runs(page, server_url, run_payload):
+    page.add_init_script(_MODEL_CONTEXT_SHIM)
+    page.goto(server_url)
+    actual = page.evaluate("""async (firstRunId) => {
+      const second = await window.SQAPI.run('A4 paper public price Singapore');
+      await window.SQWebMCP.setCurrentRun(firstRunId);
+      const first = await window.registeredTools.get_current_run.execute({});
+      const abortsBeforeSwitch = window.registrationAborts;
+      await window.SQWebMCP.setCurrentRun(second.run_id);
+      const current = await window.registeredTools.get_current_run.execute({});
+      return {
+        firstId: first.run_id,
+        secondId: current.run_id,
+        expectedSecondId: second.run_id,
+        abortsOnSwitch: window.registrationAborts - abortsBeforeSwitch,
+        toolCount: Object.keys(window.registeredTools).length,
+      };
+    }""", run_payload["run_id"])
+
+    assert actual["firstId"] == run_payload["run_id"]
+    assert actual["secondId"] == actual["expectedSecondId"]
+    assert actual["secondId"] != actual["firstId"]
+    assert actual["abortsOnSwitch"] == 5
+    assert actual["toolCount"] == 5
+    assert page.errors == []
+
+
+def test_webmcp_propagates_inflight_abort_signal(page, server_url, run_payload):
+    page.add_init_script(_MODEL_CONTEXT_SHIM)
+    page.goto(server_url)
+    actual = page.evaluate("""async (runId) => {
+      await window.SQWebMCP.setCurrentRun(runId);
+      const nativeFetch = window.fetch;
+      let sawSignal = false;
+      window.fetch = (input, options = {}) => {
+        if (String(input).includes('/inspect/get_current_run')) {
+          sawSignal = options.signal instanceof AbortSignal;
+          return new Promise((resolve, reject) => {
+            options.signal.addEventListener('abort', () => {
+              reject(new DOMException('inspect cancelled', 'AbortError'));
+            }, {once: true});
+          });
+        }
+        return nativeFetch(input, options);
+      };
+      const request = new AbortController();
+      const pending = window.registeredTools.get_current_run.execute({}, {signal: request.signal});
+      request.abort();
+      try {
+        await pending;
+        return {sawSignal, errorName: null};
+      } catch (error) {
+        return {sawSignal, errorName: error.name};
+      } finally {
+        window.fetch = nativeFetch;
+      }
+    }""", run_payload["run_id"])
+
+    assert actual == {"sawSignal": True, "errorName": "AbortError"}
+    assert page.errors == []
+
+
+def test_webmcp_pagehide_unregisters_and_pageshow_restores(page, server_url, run_payload):
+    page.add_init_script(_MODEL_CONTEXT_SHIM)
+    page.goto(server_url)
+    page.evaluate("runId => window.SQWebMCP.setCurrentRun(runId)", run_payload["run_id"])
+    page.wait_for_function("Object.keys(window.registeredTools).length === 5")
+
+    page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+    assert page.evaluate("Object.keys(window.registeredTools).length") == 0
+    assert page.evaluate("window.registrationAborts") == 5
+
+    page.evaluate("window.dispatchEvent(new Event('pageshow'))")
+    page.wait_for_function("Object.keys(window.registeredTools).length === 5")
+    assert page.errors == []
+
+
+def test_ui_maps_same_supplier_offerings_to_distinct_trust_and_drafts(page, server_url):
+    page.goto(server_url)
+    actual = page.evaluate("""() => {
+      const result = {
+        validated_candidates: [
+          {supplier_id: 'supplier-a', offering_id: 'paper', vendor_name: 'Office Co',
+           product_url: '/paper', price: 10, currency: 'SGD', pricing_status: 'EXACT_PRICE',
+           evidence_refs: [], conflicting_fields: []},
+          {supplier_id: 'supplier-a', offering_id: 'toner', vendor_name: 'Office Co',
+           product_url: '/toner', price: 80, currency: 'SGD', pricing_status: 'EXACT_PRICE',
+           evidence_refs: [], conflicting_fields: []},
+        ],
+        trust_verdicts: [
+          {supplier_id: 'supplier-a', offering_id: 'paper', summary: 'paper trust'},
+          {supplier_id: 'supplier-a', offering_id: 'toner', summary: 'toner trust'},
+        ],
+        rfq_drafts: [
+          {vendor: {supplier_id: 'supplier-a', offering_id: 'paper'}, status: 'paper draft'},
+          {vendor: {supplier_id: 'supplier-a', offering_id: 'toner'}, status: 'toner draft'},
+        ],
+        metrics: {},
+      };
+      const mapped = window.SQMAP.mapResult(result);
+      return {
+        ids: mapped.vendors.map(v => v.id),
+        trust: mapped.vendors.map(v => v.trust && v.trust.summary),
+        drafts: mapped.vendors.map(v => mapped.rfqByVendor[v.id] && mapped.rfqByVendor[v.id].status),
+      };
+    }""")
+
+    assert len(set(actual["ids"])) == 2
+    assert actual["trust"] == ["paper trust", "toner trust"]
+    assert actual["drafts"] == ["paper draft", "toner draft"]
     assert page.errors == []
 
 

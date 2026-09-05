@@ -41,6 +41,11 @@ class QwenPricingExtraction(BaseModel):
     # name next to the price tag). Lets deterministic code drop an accessory
     # price that does not match the buyer query instead of attributing it.
     subject: str = ""
+    variant: str = ""
+    quantity: str = ""
+    geography: str = ""
+    valid_from: str = ""
+    valid_until: str = ""
     matched_text: str = ""
     claims: list[QwenClaim] = Field(default_factory=list)
 
@@ -180,7 +185,9 @@ class QwenJsonExtractor(RecordsTokenUsage):
                     "each name exactly as written in the page text. For pricing, set "
                     "pricing.subject to the product or service the price belongs to, "
                     "exactly as written next to the price on the page; prefer the price "
-                    "of the item the buyer query asks for over accessory or add-on prices."
+                    "of the item the buyer query asks for over accessory or add-on prices. "
+                    "Keep variant, quantity, geography, and validity dates scoped to that "
+                    "same price observation; leave any field empty when it is not stated."
                 ),
             },
             {
@@ -281,6 +288,7 @@ class MockQwenJsonExtractor:
                 price=pricing.price,
                 currency=pricing.currency,
                 unit=pricing.unit,
+                subject=query,
                 matched_text=pricing.matched_text,
                 claims=pricing_claims,
             ),

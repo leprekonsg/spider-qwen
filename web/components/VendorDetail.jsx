@@ -121,6 +121,20 @@ function VendorDetail({ vendor, onClose, onDraft }) {
 
           {/* Trust verdict (real trust_verdicts entry from the controller) */}
           {vendor.trust && <TrustVerdict trust={vendor.trust}/>}
+          {vendor.raw.qualification && (
+            <section style={{ fontSize: 12, lineHeight: 1.6 }}>
+              <div className="sq-overline">Supplier qualification: {vendor.raw.qualification.status}</div>
+              {!vendor.raw.qualification.requirements_confirmed && <p>Buyer requirements have not been confirmed. Supplier suitability remains unresolved.</p>}
+              {(vendor.raw.requirement_assessments || []).map(a => (
+                <div key={a.requirement_id} style={{ padding: "8px 0", borderBottom: "1px solid var(--sq-border)" }}>
+                  <strong>{a.text}</strong> · {a.kind} · {a.status.replace(/_/g, " ")}
+                  <div>{a.reason.replace(/_/g, " ")}</div>
+                  {(a.evidence_refs || []).map(r => <div key={r.ledger_id}>{r.ledger_id} · observed {r.retrieved_at}</div>)}
+                </div>
+              ))}
+              <p>Source assertions are not independent confirmation. RFQ input completeness is shown separately from supplier fit.</p>
+            </section>
+          )}
 
           {/* Tags */}
           <section style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

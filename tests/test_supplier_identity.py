@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from itertools import permutations
+
 from spider_qwen.evidence.models import EvidenceRef
 from spider_qwen.extraction.dedupe import dedupe_candidates
 from spider_qwen.identity import normalize_supplier_name, registrable_domain
@@ -179,6 +181,154 @@ def test_conflicting_product_prices_keep_both_claims_and_coarse_evidence_scope()
     assert {claim.value for claim in merged.field_claims["price"]} == {10.0, 12.0}
     assert {claim.evidence_scope for claim in merged.field_claims["price"]} == {"candidate"}
     assert {ref.ledger_id for ref in merged.evidence_refs} == {"ev_1", "ev_2"}
+
+
+def test_same_supplier_different_products_are_distinct_offerings():
+    paper = ProductCandidate(
+        vendor_name="Office Supply", website="https://office.example/paper",
+        product_name="A4 paper", price=8.5, currency="SGD", unit="ream",
+        pricing_status=PricingStatus.EXACT_PRICE, evidence_refs=[_ref(1)],
+    )
+    toner = ProductCandidate(
+        vendor_name="Office Supply", website="https://office.example/toner",
+        product_name="toner cartridge", price=72.0, currency="SGD", unit="cartridge",
+        pricing_status=PricingStatus.EXACT_PRICE, evidence_refs=[_ref(2)],
+    )
+
+    result, merges = dedupe_candidates([paper, toner])
+
+    assert merges == 0
+    assert len(result) == 2
+    assert result[0].supplier_id == result[1].supplier_id
+    assert result[0].offering_id != result[1].offering_id
+    assert all(not candidate.conflicting_fields for candidate in result)
+
+
+def test_different_scoped_offers_are_alternatives_not_conflicts():
+    first = ProductCandidate(
+        vendor_name="Office Supply", website="https://office.example/paper-a",
+        product_name="A4 paper", variant="80 gsm", quantity="10 reams",
+        price=80.0, currency="SGD", unit="case", geography="Singapore",
+        valid_until="2026-09-30", pricing_status=PricingStatus.EXACT_PRICE,
+        evidence_refs=[_ref(1)],
+    )
+    second = ProductCandidate(
+        vendor_name="Office Supply", website="https://office.example/paper-b",
+        product_name="A4 paper", variant="80 gsm", quantity="10 reams",
+        price=70.0, currency="USD", unit="carton", geography="Malaysia",
+        valid_until="2026-10-31", pricing_status=PricingStatus.EXACT_PRICE,
+        evidence_refs=[_ref(2)],
+    )
+
+    merged = dedupe_candidates([first, second])[0][0]
+    observed = [first.offer_scope.model_dump(), second.offer_scope.model_dump()]
+
+    assert merged.offer_scope.model_dump() in observed
+    assert {claim.value["price"] for claim in merged.field_claims["offer_scope"]} == {80.0, 70.0}
+    assert merged.conflicting_fields == []
+    assert merged.offer_scope_status == "multiple"
+
+
+def test_complementary_offer_fragments_remain_separate_observations():
+    currency_only = ProductCandidate(
+        vendor_name="Office Supply", website="https://office.example/paper-a",
+        product_name="A4 paper", currency="SGD", evidence_refs=[_ref(1)],
+    )
+    price_only = ProductCandidate(
+        vendor_name="Office Supply", website="https://office.example/paper-b",
+        product_name="A4 paper", price=10.0, evidence_refs=[_ref(2)],
+    )
+
+    merged = dedupe_candidates([currency_only, price_only])[0][0]
+
+    assert merged.price == 10.0
+    assert merged.currency is None
+    assert merged.offer_scope.model_dump() == price_only.offer_scope.model_dump()
+    assert len(merged.field_claims["offer_scope"]) == 2
+    assert merged.conflicting_fields == []
+    assert merged.offer_scope_status == "unresolved"
+
+
+def test_offer_conflicts_are_detected_across_all_observations_order_independently():
+    offers = [
+        ProductCandidate(
+            vendor_name="Office Supply", website="https://office.example/paper-sg",
+            product_name="A4 paper", variant="80 gsm", quantity="10 reams",
+            price=80.0, currency="SGD", unit="ream", geography="Singapore",
+            pricing_status=PricingStatus.EXACT_PRICE, evidence_refs=[_ref(1)],
+        ),
+        ProductCandidate(
+            vendor_name="Office Supply", website="https://office.example/paper-my-a",
+            product_name="A4 paper", variant="80 gsm", quantity="10 reams",
+            price=70.0, currency="SGD", unit="ream", geography="Malaysia",
+            pricing_status=PricingStatus.EXACT_PRICE, evidence_refs=[_ref(2)],
+        ),
+        ProductCandidate(
+            vendor_name="Office Supply", website="https://office.example/paper-my-b",
+            product_name="A4 paper", variant="80 gsm", quantity="10 reams",
+            price=75.0, currency="SGD", unit="ream", geography="Malaysia",
+            pricing_status=PricingStatus.EXACT_PRICE, evidence_refs=[_ref(3)],
+        ),
+    ]
+    outcomes = []
+
+    for ordering in permutations(offers):
+        merged = dedupe_candidates(list(ordering))[0][0]
+        outcomes.append({
+            "selected": merged.offer_scope.model_dump(mode="json"),
+            "status": merged.offer_scope_status,
+            "conflicts": sorted(merged.conflicting_fields),
+            "observations": sorted(
+                _claim_signature(claim.value)
+                for claim in merged.field_claims["offer_scope"]
+            ),
+            "selected_count": sum(
+                claim.is_selected for claim in merged.field_claims["offer_scope"]
+            ),
+        })
+
+    assert all(outcome == outcomes[0] for outcome in outcomes)
+    assert outcomes[0]["status"] == "multiple"
+    assert outcomes[0]["conflicts"] == ["offer_scope", "price"]
+    assert len(outcomes[0]["observations"]) == 3
+    assert outcomes[0]["selected_count"] == 1
+
+
+def _claim_signature(value: dict) -> tuple:
+    return tuple(sorted(value.items()))
+
+
+def test_unknown_product_identity_does_not_merge_into_known_offering():
+    known = ProductCandidate(
+        vendor_name="Office Supply", website="https://office.example/paper",
+        product_name="A4 paper", evidence_refs=[_ref(1)],
+    )
+    contact_only = ProductCandidate(
+        vendor_name="Office Supply", website="https://office.example/contact",
+        product_name="", evidence_refs=[_ref(2)],
+    )
+
+    result, merges = dedupe_candidates([known, contact_only])
+
+    assert merges == 0
+    assert len(result) == 2
+    assert contact_only.offering_id == ""
+
+
+def test_explicitly_different_service_offerings_remain_distinct():
+    office = _candidate("Clean Co", "https://clean.example/office", 1, service_match=True)
+    office.service_name = "office cleaning"
+    office.offering_id = ""
+    industrial = _candidate("Clean Co", "https://clean.example/industrial", 2, service_match=True)
+    industrial.service_name = "industrial cleaning"
+    industrial.offering_id = ""
+
+    result, merges = dedupe_candidates([office, industrial])
+
+    assert merges == 0
+    assert len(result) == 2
+    assert result[0].supplier_id == result[1].supplier_id
+    assert result[0].offering_id != result[1].offering_id
 
 
 def test_supplier_id_is_stable_and_reaches_rfq_vendor():

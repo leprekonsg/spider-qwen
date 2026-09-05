@@ -4,18 +4,22 @@
   let currentRunId = null;
   let registration = null;
   const definitions = [
-    ["get_current_run", "Read the completed procurement run currently displayed.", {}],
-    ["list_candidates", "List the current run's suppliers with stable IDs, scores and evidence references.", {}],
+    ["get_current_run", "Read the completed procurement run currently displayed.", {}, []],
+    ["list_candidates", "List the current run's supplier offerings with stable IDs, scores and evidence references.", {}, []],
     ["get_candidate_evidence", "Read a supplier's recorded evidence, conflicting claims and citation proofs.", {
-      supplier_id: { type: "string", minLength: 1, maxLength: 128 }
-    }],
-    ["compare_candidates", "Compare 2 to 10 suppliers from the current completed run using their recorded claims and scores.", {
+      supplier_id: { type: "string", minLength: 1, maxLength: 128 },
+      offering_id: { type: "string", minLength: 1, maxLength: 128 }
+    }, ["supplier_id"]],
+    ["compare_candidates", "Compare 2 to 10 supplier offerings from the current completed run using their recorded claims and scores. Use offering_ids when one supplier has multiple offerings.", {
       supplier_ids: { type: "array", minItems: 2, maxItems: 10, uniqueItems: true,
+        items: { type: "string", minLength: 1, maxLength: 128 } },
+      offering_ids: { type: "array", minItems: 2, maxItems: 10, uniqueItems: true,
         items: { type: "string", minLength: 1, maxLength: 128 } }
-    }],
+    }, [], { anyOf: [{ required: ["supplier_ids"] }, { required: ["offering_ids"] }] }],
     ["get_rfq_draft", "Read an existing unsent RFQ draft for a supplier in the current run.", {
-      supplier_id: { type: "string", minLength: 1, maxLength: 128 }
-    }],
+      supplier_id: { type: "string", minLength: 1, maxLength: 128 },
+      offering_id: { type: "string", minLength: 1, maxLength: 128 }
+    }, ["supplier_id"]],
   ];
 
   async function register() {
@@ -24,11 +28,11 @@
     const controller = new AbortController();
     registration = controller;
     try {
-      for (const [name, description, properties] of definitions) {
+      for (const [name, description, properties, required, constraints = {}] of definitions) {
         if (controller.signal.aborted) break;
         await context.registerTool({
           name, description,
-          inputSchema: { type: "object", properties, required: Object.keys(properties), additionalProperties: false },
+          inputSchema: { type: "object", properties, required, additionalProperties: false, ...constraints },
           annotations: { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false },
           execute: async (args = {}, options = {}) => {
             const runId = currentRunId;

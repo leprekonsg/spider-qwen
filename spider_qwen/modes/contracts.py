@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from .. import SCHEMA_VERSION
 from ..evidence.models import EvidenceRef
+from ..requirements import RequirementAssessment
 
 
 class ProcurementMode(str, Enum):
@@ -120,9 +121,26 @@ class CandidateFieldClaim(BaseModel):
     is_selected: bool = False
 
 
+class OfferScope(BaseModel):
+    """One coherent product/service offer observation from one source."""
+
+    item: str
+    variant: str | None = None
+    quantity: str | None = None
+    minimum_order_quantity: str | None = None
+    price: float | None = None
+    currency: str | None = None
+    unit: str | None = None
+    geography: str | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
+    pricing_status: PricingStatus = PricingStatus.NOT_FOUND
+
+
 class _BaseCandidate(BaseModel):
     schema_version: str = SCHEMA_VERSION
     supplier_id: str = ""
+    offering_id: str = ""
     vendor_name: str
     legal_name: str | None = None
     trading_name: str | None = None
@@ -135,6 +153,8 @@ class _BaseCandidate(BaseModel):
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     field_claims: dict[str, list[CandidateFieldClaim]] = Field(default_factory=dict)
     conflicting_fields: list[str] = Field(default_factory=list)
+    requirement_assessments: list[RequirementAssessment] = Field(default_factory=list)
+    qualification: dict[str, Any] = Field(default_factory=dict)
 
     def model_post_init(self, __context: Any) -> None:
         if not self.supplier_id:
@@ -159,16 +179,61 @@ class _BaseCandidate(BaseModel):
 
 class ProductCandidate(_BaseCandidate):
     product_name: str = ""
+    variant: str | None = None
+    quantity: str | None = None
     price: float | None = None
     currency: str | None = None
     unit: str | None = None
     moq: str | None = None
+    geography: str | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
+    offer_scope: OfferScope | None = None
+    offer_scope_status: Literal["resolved", "multiple", "unresolved"] = "resolved"
     pricing_status: PricingStatus = PricingStatus.NOT_FOUND
     product_url: str = ""
     score: float = 0.0
 
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        from ..offering_identity import stable_offering_id
+
+        if not self.offering_id:
+            object.__setattr__(
+                self,
+                "offering_id",
+                stable_offering_id(
+                    self.supplier_id, self.product_name,
+                    kind="product", variant=self.variant,
+                ),
+            )
+        if self.product_name and self.offer_scope is None:
+            object.__setattr__(
+                self,
+                "offer_scope",
+                OfferScope(
+                    item=self.product_name,
+                    variant=self.variant,
+                    quantity=self.quantity,
+                    minimum_order_quantity=self.moq,
+                    price=self.price,
+                    currency=self.currency,
+                    unit=self.unit,
+                    geography=self.geography or self.country,
+                    valid_from=self.valid_from,
+                    valid_until=self.valid_until,
+                    pricing_status=self.pricing_status,
+                ),
+            )
+
 
 class ServiceCandidate(_BaseCandidate):
+    service_name: str = ""
+    service_variant: str | None = None
+    geography: str | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
+    offer_scope: OfferScope | None = None
     service_match_score: float = 0.0
     service_match_evidence: bool = False
     pricing_status: PricingStatus = PricingStatus.QUOTE_REQUIRED
@@ -177,6 +242,33 @@ class ServiceCandidate(_BaseCandidate):
     conflict_penalty: float = 0.0
     score: float = 0.0
     score_components: dict[str, float] = Field(default_factory=dict)
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        from ..offering_identity import stable_offering_id
+
+        if not self.offering_id:
+            object.__setattr__(
+                self,
+                "offering_id",
+                stable_offering_id(
+                    self.supplier_id, self.service_name,
+                    kind="service", variant=self.service_variant,
+                ),
+            )
+        if self.service_name and self.offer_scope is None:
+            object.__setattr__(
+                self,
+                "offer_scope",
+                OfferScope(
+                    item=self.service_name,
+                    variant=self.service_variant,
+                    geography=self.geography or self.country,
+                    valid_from=self.valid_from,
+                    valid_until=self.valid_until,
+                    pricing_status=self.pricing_status,
+                ),
+            )
 
 
 class ContactCandidate(_BaseCandidate):

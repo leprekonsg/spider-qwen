@@ -11,17 +11,27 @@ from pydantic import BaseModel
 from ..evidence.models import EvidenceRef
 from ..identity import candidates_same_supplier, ensure_supplier_id, normalize_vendor_name, registrable_domain
 from ..modes.contracts import CandidateFieldClaim
+from ..offering_identity import candidates_same_offering, ensure_offering_id
 
 _IDENTITY_FIELDS = {
-    "schema_version", "supplier_id", "vendor_name", "website",
+    "schema_version", "supplier_id", "offering_id", "vendor_name", "website",
     "evidence_refs", "field_claims", "conflicting_fields",
 }
 _DERIVED_MAX_FIELDS = {"geo_score", "service_match_score", "service_match_evidence"}
 _DERIVED_RESET_FIELDS = {
     "evidence_completeness", "checklist_completeness", "conflict_penalty",
-    "score", "score_components",
+    "score", "score_components", "requirement_assessments", "qualification",
 }
 _MULTIVALUED_FIELDS = {"quote_channel", "country", "product_url", "trading_name"}
+_PRODUCT_OFFER_FIELDS = {
+    "product_name", "variant", "quantity", "price", "currency", "unit", "moq",
+    "geography", "valid_from", "valid_until", "offer_scope", "offer_scope_status",
+    "pricing_status",
+}
+_SCOPE_DIMENSIONS = {
+    "item", "variant", "quantity", "minimum_order_quantity", "currency", "unit",
+    "geography", "valid_from", "valid_until",
+}
 
 
 def _registrable(website: str | None) -> str:
@@ -157,6 +167,114 @@ def _recompute_completeness(candidate: object) -> float:
     return round(sum(backed) / len(backed), 3)
 
 
+def _scope_values(candidate: object) -> dict[str, Any]:
+    scope = getattr(candidate, "offer_scope", None)
+    return _json_value(scope) if scope is not None else {}
+
+
+def _scope_scalar(value: Any) -> str:
+    if isinstance(value, str):
+        return " ".join(value.casefold().split())
+    return _claim_key(value)
+
+
+def _scope_relation(left: dict[str, Any], right: dict[str, Any]) -> str:
+    """Return same, distinct, or unresolved for two price-condition scopes."""
+    incomplete = False
+    for field in _SCOPE_DIMENSIONS:
+        left_present = _is_present(left.get(field))
+        right_present = _is_present(right.get(field))
+        if left_present and right_present:
+            if _scope_scalar(left[field]) != _scope_scalar(right[field]):
+                return "distinct"
+        elif left_present != right_present:
+            incomplete = True
+    return "unresolved" if incomplete else "same"
+
+
+def _offer_richness(scope: dict[str, Any]) -> tuple[int, int, int, int]:
+    return (
+        int(_is_present(scope.get("price"))),
+        int(_is_present(scope.get("currency"))),
+        int(_is_present(scope.get("unit"))),
+        sum(_is_present(value) for value in scope.values()),
+    )
+
+
+def _copy_product_offer(target: object, source: object) -> None:
+    for field in _PRODUCT_OFFER_FIELDS:
+        setattr(target, field, getattr(source, field))
+
+
+def _merge_product_offer(merged: object, selected: object, incoming: object) -> None:
+    """Choose one complete observation; retain alternatives without mixing fields."""
+    selected_scope = _scope_values(selected)
+    incoming_scope = _scope_values(incoming)
+    selected_refs = list(getattr(selected, "evidence_refs", []) or [])
+    incoming_refs = list(getattr(incoming, "evidence_refs", []) or [])
+    if selected_scope:
+        _record_claim(
+            merged, "offer_scope", selected_scope, selected_refs,
+            selected=True, evidence_scope="candidate",
+        )
+    if incoming_scope:
+        _record_claim(
+            merged, "offer_scope", incoming_scope, incoming_refs,
+            selected=False, evidence_scope="candidate",
+        )
+
+    chosen = selected
+    if (
+        _offer_richness(incoming_scope) > _offer_richness(selected_scope)
+        or (
+            _offer_richness(incoming_scope) == _offer_richness(selected_scope)
+            and _claim_key(incoming_scope) < _claim_key(selected_scope)
+        )
+    ):
+        chosen = incoming
+        _copy_product_offer(merged, incoming)
+    chosen_scope = _scope_values(chosen)
+    observations = list(merged.field_claims.get("offer_scope", []))
+    for claim in observations:
+        claim.is_selected = _claim_key(claim.value) == _claim_key(chosen_scope)
+
+    relations: list[str] = []
+    conflicting_assertions: set[str] = set()
+    for index, left_claim in enumerate(observations):
+        left = left_claim.value
+        for right_claim in observations[index + 1:]:
+            right = right_claim.value
+            relation = _scope_relation(left, right)
+            relations.append(relation)
+            if relation != "same":
+                continue
+            for field in ("price", "pricing_status"):
+                if (
+                    _is_present(left.get(field)) and _is_present(right.get(field))
+                    and _claim_key(left[field]) != _claim_key(right[field])
+                ):
+                    conflicting_assertions.add(field)
+
+    if "distinct" in relations:
+        merged.offer_scope_status = "multiple"
+    elif "unresolved" in relations:
+        merged.offer_scope_status = "unresolved"
+    else:
+        merged.offer_scope_status = "resolved"
+
+    for field in sorted(conflicting_assertions):
+        for observation in observations:
+            if _is_present(observation.value.get(field)):
+                _record_claim(
+                    merged, field, observation.value[field], observation.evidence_refs,
+                    selected=observation.is_selected, evidence_scope=observation.evidence_scope,
+                )
+        if field not in merged.conflicting_fields:
+            merged.conflicting_fields.append(field)
+    if conflicting_assertions and "offer_scope" not in merged.conflicting_fields:
+        merged.conflicting_fields.append("offer_scope")
+
+
 def _consolidate(selected: object, incoming: object) -> object:
     """Merge observations into a deep copy of the selected representative."""
     merged = selected.model_copy(deep=True)
@@ -179,8 +297,14 @@ def _consolidate(selected: object, incoming: object) -> object:
                 evidence_scope=claim.evidence_scope,
             )
 
+    is_product = hasattr(merged, "product_name")
+    if is_product:
+        _merge_product_offer(merged, selected, incoming)
+
     for field in merged.__class__.model_fields:
         if field in _IDENTITY_FIELDS:
+            continue
+        if is_product and field in _PRODUCT_OFFER_FIELDS:
             continue
         selected_value = getattr(merged, field)
         incoming_value = getattr(incoming, field)
@@ -237,6 +361,7 @@ def _consolidate(selected: object, incoming: object) -> object:
     if hasattr(merged, "score_components"):
         merged.score_components = {}
     ensure_supplier_id(merged)
+    ensure_offering_id(merged)
     return merged
 
 
@@ -259,9 +384,11 @@ def dedupe_candidates(candidates: list) -> tuple[list, int]:
     for raw in candidates:
         candidate = raw.model_copy(deep=True)
         ensure_supplier_id(candidate)
+        ensure_offering_id(candidate)
         match_index = next((
             index for index, existing in enumerate(consolidated)
             if candidates_same_supplier(existing, candidate)
+            and candidates_same_offering(existing, candidate)
         ), None)
         if match_index is None:
             consolidated.append(candidate)

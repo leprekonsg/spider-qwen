@@ -46,6 +46,7 @@ def test_service_ranker_rewards_email_channel():
         "suitability": 55.0,
         "contactability": 22.5,
         "evidence_quality": 20.0,
+        "buyer_input_completeness": 1.0,
         "conflict_penalty": 0.0,
         "total": 97.5,
     }
@@ -101,3 +102,13 @@ def test_contact_ranker_scores_business_contact():
     )
     ranked = ContactRanker().rank([c])
     assert ranked and ranked[0].score > 0
+
+
+def test_buyer_checklist_does_not_change_supplier_suitability_or_rank_score():
+    c = ServiceCandidate(vendor_name="Acme", service_match_score=0.5, geo_score=10,
+                         evidence_refs=[_ref()], checklist_completeness=0)
+    complete = c.model_copy(update={"checklist_completeness": 1})
+    ranker = ServiceRanker()
+    assert ranker.components(c) == ranker.components(complete)
+    assert ranker.score(c) == ranker.score(complete)
+    assert complete.score_components["buyer_input_completeness"] == 1

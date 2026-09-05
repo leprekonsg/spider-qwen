@@ -20,6 +20,8 @@ class RunResult(BaseModel):
     schema_version: str = SCHEMA_VERSION
     run_id: str
     query: str
+    procurement_request: dict[str, Any] = Field(default_factory=dict)
+    qualification_summary: dict[str, Any] = Field(default_factory=dict)
     mode: str
     stop_reason: str
     classification: Classification

@@ -12,6 +12,7 @@ def _candidate(**changes):
     return ServiceCandidate(
         vendor_name="Acme Cleaning", website="https://acme.com.sg",
         evidence_completeness=1, checklist_completeness=1,
+        qualification={"status": "qualified"},
         evidence_refs=[EvidenceRef(ledger_id="ev_a", url="https://acme.com.sg",
                                   snippet_hash="hash", retrieved_at="2026-09-05T00:00:00Z")],
     ).model_copy(update=changes)
@@ -21,6 +22,7 @@ def _candidate(**changes):
     ({}, {}, False, "review_ready", None),
     ({}, {}, True, "evidence_checked", "offline_fixture"),
     ({"checklist_completeness": 0.5}, {}, False, "evidence_checked", "incomplete_rfq_inputs"),
+    ({"qualification": {"status": "unresolved"}}, {}, False, "evidence_checked", "supplier_requirements_unresolved_or_failed"),
     ({"evidence_completeness": 0.5}, {}, False, "evidence_checked", "incomplete_evidence"),
     ({}, {"grade": "low"}, False, "evidence_checked", "evidence_below_review_floor"),
     ({}, {"grade": None}, False, "evidence_checked", "evidence_below_review_floor"),

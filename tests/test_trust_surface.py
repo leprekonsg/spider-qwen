@@ -198,20 +198,23 @@ def test_controller_flags_disputed_vendor_facts_into_s3(tmp_path):
                             fetch_provider=MockFetchProvider(),
                             state_dir=tmp_path, persist=True)
     memory = controller._semantic_memory()
+    candidate = _candidate(True)
     memory.upsert(SemanticFact(
         entity_type="vendor", entity_name="Example Cleaning Pte Ltd",
+        supplier_id=candidate.supplier_id,
         field="quote_channel", value="sales@a.sg", confidence=0.95,
         evidence_refs=[_ref("ev_a")],
     ))
     memory.upsert(SemanticFact(
         entity_type="vendor", entity_name="Example Cleaning Pte Ltd",
+        supplier_id=candidate.supplier_id,
         field="quote_channel", value="sales@b.sg", confidence=0.9,
         evidence_refs=[_ref("ev_b", "https://b.sg")],
     ))
 
     audit = AuditLog("run_t")
     ledger = EvidenceLedger("run_t")
-    signals = controller._disputed_belief_signals(ledger, [_candidate(True)], audit)
+    signals = controller._disputed_belief_signals(ledger, [candidate], audit)
     assert len(signals) == 1 and signals[0].severity == "high"
     assert any(e.action == "belief_uncertainty_flagged" for e in audit.events)
 

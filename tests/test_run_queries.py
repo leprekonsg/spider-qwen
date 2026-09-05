@@ -44,6 +44,52 @@ def test_query_projections_keep_same_name_suppliers_and_drafts_separate():
             inspect("compare_candidates", supplier_ids=ids)
 
 
+def test_query_projections_require_offering_selector_for_multi_offering_supplier():
+    record = {
+        "run_id": "run_offerings",
+        "validated_candidates": [
+            {"supplier_id": "supplier-a", "offering_id": "paper", "vendor_name": "Office Co",
+             "product_name": "A4 paper", "evidence_refs": [{"ledger_id": "ev_paper"}]},
+            {"supplier_id": "supplier-a", "offering_id": "toner", "vendor_name": "Office Co",
+             "product_name": "toner", "evidence_refs": [
+                 {"ledger_id": "ev_toner"}, {"ledger_id": "ev_bulk"},
+             ],
+             "offer_scope_status": "multiple", "field_claims": {"offer_scope": [
+                 {"value": {"item": "toner", "quantity": "1 cartridge", "price": 72.0},
+                  "evidence_refs": [{"ledger_id": "ev_toner"}], "is_selected": True},
+                 {"value": {"item": "toner", "quantity": "10 cartridges", "price": 650.0},
+                  "evidence_refs": [{"ledger_id": "ev_bulk"}], "is_selected": False},
+             ]}},
+        ],
+    }
+    queries = CompletedRunQueries(lambda run_id, *, owner: record)
+
+    with pytest.raises(ValueError, match="multiple offerings"):
+        queries.inspect(
+            "run_offerings", "get_candidate_evidence", owner="alice",
+            supplier_id="supplier-a",
+        )
+
+    evidence = queries.inspect(
+        "run_offerings", "get_candidate_evidence", owner="alice",
+        supplier_id="supplier-a", offering_id="toner",
+    )
+    assert evidence["offering_id"] == "toner"
+    assert evidence["evidence_refs"] == [
+        {"ledger_id": "ev_toner"}, {"ledger_id": "ev_bulk"},
+    ]
+    assert evidence["offer_scope_status"] == "multiple"
+    assert [claim["value"]["quantity"] for claim in evidence["offer_observations"]] == [
+        "1 cartridge", "10 cartridges",
+    ]
+
+    comparison = queries.inspect(
+        "run_offerings", "compare_candidates", owner="alice",
+        offering_ids=["paper", "toner"],
+    )
+    assert [candidate["offering_id"] for candidate in comparison["candidates"]] == ["paper", "toner"]
+
+
 def test_real_run_http_queries_match_mcp_and_result(tmp_path, monkeypatch):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient

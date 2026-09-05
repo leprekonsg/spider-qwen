@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
+from types import SimpleNamespace
 
 from spider_qwen.api.cli import main
 from spider_qwen.benchmarks.evaluate_service_mode import run_gold_set
@@ -97,19 +99,78 @@ def test_benchmark_service_harness():
     assert summary["per_mode"]["contact_enrichment_only"]["cases"] == 20
     assert summary["per_mode"]["revalidation"]["cases"] == 20
     assert summary["per_mode"]["electronics_substitution"]["cases"] == 20  # T-8.1 obsolete-part S1/S2/S3
-    assert summary["mode_classification_accuracy"] >= 0.8
-    assert summary["quote_channel_precision"] >= 0.9
-    assert summary["rfq_draft_completeness"] >= 0.9
-    assert summary["evidence_coverage"] >= 0.9
+    assert summary["end_to_end_routing_accuracy"] >= 0.8
+    assert summary["quote_channel_yield"] >= 0.9
+    assert summary["rfq_draft_yield"] >= 0.9
+    assert summary["candidate_evidence_presence_rate"] >= 0.9
+    assert summary["must_find"]["failed"] == 0
+    assert summary["evaluation_manifest"]["memory_condition"] == "cold_start_then_shared_state"
+
+
+def test_gold_case_forwards_typed_requirements_and_counts_withheld_assessments():
+    from spider_qwen.benchmarks.evaluate_service_mode import _run_case
+
+    requirement = {"requirement_id": "req-overnight", "text": "overnight work", "kind": "mandatory", "scope": "supplier"}
+    withheld = {
+        "supplier_id": "supplier-1", "vendor_name": "Example Cleaning", "offering_id": "",
+        "evidence_refs": [{"ledger_id": "ev-1"}],
+        "requirement_assessments": [{"requirement_id": "req-overnight", "scope": "supplier", "status": "not_found"}],
+    }
+
+    class CaptureController:
+        async def run(self, query, **kwargs):
+            self.query, self.kwargs = query, kwargs
+            return SimpleNamespace(
+                mode="service_quote_required", rfq_drafts=[],
+                procurement_request={"requirements": [requirement]},
+                validated_candidates=[], withheld_candidates=[withheld], evidence_refs=[],
+                stop_reason="insufficient_evidence",
+            )
+
+    controller = CaptureController()
+    row = asyncio.run(_run_case(controller, {
+        "case_id": "typed", "query": "cleaning", "expected_mode": "service_quote_required",
+        "requirements": [requirement], "requirements_confirmed": True,
+        "supplier_sources": {"Example Cleaning": ["operator_shortlist"]},
+    }))
+    assert controller.kwargs == {
+        "mode": "auto", "requirements": [requirement], "requirements_confirmed": True,
+        "supplier_sources": {"Example Cleaning": ["operator_shortlist"]},
+    }
+    assert row["evaluation_candidate_count"] == 1
+    assert row["required_claim_assessed"] == 1
+    assert row["required_claim_unresolved"] == 1
 
 
 def test_benchmark_product_harness():
     summary = run_product_gold_set(GOLD_SET, offline=True)
     assert summary["cases"] == 20
-    assert summary["mode_classification_accuracy"] >= 0.9
-    assert summary["pricing_status_accuracy"] >= 0.8
+    assert summary["end_to_end_routing_accuracy"] >= 0.9
+    assert summary["pricing_status_accuracy"] is None
+    assert summary["offering_record_recall_status"].startswith("unavailable")
     assert any(row["validated"] == 0 for row in summary["details"])  # missing/conflicting price hard-stops
     assert sum(1 for row in summary["details"] if row["validated"] > 0) >= 15
+
+
+def test_product_offering_evaluator_requires_structured_record_labels():
+    from spider_qwen.benchmarks.evaluate_product_mode import _evaluate_offerings
+
+    row = {"product_records": [{
+        "supplier_id": "supplier-1", "offering_id": "offer-1", "vendor_name": "Paper Co",
+        "product_name": "A4 paper", "price": 4.2, "currency": "SGD", "unit": "ream", "moq": "50",
+    }]}
+    unlabeled = _evaluate_offerings({}, row)
+    assert unlabeled["status"] == "unavailable"
+    labelled = _evaluate_offerings({"expected_offerings": [{
+        "supplier_id": "supplier-1", "product_name": "A4 paper", "price": 4.2,
+        "currency": "SGD", "unit": "ream",
+    }]}, row)
+    assert labelled["status"] == "available"
+    assert labelled["record_recall"] == 1.0
+    for partial in ({"price": 4.2}, {"vendor_name": "Paper Co"}, {"pricing_status": "EXACT_PRICE"}):
+        assert _evaluate_offerings({"expected_offerings": [partial]}, row)["status"] == "unavailable"
+    wrong_supplier = {"supplier_id": "supplier-2", "product_name": "A4 paper", "price": 4.2, "currency": "SGD", "unit": "ream"}
+    assert _evaluate_offerings({"expected_offerings": [wrong_supplier]}, row)["record_recall"] == 0
 
 
 def test_cli_run_contact_enrichment(capsys, tmp_path, monkeypatch):

@@ -77,6 +77,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     prior_env = None
+    requirements = None
+    if getattr(args, "requirements", None):
+        try:
+            from ..requirements import ProcurementRequest
+            data = json.loads(Path(args.requirements).read_text(encoding="utf-8-sig"))
+            requirements = ProcurementRequest(query=args.query, **data)
+            if getattr(args, "reason", False):
+                raise ValueError("Use the standard run path with --requirements; --reason does not assess requirements.")
+        except (ValueError, OSError, TypeError) as exc:
+            print(f"Invalid requirements file: {exc}", file=sys.stderr)
+            return 2
     if getattr(args, "judged_demo", False):
         prior_env = _apply_judged_demo_profile(args)
     # The profile env stays in place for the WHOLE run, not just controller
@@ -91,6 +102,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 args.query, mode=args.mode, target_country=args.country,
                 high_risk=getattr(args, "high_risk", False),
                 serendipity=getattr(args, "serendipity", False),
+                requirements=requirements.requirements if requirements else None,
+                requirements_confirmed=requirements.requirements_confirmed if requirements else False,
+                supplier_sources=requirements.supplier_sources if requirements else None,
             ))
     finally:
         if prior_env is not None:
@@ -581,7 +595,7 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     from ..benchmarks.evaluate_service_mode import run_gold_set
 
-    summary = run_gold_set(args.gold_set, offline=not args.live)
+    summary = run_gold_set(args.gold_set, offline=not args.live, profile=args.profile)
     print(json.dumps(summary, indent=2))
     return 0
 
@@ -598,7 +612,7 @@ def _cmd_live_sample(args: argparse.Namespace) -> int:
     if args.live_sample_command == "template":
         payload = build_live_sample(
             args.case_set, sample_size=args.sample,
-            state_dir=_state_dir(), offline=args.offline,
+            state_dir=_state_dir(), offline=args.offline, profile=args.profile,
         )
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -652,6 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
                  "revalidation", "electronics_substitution"],
     )
     p_run.add_argument("--country", default=None, help="Target country (e.g. Singapore)")
+    p_run.add_argument("--requirements", help="JSON file with requirements and requirements_confirmed; unresolved conditions remain visible")
     p_run.add_argument("--offline", action="store_true", help="Use deterministic mock providers")
     p_run.add_argument("--reason", action="store_true",
                        help="Use the multi-trajectory reasoning spine (PPRM winner selection); emits a ReasoningResult")
@@ -715,6 +730,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench = sub.add_parser("benchmark", help="Run the gold-set benchmark")
     p_bench.add_argument("--gold-set", required=True)
     p_bench.add_argument("--live", action="store_true", help="Use live providers instead of mock")
+    p_bench.add_argument("--profile", choices=["offline_demo", "live_research", "reviewed_procurement"],
+                         help="Operator profile to evaluate; must match --live.")
     p_bench.set_defaults(func=_cmd_benchmark)
 
     p_ls = sub.add_parser(
@@ -727,12 +744,14 @@ def build_parser() -> argparse.ArgumentParser:
                       default="spider_qwen/benchmarks/live_validation_set.json",
                       help="template: validation case set to sample from")
     p_ls.add_argument("--sample", type=int, default=5,
-                      help="template: number of cases to run (first N, deterministic)")
+                       help="template: number of cases to run (deterministic hash sample)")
     p_ls.add_argument("--out", default="live_sample.json",
                       help="template: output file (default live_sample.json)")
     p_ls.add_argument("--offline", action="store_true",
-                      help="template: mock providers (harness smoke test; "
-                           "measures the mocks, not the web)")
+                       help="template: mock providers (harness smoke test; "
+                            "measures the mocks, not the web)")
+    p_ls.add_argument("--profile", choices=["offline_demo", "live_research", "reviewed_procurement"],
+                      help="template: operator profile; must match --offline")
     p_ls.set_defaults(func=_cmd_live_sample)
     return parser
 

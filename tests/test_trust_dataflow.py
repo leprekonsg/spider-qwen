@@ -20,6 +20,9 @@ import asyncio
 import json
 
 from spider_qwen.agent.controller import Controller
+from spider_qwen.evidence.ledger import EvidenceLedger
+from spider_qwen.evidence.models import EvidenceRef
+from spider_qwen.memory.semantic import SemanticFact
 from spider_qwen.tools.fetch_service import MockFetchProvider
 from spider_qwen.tools.provider_types import SearchResult, SearchResultSet
 from spider_qwen.tools.search_service import MockSearchProvider
@@ -27,6 +30,8 @@ from spider_qwen.tools.search_service import MockSearchProvider
 VENDOR_PAGE_RUN1 = "https://example-cleaning.sg/services"
 VENDOR_PAGE_RUN2 = "https://example-cleaning.sg/about"
 DIRECTORY_PAGE = "https://sg-services-directory.example/cleaning"
+SAME_NAME_RUN1 = "https://first-universal.sg/services"
+SAME_NAME_RUN2 = "https://second-universal.sg/services"
 
 FIXTURES = {
     # Run 1: the vendor page carries the quote channel; extraction finds it,
@@ -54,6 +59,20 @@ FIXTURES = {
         "text": (
             "Vendor directory for Singapore. Example Cleaning Pte Ltd offers "
             "office cleaning, contact sales@example-cleaning.sg for quotations."
+        ),
+    },
+    SAME_NAME_RUN1: {
+        "title": "Universal Services Pte Ltd",
+        "text": (
+            "Universal Services Pte Ltd provides office cleaning services in Singapore "
+            "and accepts quotation requests at quotes@first-universal.sg."
+        ),
+    },
+    SAME_NAME_RUN2: {
+        "title": "Universal Services Pte Ltd",
+        "text": (
+            "Universal Services Pte Ltd provides office cleaning services in Singapore. "
+            "We serve offices island-wide with trained crews."
         ),
     },
 }
@@ -92,6 +111,21 @@ class _NoDirectoryPhaseSearch(_PhasedSearch):
         ]
         return SearchResultSet(query=query, location=location, results=results,
                                total_results=len(results), provider="mock")
+
+
+class _SameNamePhasedSearch(_PhasedSearch):
+    async def search(self, query: str, location: str | None, language: str, limit: int):
+        url = SAME_NAME_RUN1 if self.phase == 1 else SAME_NAME_RUN2
+        result = SearchResult(
+            url=url,
+            title=FIXTURES[url]["title"],
+            snippet="office cleaning Singapore quotation",
+            rank=0,
+            source_tool="mock",
+        )
+        return SearchResultSet(
+            query=query, location=location, results=[result], total_results=1, provider="mock"
+        )
 
 
 def _controller(tmp_path, *, verify: bool, search=None) -> Controller:
@@ -206,3 +240,58 @@ def test_long_lived_controller_runs_share_one_semantic_memory(tmp_path):
     assert second.metrics["memory_recalls"] >= 1
     # ...and persisting run 2 must keep every fact run 1 wrote.
     assert ids_after_1 <= {f["fact_id"] for f in _semantic_facts(tmp_path)}
+
+
+def test_warm_memory_never_attaches_same_name_different_domain_channel(tmp_path):
+    search = _SameNamePhasedSearch()
+    controller = _controller(tmp_path, verify=False, search=search)
+    query = "Universal Services office cleaning Singapore quotation"
+
+    first = asyncio.run(controller.run(query, mode="service_quote_required"))
+    assert any(
+        (candidate.get("quote_channel") or {}).get("value") == "quotes@first-universal.sg"
+        for candidate in first.validated_candidates
+    )
+    first_quote_facts = [fact for fact in _semantic_facts(tmp_path) if fact["field"] == "quote_channel"]
+    assert first_quote_facts and all(fact.get("supplier_id") for fact in first_quote_facts)
+
+    search.phase = 2
+    second = asyncio.run(controller.run(query, mode="service_quote_required"))
+
+    assert second.metrics["memory_recalls"] >= 1
+    assert second.metrics["quote_channel_found"] == 0
+    assert not any(
+        item.source_tool == "semantic_memory"
+        for item in EvidenceLedger.load(second.run_id, tmp_path).items()
+    )
+
+
+def test_legacy_name_only_memory_fact_is_never_attached(tmp_path):
+    search = _SameNamePhasedSearch()
+    search.phase = 2
+    controller = _controller(tmp_path, verify=False, search=search)
+    controller._semantic_memory().upsert(SemanticFact(
+        entity_type="vendor",
+        entity_name="Universal Services Pte Ltd",
+        field="quote_channel",
+        value="legacy@unbound.example",
+        confidence=0.9,
+        evidence_refs=[EvidenceRef(
+            ledger_id="ev_legacy",
+            url="https://legacy.example/evidence",
+            snippet_hash="legacy_hash",
+            retrieved_at="2026-09-05T00:00:00Z",
+        )],
+    ))
+
+    result = asyncio.run(controller.run(
+        "Universal Services office cleaning Singapore quotation",
+        mode="service_quote_required",
+    ))
+
+    assert result.metrics["memory_recalls"] >= 1
+    assert result.metrics["quote_channel_found"] == 0
+    assert not any(
+        item.source_tool == "semantic_memory"
+        for item in EvidenceLedger.load(result.run_id, tmp_path).items()
+    )

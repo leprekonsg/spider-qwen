@@ -16,11 +16,17 @@ def candidate_readiness(candidate, assessment: dict, *, verification_enabled: bo
         reasons.append("verification_did_not_proceed")
     if disputed or getattr(candidate, "conflicting_fields", []):
         reasons.append("unresolved_conflicts")
-    if reasons:
+    verification_failed = bool(reasons)
+    qualification_missing = (getattr(candidate, "qualification", {}) or {}).get("status") != "qualified"
+    if qualification_missing:
+        reasons.append("supplier_requirements_unresolved_or_failed")
+    if verification_failed:
         return {"stage": "discovered", "reasons": reasons, "approval": "not_recorded"}
 
     if offline:
         reasons.append("offline_fixture")
+    if getattr(candidate, "offer_scope_status", "resolved") == "unresolved":
+        reasons.append("offer_scope_unresolved")
     if getattr(candidate, "evidence_completeness", 0) < 1:
         reasons.append("incomplete_evidence")
     if hasattr(candidate, "checklist_completeness") and candidate.checklist_completeness < 1:

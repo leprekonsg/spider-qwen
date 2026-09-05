@@ -34,6 +34,8 @@
     start: (query, opts = {}) => requestJSON("/runs", {
       query, mode: opts.mode || "auto", country: opts.country || null,
       profile: opts.profile, idempotency_key: opts.idempotencyKey,
+      requirements: opts.requirements || [], requirements_confirmed: opts.requirementsConfirmed || false,
+      supplier_sources: opts.supplierSources || {},
     }),
     status: (id) => requestJSON(`/runs/${encodeURIComponent(id)}`),
     result: (id) => requestJSON(`/runs/${encodeURIComponent(id)}/result`),
@@ -83,7 +85,8 @@
   }
 
   function toLedger(result) {
-    const refs = dedupeRefs(result.evidence_refs || []);
+    const refs = dedupeRefs([...(result.evidence_refs || []),
+      ...(result.withheld_candidates || []).flatMap(c => c.evidence_refs || [])]);
     // Honest status: "proven" only when the backend shipped an RFC 6962
     // inclusion proof for that ledger_id; otherwise the row is "recorded".
     const proven = new Set((result.citation_proofs || []).map((p) => p.ledger_id));
@@ -188,6 +191,12 @@
     return `Contact enrichment: ${contacts} contact${contacts === 1 ? "" : "s"} extracted; completeness ${(c.evidence_completeness || 0).toFixed(2)} in ${country}.`;
   }
 
+  function candidateKey(candidate, fallback = "") {
+    const supplier = candidate && (candidate.supplier_id || candidate.vendor_name) || fallback;
+    const offering = candidate && candidate.offering_id;
+    return offering ? `${supplier}::${offering}` : supplier;
+  }
+
   function toVendor(c, i, ledger, trustByVendor) {
     const kind = candidateKind(c);
     const refs = dedupeRefs(c.evidence_refs || []);
@@ -199,7 +208,9 @@
       : kind === "contact" ? ((c.contacts || [])[0] || {}).value
       : c.website;
     return {
-      id: c.supplier_id || "v" + (i + 1),
+      id: candidateKey(c, "v" + (i + 1)),
+      supplierId: c.supplier_id || "",
+      offeringId: c.offering_id || "",
       rank: i + 1,
       kind,
       name: c.vendor_name,
@@ -224,7 +235,7 @@
       ledger: refs.map((r) => ledgerById.get(r.ledger_id)).filter(Boolean),
       summary: deriveSummary(c, kind),
       why: deriveWhy(c, kind, parts || {}),
-      trust: (trustByVendor && trustByVendor[c.supplier_id || c.vendor_name]) || null,
+      trust: (trustByVendor && trustByVendor[candidateKey(c)]) || null,
       raw: c,
     };
   }
@@ -347,7 +358,7 @@
     const top = vendors[0];
     if (top) sig.push({ id: "sig_top", kind: "ok", ovl: "Top ranked supplier", title: top.name, meta: `score ${top.score} · ${top.evidence.length} refs` });
     for (const c of result.withheld_candidates || []) {
-      sig.push({ id: "withheld_" + c.supplier_id, kind: "risk", ovl: "Supplier withheld",
+      sig.push({ id: "withheld_" + candidateKey(c), kind: "risk", ovl: "Supplier withheld",
         title: c.vendor_name, meta: `Conflicting claims: ${(c.conflicting_fields || []).join(", ")}` });
     }
     for (const v of vendors) {
@@ -369,13 +380,14 @@
     const ledger = toLedger(result);
     const trustByVendor = {};
     for (const t of result.trust_verdicts || []) {
-      if (t && (t.supplier_id || t.vendor_name)) trustByVendor[t.supplier_id || t.vendor_name] = t;
+      if (t && (t.supplier_id || t.vendor_name)) trustByVendor[candidateKey(t)] = t;
     }
     const vendors = (result.validated_candidates || []).map((c, i) => toVendor(c, i, ledger, trustByVendor));
     const m = result.metrics || {};
     return {
       result,
       vendors,
+      withheldVendors: (result.withheld_candidates || []).map((c, i) => toVendor(c, i, ledger, trustByVendor)),
       ledger,
       signals: toSignals(result, vendors),
       classification: result.classification || {},
@@ -397,11 +409,11 @@
     const map = {};
     for (const d of result.rfq_drafts || []) {
       const vendor = d.vendor || {};
-      if (vendor.supplier_id) map[vendor.supplier_id] = d;
+      if (vendor.supplier_id) map[candidateKey(vendor)] = d;
       else {
         const matches = (result.validated_candidates || []).filter(c =>
           c.vendor_name === vendor.vendor_name && c.website === vendor.website);
-        if (matches.length === 1 && matches[0].supplier_id) map[matches[0].supplier_id] = d;
+        if (matches.length === 1 && matches[0].supplier_id) map[candidateKey(matches[0])] = d;
       }
     }
     return map;

@@ -1,7 +1,7 @@
 """Service ranker (service_quote_required).
 
 Scores keep three independent decision dimensions:
-  suitability (service match, geography, checklist) 55,
+  suitability (service match, geography) 55,
   contactability (the quote channel) 25,
   evidence quality 20, conflict_penalty -20 max.
 
@@ -35,9 +35,8 @@ class ServiceRanker:
         if not c.has_evidence():
             return {"suitability": 0.0, "contactability": 0.0, "evidence_quality": 0.0}
         suitability = (
-            min(1.0, max(0.0, c.service_match_score)) * 25
+            min(1.0, max(0.0, c.service_match_score)) * 35
             + min(1.0, max(0.0, c.geo_score) / 20.0) * 20
-            + min(1.0, max(0.0, c.checklist_completeness)) * 10
         )
         contactability = (
             _CHANNEL_QUALITY.get(c.quote_channel.type, 0.0) * 25
@@ -58,6 +57,7 @@ class ServiceRanker:
         total = round(sum(components.values()) + penalty, 2)
         c.score_components = {
             **components,
+            "buyer_input_completeness": min(1.0, max(0.0, c.checklist_completeness)),
             "conflict_penalty": round(penalty, 2),
             "total": total,
         }
@@ -71,6 +71,10 @@ class ServiceRanker:
         # key.  Contact convenience breaks ties; it must not outrank fit.
         return sorted(
             scored,
-            key=lambda c: (self.components(c)["suitability"], c.score),
+            key=lambda c: (
+                {"qualified": 2, "unresolved": 1, "not_qualified": 0}.get(c.qualification.get("status"), 1),
+                c.qualification.get("mandatory_supported", 0) / max(1, c.qualification.get("mandatory_count", 0)),
+                self.components(c)["suitability"], c.score,
+            ),
             reverse=True,
         )

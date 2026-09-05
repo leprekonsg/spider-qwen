@@ -40,12 +40,13 @@ from ..evidence.verifier import VerificationSpine
 from ..verification.grade import grade_at_least
 from ..verification.minicheck import MiniCheck, relation_grounded, value_grounded
 from ..extraction.contact import ContactExtractor
-from ..extraction.dedupe import dedupe_candidates, normalize_vendor_name
+from ..extraction.dedupe import dedupe_candidates
 from ..extraction.pricing import PricingExtractor, PricingResult
 from ..extraction.quote_channel import QuoteChannelExtractor, QuoteChannelMatch
 from ..extraction.service_match import ServiceMatchExtractor
 from ..extraction.vendor_metadata import VendorMetadataExtractor
 from ..identity import registrable_domain
+from ..identity_registry import SupplierIdentityRegistry
 from ..governance.audit import AuditLog
 from ..governance.review_events import ReviewStore
 from ..memory.episodic import EpisodicMemory, EpisodicRecord
@@ -145,6 +146,7 @@ class Controller:
         conformal: object | None = None,
         qwen_router: object | None = None,
         memory_mcp: SemanticMemoryMcpAdapter | None = None,
+        identity_registry: SupplierIdentityRegistry | None = None,
         state_dir: str | Path | None = None,
         persist: bool = True,
         require_review: bool | None = None,
@@ -299,6 +301,7 @@ class Controller:
                     require_evidence=self.policy.semantic_promotion_requires_evidence,
                 ),
             )
+        self.identity_registry = identity_registry or SupplierIdentityRegistry(self.state_dir)
         self.router = ModeRouter()
         self.planner = Planner()
         # T-1.4: LLM-Compiler + free-tier token buckets (5 search/min, 25 fetch/min).
@@ -361,7 +364,15 @@ class Controller:
 
     async def run(self, query: str, mode: str = "auto", target_country: str | None = None,
                   high_risk: bool = False, serendipity: bool = False,
-                  run_id: str | None = None) -> RunResult:
+                  run_id: str | None = None, requirements: list | None = None,
+                  requirements_confirmed: bool = False, supplier_sources: dict | None = None) -> RunResult:
+        from ..requirements import ProcurementRequest
+
+        procurement_request = ProcurementRequest(
+            query=query, requirements=requirements or [],
+            requirements_confirmed=requirements_confirmed,
+            supplier_sources=supplier_sources or {},
+        )
         phase_start = time.perf_counter()
         classification = self._classify(query, forced_mode=mode)
         chosen = classification.mode
@@ -412,6 +423,7 @@ class Controller:
         self._record_consolidation(tracer, len(candidates) + sea_merges, candidates, sea_merges)
         candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
         candidates = self._apply_consolidation_safety(candidates)
+        self._assess_requirements(procurement_request, candidates, ledger)
         ranker = self._rankers[route.ranker]
         ranked = ranker.rank(candidates)
         validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
@@ -460,6 +472,7 @@ class Controller:
             )
             candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
             candidates = self._apply_consolidation_safety(candidates)
+            self._assess_requirements(procurement_request, candidates, ledger)
             ranked = ranker.rank(candidates)
             validated = [c for c in ranked if self._is_validated(c, chosen, budget)]
 
@@ -510,6 +523,7 @@ class Controller:
                 )
                 candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
                 candidates = self._apply_consolidation_safety(candidates)
+                self._assess_requirements(procurement_request, candidates, ledger)
                 ranked = ranker.rank(candidates)
                 qualified_candidates = [
                     c for c in ranked if self._is_validated(c, chosen, budget)
@@ -632,6 +646,13 @@ class Controller:
         result = RunResult(
             run_id=run_id,
             query=query,
+            procurement_request=procurement_request.model_dump(mode="json"),
+            qualification_summary={
+                "qualified_suppliers": len({c.supplier_id for c in validated if c.qualification.get("status") == "qualified"}),
+                "unresolved_candidates": sum(c.qualification.get("status") == "unresolved" for c in candidates),
+                "not_qualified_candidates": sum(c.qualification.get("status") == "not_qualified" for c in candidates),
+                "requirements_confirmed": procurement_request.requirements_confirmed,
+            },
             mode=chosen.value,
             stop_reason=stop_reason.value,
             classification=Classification(
@@ -640,7 +661,7 @@ class Controller:
             validated_candidates=[self._public_candidate_dump(c) for c in validated],
             withheld_candidates=[
                 self._public_withheld_candidate_dump(c)
-                for c in candidates if self._has_finalization_conflict(c)
+                for c in candidates if self._has_finalization_conflict(c) or self._requirements_block(c)
             ],
             trust_verdicts=self._build_trust_verdicts(
                 validated, verification_metrics, ledger, disputed_signals,
@@ -704,13 +725,23 @@ class Controller:
             budget=tracker.snapshot(),
         )
 
-        readiness_by_id = {v["supplier_id"]: v["readiness"] for v in result.trust_verdicts}
+        from ..offering_identity import candidate_selector_key
+
+        readiness_by_id = {candidate_selector_key(v): v["readiness"] for v in result.trust_verdicts}
         for candidate in result.validated_candidates:
-            candidate["readiness"] = readiness_by_id[candidate["supplier_id"]]
+            candidate["readiness"] = readiness_by_id[candidate_selector_key(candidate)]
         for candidate in result.withheld_candidates:
             candidate["readiness"] = {
-                "stage": "discovered", "reasons": ["unresolved_conflicts"], "approval": "not_recorded",
+                "stage": "discovered", "reasons": [
+                    "supplier_requirements_unresolved_or_failed" if candidate.get("qualification", {}).get("requirements_confirmed") and candidate.get("qualification", {}).get("status") != "qualified" else "unresolved_conflicts"
+                ], "approval": "not_recorded",
             }
+        by_key = {candidate_selector_key(c): c for c in result.validated_candidates}
+        for draft in result.rfq_drafts:
+            candidate = by_key.get(candidate_selector_key(draft.get("vendor") or {}))
+            if candidate:
+                draft["qualification"] = candidate["qualification"]
+                draft["requirement_assessments"] = candidate["requirement_assessments"]
         self._persist_run(ctx, audit, result, validated, review_store)
         return result
 
@@ -1324,7 +1355,9 @@ class Controller:
             if not isinstance(cand, ServiceCandidate) or cand.quote_channel is not None:
                 continue
             for recall in quote_recalls:
-                if not _same_vendor(cand.vendor_name, recall.fact.entity_name):
+                if not self.identity_registry.equivalent(
+                    getattr(cand, "supplier_id", None), recall.fact.supplier_id
+                ):
                     continue
                 ref = ctx.ledger.record(
                     source_tool="semantic_memory",
@@ -1334,6 +1367,10 @@ class Controller:
                     metadata={
                         "fact_id": recall.fact.fact_id,
                         "field": recall.fact.field,
+                        "supplier_id": recall.fact.supplier_id,
+                        "canonical_supplier_id": self.identity_registry.resolve(
+                            recall.fact.supplier_id
+                        ),
                         "source_evidence_refs": [r.model_dump(mode="json") for r in recall.fact.evidence_refs],
                         "recall_score": recall.score,
                     },
@@ -1478,6 +1515,7 @@ class Controller:
         ) if pricing.matched_text else None
         candidate_refs = _merge_refs(refs, [pricing_ref] if pricing_ref else [])
         moq_match = _MOQ_RE.search(page.text)
+        scope = qwen.pricing if qwen is not None else None
         cand = ProductCandidate(
             vendor_name=meta.vendor_name,
             website=meta.website,
@@ -1485,10 +1523,15 @@ class Controller:
             geo_score=geo_score,
             evidence_refs=candidate_refs,
             product_name=query,
+            variant=(scope.variant or None) if scope else None,
+            quantity=(scope.quantity or None) if scope else None,
             price=pricing.price,
             currency=pricing.currency,
             unit=pricing.unit,
             moq=moq_match.group(1) if moq_match else None,
+            geography=((scope.geography or None) if scope else None) or meta.country,
+            valid_from=(scope.valid_from or None) if scope else None,
+            valid_until=(scope.valid_until or None) if scope else None,
             pricing_status=pricing.status,
             product_url=page_url,
         )
@@ -1545,6 +1588,8 @@ class Controller:
             country=meta.country,
             geo_score=geo_score,
             evidence_refs=candidate_refs,
+            service_name=query,
+            geography=target_country or meta.country,
             service_match_score=sm.score,
             service_match_evidence=sm.matched,
             pricing_status=pricing.status if pricing.status != PricingStatus.NOT_FOUND else PricingStatus.QUOTE_REQUIRED,
@@ -1740,10 +1785,11 @@ class Controller:
 
     @staticmethod
     def _assessment_key(cand) -> str:
-        """Trust data keyed by stable supplier identity when available."""
+        """Trust data keyed by candidate row, including offering when known."""
         supplier_id = getattr(cand, "supplier_id", "") or ""
         if supplier_id:
-            return supplier_id
+            offering_id = getattr(cand, "offering_id", "") or ""
+            return f"{supplier_id}::{offering_id}" if offering_id else supplier_id
         name = getattr(cand, "vendor_name", "") or ""
         domain = _registrable(getattr(cand, "website", "") or "")
         return f"{name}|{domain}" if domain else name
@@ -1794,12 +1840,29 @@ class Controller:
         return False
 
     # --- validation / stop ------------------------------------------------
+    @staticmethod
+    def _assess_requirements(request, candidates, ledger):
+        from ..requirements import assess_requirements, qualification
+
+        for candidate in candidates:
+            candidate.requirement_assessments = assess_requirements(request, candidate, ledger)
+            candidate.qualification = qualification(request, candidate.requirement_assessments)
+
+    @staticmethod
+    def _requirements_block(candidate):
+        assessment = candidate.qualification
+        return assessment.get("status") == "not_qualified" or (
+            assessment.get("requirements_confirmed") and assessment.get("status") != "qualified"
+        )
+
     def _is_validated(self, candidate, mode: ProcurementMode, budget) -> bool:
         if not candidate.has_evidence():
             return False
         # A consolidated conflict preserves both evidenced alternatives for
         # review. It cannot become a finalized supplier, RFQ, or memory fact.
         if self._has_finalization_conflict(candidate):
+            return False
+        if self._requirements_block(candidate):
             return False
         if candidate.evidence_completeness < budget.evidence_completeness_threshold:
             return False
@@ -1870,6 +1933,8 @@ class Controller:
             audit.record("rfq_draft_generated", vendor=cand.vendor_name,
                          status="held_below_grade_floor" if below_floor else draft.status)
             draft_dict = draft.model_dump(mode="json")
+            draft_dict["qualification"] = cand.qualification
+            draft_dict["requirement_assessments"] = [a.model_dump(mode="json") for a in cand.requirement_assessments]
             if review_store and (self.require_review or below_floor):
                 # Blocking checkpoint: withhold the polished RFQ until a human
                 # approves. The full draft is carried in the review event detail
@@ -1961,7 +2026,10 @@ class Controller:
             )
             disputed = sorted({
                 s.entity for s in disputed_signals or []
-                if _same_vendor(name, s.entity)
+                if s.entity and self.identity_registry.equivalent(
+                    getattr(cand, "supplier_id", None),
+                    getattr(s, "supplier_id", None),
+                )
             })
             parts: list[str] = []
             if not self.verify_claims:
@@ -1990,6 +2058,7 @@ class Controller:
             )
             verdicts.append({
                 "supplier_id": getattr(cand, "supplier_id", "") or None,
+                "offering_id": getattr(cand, "offering_id", "") or None,
                 "vendor_name": name,
                 "verification_enabled": self.verify_claims,
                 "readiness": candidate_readiness(
@@ -2079,7 +2148,10 @@ class Controller:
     def _public_withheld_candidate_dump(self, candidate) -> dict:
         """Serialize an audit-only conflicted candidate without promoting it."""
         data = self._public_candidate_dump(candidate)
-        data["withheld_reason"] = "unresolved conflicting field claim"
+        data["withheld_reason"] = (
+            "supplier requirements unresolved or failed" if self._requirements_block(candidate)
+            else "unresolved conflicting field claim"
+        )
         data["withheld_fields"] = list(getattr(candidate, "conflicting_fields", []) or [])
         return data
 
@@ -2193,7 +2265,10 @@ class Controller:
         disputed = [
             f for f in memory.all()
             if f.status == "disputed" and any(
-                _same_vendor(getattr(c, "vendor_name", ""), f.entity_name) for c in ranked
+                self.identity_registry.equivalent(
+                    getattr(c, "supplier_id", None), f.supplier_id
+                )
+                for c in ranked
             )
         ]
         signals = disputed_fact_signals(disputed, ledger)
@@ -2325,12 +2400,6 @@ def _span_for_match(text: str, matched_text: str, fallback_terms: list[str] | No
             snippet_end = min(len(body), span_end + 180)
             return body[snippet_start:snippet_end].strip(), span_start, span_end, body[span_start:span_end]
     return target, -1, -1, target
-
-
-def _same_vendor(a: str, b: str) -> bool:
-    left = normalize_vendor_name(a)
-    right = normalize_vendor_name(b)
-    return bool(left and right and (left in right or right in left))
 
 
 def _quote_type_from_memory(value: str):

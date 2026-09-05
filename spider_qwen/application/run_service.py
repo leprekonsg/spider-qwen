@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from .profiles import PIPELINE_VERSION, OperatorProfile, get_profile
 from ..observability.tracing import TraceEvent
+from ..requirements import ProcurementRequest
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out", "interrupted"}
@@ -235,6 +236,10 @@ class RunService:
                 """
             )
 
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+            if "procurement_request_json" not in columns:
+                conn.execute("ALTER TABLE runs ADD COLUMN procurement_request_json TEXT")
+
     def _interrupt_abandoned_runs(self) -> None:
         now = _iso()
         with self._connect() as conn:
@@ -358,6 +363,11 @@ class RunService:
         query = str(request.get("query") or "").strip()
         if not query:
             raise ValueError("Query must not be empty.")
+        procurement = ProcurementRequest(
+            query=query, requirements=request.get("requirements") or [],
+            requirements_confirmed=request.get("requirements_confirmed", False),
+            supplier_sources=request.get("supplier_sources") or {},
+        )
         mode = str(request.get("mode") or "auto")
         country = request.get("country")
         deadline_seconds = int(request.get("deadline_seconds") or profile.default_deadline_seconds)
@@ -371,6 +381,7 @@ class RunService:
 
         normalized = {
             "query": query,
+            "procurement_request": procurement.model_dump(mode="json"),
             "mode": mode,
             "country": country,
             "profile": profile.name,
@@ -439,6 +450,8 @@ class RunService:
                 ),
             )
             self._insert_event(conn, run_id, "queued", {"profile": profile.name})
+            conn.execute("UPDATE runs SET procurement_request_json=? WHERE run_id=?",
+                         (_json(procurement.model_dump(mode="json")), run_id))
             conn.commit()
 
         with self._lock:
@@ -518,6 +531,14 @@ class RunService:
             if remaining <= 0:
                 self._timed_out(run_id, configured_seconds)
                 return
+            procurement = json.loads(row["procurement_request_json"] or "{}")
+            requirement_options = {}
+            if procurement.get("requirements"):
+                requirement_options = {
+                    "requirements": procurement["requirements"],
+                    "requirements_confirmed": procurement.get("requirements_confirmed", False),
+                    "supplier_sources": procurement.get("supplier_sources", {}),
+                }
             coro = controller.run(
                 row["query"],
                 mode=row["mode"],
@@ -525,6 +546,7 @@ class RunService:
                 high_risk=bool(row["high_risk"]),
                 serendipity=bool(row["serendipity"]),
                 run_id=run_id,
+                **requirement_options,
             )
             task = loop.create_task(coro)
             with self._lock:
@@ -645,6 +667,7 @@ class RunService:
     def _status_from_row(row: sqlite3.Row) -> dict:
         return {
             "run_id": row["run_id"],
+            "procurement_request": json.loads(row["procurement_request_json"] or "{}"),
             "status": row["status"],
             "profile": row["profile"],
             "query": row["query"],

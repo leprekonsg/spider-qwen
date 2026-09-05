@@ -34,7 +34,8 @@ def _state_dir(state_dir: str | None = None) -> str:
 
 
 def inspect_run(run_id: str, operation: Operation, *, supplier_id: str | None = None,
-                supplier_ids: list[str] | None = None, state_dir: str | None = None) -> dict:
+                supplier_ids: list[str] | None = None, offering_id: str | None = None,
+                offering_ids: list[str] | None = None, state_dir: str | None = None) -> dict:
     """Inspect a completed run in the operator-bound stdio owner's workspace."""
     from ..application.run_service import load_run_result
 
@@ -44,7 +45,8 @@ def inspect_run(run_id: str, operation: Operation, *, supplier_id: str | None = 
     def evidence(identifier: str, *, owner: str, ledger_ids: set[str]):
         return load_candidate_observations(_state_dir(state_dir), identifier, owner=owner, ledger_ids=ledger_ids)
     return CompletedRunQueries(load, evidence).inspect(run_id, operation, owner=owner,
-                                             supplier_id=supplier_id, supplier_ids=supplier_ids)
+                                             supplier_id=supplier_id, supplier_ids=supplier_ids,
+                                             offering_id=offering_id, offering_ids=offering_ids)
 
 
 def procurement_classify(query: str) -> ClassifyResult:

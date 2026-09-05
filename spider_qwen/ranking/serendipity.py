@@ -47,6 +47,7 @@ class RiskSignal(BaseModel):
     severity: str = "info"  # info | low | medium | high
     description: str = ""
     entity: str | None = None
+    supplier_id: str | None = None
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
 
 
@@ -134,6 +135,7 @@ def _risk_signals_from_candidates(candidates: list) -> list[RiskSignal]:
                 severity="high",
                 description=f"Conflicting prices observed for {c.vendor_name}",
                 entity=c.vendor_name,
+                supplier_id=getattr(c, "supplier_id", None) or None,
                 evidence_refs=list(getattr(c, "evidence_refs", [])),
             ))
     return signals
@@ -170,6 +172,7 @@ def disputed_fact_signals(facts, ledger=None, *, tau: float | None = None) -> li
                 f"(uncertainty {top.uncertainty}, rule {top.rule}); competing: {competing}"
             ),
             entity=fact.entity_name,
+            supplier_id=getattr(fact, "supplier_id", None),
             evidence_refs=_dedupe_refs(refs),
         ))
     return signals

@@ -18,7 +18,9 @@ _STOPWORDS = {
 
 
 def _terms(text: str) -> list[str]:
-    tokens = re.findall(r"[a-z]{3,}", (text or "").lower())
+    # Preserve non-Latin words. This is a lexical relevance signal, never proof
+    # of multilingual requirement satisfaction or cross-language equivalence.
+    tokens = re.findall(r"[^\W\d_]{2,}", (text or "").casefold())
     return [t for t in tokens if t not in _STOPWORDS]
 
 

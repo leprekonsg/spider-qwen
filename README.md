@@ -414,11 +414,37 @@ and consolidation summaries; the UI polls these actual worker events.
 
 Candidates expose `readiness.stage`: `discovered`, `evidence_checked`, or
 `review_ready`. Review-ready means the recorded claims passed enabled checks,
-the evidence and required RFQ inputs are complete, and the evidence grade meets
+the confirmed mandatory requirements, evidence and required RFQ inputs are complete, and the evidence grade meets
 the configured floor. It does not record human approval. Offline fixtures cannot
 be review-ready. Verification rejects explicit negation, historical-only claims,
 attached currency/unit mismatches, and contacts explicitly restricted to other
 purposes; it is not general semantic entailment or a freshness guarantee.
+
+Supply a checklist through the UI, `POST /runs`, or `run --requirements request.json`:
+
+```json
+{"requirements":[{"text":"overnight work","kind":"mandatory","scope":"supplier"}],"requirements_confirmed":true,"supplier_sources":{"Acme Cleaning":["https://acme.sg"]}}
+```
+
+`supplier_sources` records buyer/operator-confirmed website ownership; discovery
+alone does not establish it. Unconfirmed ownership, absent evidence, or conflicting
+assertions remain unresolved. Confirmed mandatory gaps are withheld from the
+shortlist and RFQs but remain inspectable. Free-text-only requests remain discovery
+results. Exclusions name a forbidden positive condition (for example `subcontractors`);
+absence alone does not establish compliance. Assessment currently recognises narrow
+English assertion patterns, not arbitrary paraphrases or multilingual entailment.
+
+Supplier IDs identify entities; offering IDs identify items/services and variants.
+Coherent price observations retain quantity, currency, unit, geography and validity
+together. Different scopes remain alternatives; same-scope price disagreements
+are conflicts. Warm memory joins by supplier ID or an explicitly evidence-backed
+`SupplierIdentityRegistry.approve_alias(...)`; legacy name-only facts remain unbound.
+
+Benchmarks distinguish channel yield from labelled precision and actual routing
+from the classifier baseline. Human outcome metrics remain unavailable until labelled.
+The next held-out corpus targets mixed services and products; synthetic test labels
+are regression fixtures, not release evidence. Recipe promotion and checkpointed
+entity research remain gated on measured outcomes and shared resource accounting.
 
 `SPIDER_QWEN_DEFAULT_PROFILE` selects `offline_demo` (default), `live_research`,
 or `reviewed_procurement`. Live profiles require `SPIDER_QWEN_ALLOW_LIVE=1` and

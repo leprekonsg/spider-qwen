@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 
 from .. import SCHEMA_VERSION
 from ..evidence.models import DisputedAlternative, EvidenceRef, utc_now_iso
-from ..identity import stable_supplier_id
 from ..modes.contracts import PrivacyClass
 from .promotion import contradicts
 
@@ -75,10 +74,6 @@ class SemanticFact(BaseModel):
     reinforcement_count: int = 0
     citation_count: int = 0
 
-    def model_post_init(self, __context: object) -> None:
-        if self.entity_type == "vendor" and not self.supplier_id:
-            object.__setattr__(self, "supplier_id", stable_supplier_id(self.entity_name))
-
     def key(self) -> str:
         if self.entity_type == "vendor" and self.supplier_id:
             return f"vendor:{self.supplier_id}:{self.field}"
@@ -127,9 +122,6 @@ class SemanticMemory:
                     "semantic memory from the evidence ledger."
                 )
             fact = SemanticFact.model_validate(raw)
-            migrated = migrated or (
-                fact.entity_type == "vendor" and not raw.get("supplier_id")
-            )
             facts[fact.fact_id] = fact
         return facts, migrated
 

@@ -127,7 +127,7 @@ def test_vendor_memory_keys_use_supplier_identity(tmp_path):
     assert {fact.supplier_id for fact in memory.all()} == {"sup_alpha_sg", "sup_alpha_my"}
 
 
-def test_legacy_vendor_fact_gets_stable_supplier_id_migration(tmp_path):
+def test_legacy_vendor_fact_remains_unbound(tmp_path):
     path = tmp_path / "memory" / "semantic.json"
     path.parent.mkdir(parents=True)
     raw = _aged_fact(0.0).model_dump(mode="json")
@@ -135,9 +135,9 @@ def test_legacy_vendor_fact_gets_stable_supplier_id_migration(tmp_path):
     path.write_text(json.dumps([raw]), encoding="utf-8")
     loaded = SemanticMemory(tmp_path).all()
     assert len(loaded) == 1
-    assert loaded[0].supplier_id.startswith("sup_")
+    assert loaded[0].supplier_id is None
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted[0]["supplier_id"] == loaded[0].supplier_id
+    assert "supplier_id" not in persisted[0]
 
 
 def test_concurrent_memory_instances_do_not_lose_updates(tmp_path):

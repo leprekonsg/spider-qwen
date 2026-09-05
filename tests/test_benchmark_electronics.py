@@ -42,6 +42,6 @@ def test_every_electronics_case_classifies_correctly():
 def test_harness_reports_electronics_without_breaking_evidence_invariant():
     summary = run_gold_set(GOLD_SET, offline=True)
     assert summary["per_mode"]["electronics_substitution"]["cases"] == 20
-    assert summary["per_mode"]["electronics_substitution"]["mode_classification_accuracy"] >= 0.9
+    assert summary["per_mode"]["electronics_substitution"]["end_to_end_routing_accuracy"] >= 0.9
     # Adding the new cases must not regress the cross-mode evidence invariant.
-    assert summary["evidence_coverage"] >= 0.9
+    assert summary["candidate_evidence_presence_rate"] >= 0.9

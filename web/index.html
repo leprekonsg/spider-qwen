@@ -65,6 +65,10 @@
     const [nav, setNav]         = useState("hunt");
     const [tab, setTab]         = useState("suppliers");
     const [query, setQuery]     = useState("Find office cleaning vendors in Singapore and prepare RFQ drafts");
+    const [requirementText, setRequirementText] = useState("");
+    const [requirementsConfirmed, setRequirementsConfirmed] = useState(false);
+    const [supplierSourceText, setSupplierSourceText] = useState("");
+    function updateQuery(value) { setQuery(value); setRequirementsConfirmed(false); }
     const [focusId, setFocusId] = useState(null);
     const [detailVendor, setDetailVendor] = useState(null);
     const [draftVendor, setDraftVendor]   = useState(null);
@@ -128,6 +132,16 @@
         const run = await window.SQAPI.start(q, {
           profile: config.default_profile,
           idempotencyKey: crypto.randomUUID(),
+          requirements: requirementText.split("\n").map(t => t.trim()).filter(Boolean).map(text => {
+            const match = text.match(/^(preferred|exclusion|mandatory):\s*(.+)$/i);
+            return { text: match ? match[2] : text, kind: match ? match[1].toLowerCase() : "mandatory", scope: "supplier" };
+          }),
+          requirementsConfirmed,
+          supplierSources: supplierSourceText.split("\n").filter(t => t.trim()).reduce((sources, line) => {
+            const [name, origin] = line.split("|").map(t => t.trim());
+            sources[name || ""] = [...(sources[name] || []), origin || ""];
+            return sources;
+          }, {}),
         });
         activeRunRef.current = run.run_id;
         if (cancelRequestedRef.current) await window.SQAPI.cancel(run.run_id);
@@ -277,9 +291,29 @@
 
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
           <div role="status" style={{ padding: "6px 28px", fontSize: 11, color: "var(--sq-slate-taupe)" }}>{profileLabel}</div>
+          {screen === "idle" && (
+            <details style={{ padding: "8px 28px", fontSize: 12, color: "var(--sq-smoke)" }}>
+              <summary>Supplier requirements</summary>
+              <p>One condition per line, such as industrial cleaning or overnight work. Conditions are mandatory unless prefixed with preferred: or exclusion:.</p>
+              <textarea aria-label="Supplier requirements" rows="4" value={requirementText}
+                style={{ width: "100%", color: "var(--sq-bone)", background: "var(--sq-obsidian)", border: "1px solid var(--sq-border)" }}
+                onChange={e => { setRequirementText(e.target.value); setRequirementsConfirmed(false); }} />
+              <label style={{ display: "block", marginTop: 8 }}>
+                <input type="checkbox" checked={requirementsConfirmed} disabled={!requirementText.trim()}
+                  onChange={e => setRequirementsConfirmed(e.target.checked)} /> This checklist includes all supplier conditions in my request
+              </label>
+              <p>Unconfirmed or unsupported conditions remain unresolved. Phrase checks are conservative and do not establish independent truth.</p>
+              <label>Supplier-owned websites you have confirmed (optional)</label>
+              <textarea aria-label="Confirmed supplier websites" rows="2" value={supplierSourceText}
+                placeholder="Acme Cleaning | https://acme.sg"
+                style={{ width: "100%", color: "var(--sq-bone)", background: "var(--sq-obsidian)", border: "1px solid var(--sq-border)" }}
+                onChange={e => setSupplierSourceText(e.target.value)} />
+              <p>One supplier name and website origin per line, separated by |. Unconfirmed source ownership remains unresolved. For exclusions, state the forbidden condition, for example exclusion: subcontractors.</p>
+            </details>
+          )}
           {screen !== "idle" && (
             <>
-              <CommandBar query={query} setQuery={setQuery} mode="auto" onRun={startHunt} running={running} onPause={haltHunt} />
+              <CommandBar query={query} setQuery={updateQuery} mode="auto" onRun={startHunt} running={running} onPause={haltHunt} />
               <Pipeline activePhase={activePhase} progress={progress} running={running} budget={view && !running ? view.budget : null} />
             </>
           )}
@@ -297,8 +331,8 @@
           <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
             <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
               {screen === "idle" && (
-                <HeroIdle query={query} setQuery={setQuery} onRun={startHunt} recent={recent}
-                  onPickRecent={(r) => setQuery(r.q)} />
+                <HeroIdle query={query} setQuery={updateQuery} onRun={startHunt} recent={recent}
+                  onPickRecent={(r) => updateQuery(r.q)} />
               )}
               {screen === "hunting" && (
                 <HuntInProgress stream={stream} evidence={evidence}
@@ -376,8 +410,22 @@
           </div>
 
           {tab === "suppliers" && (
+            <>
             <window.Shortlist vendors={view.vendors} meta={meta} title={query}
               focusId={focusId} onFocus={setFocusId} onDetail={setDetailVendor} onDraft={setDraftVendor} />
+            {(view.withheldVendors || []).length > 0 && (
+              <section style={{ marginTop: 24 }}>
+                <h3>Unresolved or withheld suppliers</h3>
+                <p>These records do not qualify for the shortlist. Their evidence and missing conditions remain available for inspection.</p>
+                {view.withheldVendors.map(v => (
+                  <div key={v.id} style={{ padding: "12px 0", borderBottom: "1px solid var(--sq-border)" }}>
+                    <strong>{v.name}</strong> · {v.raw.withheld_reason}
+                    <button style={{ marginLeft: 16 }} onClick={() => setDetailVendor(v)}>Evidence</button>
+                  </div>
+                ))}
+              </section>
+            )}
+            </>
           )}
           {tab === "insights" && <InsightsTab view={view} query={query}/>}
           {tab === "contracts" && <PlaceholderTab title="Active contracts" body="Renewal radar, evergreen clauses, expiry windows — drilling in soon."/>}

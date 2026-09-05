@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..application.profiles import get_profile, list_profiles
 from ..application.run_service import AdmissionRejected, IdempotencyConflict, RunNotFound, RunNotReady
+from ..requirements import Requirement
 
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 Mode = Literal[
@@ -23,6 +24,9 @@ Mode = Literal[
 
 class RunRequest(BaseModel):
     query: str
+    requirements: list[Requirement] = Field(default_factory=list, max_length=100)
+    requirements_confirmed: bool = False
+    supplier_sources: dict[str, list[str]] = Field(default_factory=dict, max_length=100)
     mode: Mode = "auto"
     country: str | None = None
     offline: bool = True
@@ -31,6 +35,9 @@ class RunRequest(BaseModel):
 class StartRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=1, max_length=10_000)
+    requirements: list[Requirement] = Field(default_factory=list, max_length=100)
+    requirements_confirmed: bool = False
+    supplier_sources: dict[str, list[str]] = Field(default_factory=dict, max_length=100)
     mode: Mode = "auto"
     country: str | None = Field(default=None, max_length=100)
     profile: Literal["offline_demo", "live_research", "reviewed_procurement"] | None = None
@@ -238,7 +245,9 @@ def create_app(*, run_service=None):
             raise HTTPException(status_code=401, detail="Live runs require an authenticated principal.")
         try:
             started = service.start(
-                {"query": req.query, "mode": req.mode, "country": req.country, "profile": profile},
+                {"query": req.query, "mode": req.mode, "country": req.country, "profile": profile,
+                 "requirements": [r.model_dump() for r in req.requirements],
+                 "requirements_confirmed": req.requirements_confirmed, "supplier_sources": req.supplier_sources},
                 owner=principal.owner,
             )
         except PermissionError as exc:

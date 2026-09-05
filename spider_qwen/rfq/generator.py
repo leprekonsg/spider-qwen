@@ -39,6 +39,7 @@ class RFQGenerator:
     ) -> RFQDraft:
         vendor = RFQVendor(
             supplier_id=candidate.supplier_id,
+            offering_id=candidate.offering_id,
             vendor_name=candidate.vendor_name,
             website=candidate.website or "",
             country=candidate.country,

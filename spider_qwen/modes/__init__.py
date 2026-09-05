@@ -5,6 +5,7 @@ from __future__ import annotations
 from .contracts import (
     Contact,
     ContactCandidate,
+    OfferScope,
     PrivacyClass,
     PricingStatus,
     ProcurementMode,
@@ -27,6 +28,7 @@ __all__ = [
     "ProductCandidate",
     "ServiceCandidate",
     "ContactCandidate",
+    "OfferScope",
     "SUCCESS_CONTRACTS",
     "ModeClassifier",
     "ClassificationResult",

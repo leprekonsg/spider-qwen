@@ -17,7 +17,7 @@ from .. import SCHEMA_VERSION, __version__
 
 PIPELINE_VERSION = (
     f"spider-qwen/{__version__};schema={SCHEMA_VERSION};"
-    "identity=2;ranking=2;profiles=1;execution=1;verification=2"
+    "identity=3;ranking=3;profiles=1;execution=2;verification=3;requirements=1;offerings=1"
 )
 
 
