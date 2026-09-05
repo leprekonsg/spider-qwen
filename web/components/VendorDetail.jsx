@@ -241,6 +241,13 @@ function TrustVerdict({ trust }) {
           </span>
         )}
       </div>
+      {trust.readiness && (
+        <p style={{ fontSize: 12, color: "var(--sq-smoke)", lineHeight: 1.5 }}>
+          {{ discovered: "Discovered", evidence_checked: "Evidence-checked", review_ready: "Review-ready" }[trust.readiness.stage]}
+          {" · human approval not recorded"}
+          {trust.readiness.reasons.length > 0 && ` · ${trust.readiness.reasons.map(r => r.replace(/_/g, " ")).join("; ")}`}
+        </p>
+      )}
       <div style={{ padding: "18px 20px", border: "1px solid var(--sq-border)", background: "var(--sq-obsidian)" }}>
         {trust.verification_enabled && (
           <div style={{ display: "flex", gap: 34, flexWrap: "wrap" }}>

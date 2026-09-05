@@ -5,7 +5,7 @@
 // Right: evidence cards materialising as they're verified
 // Bottom: a candidate map building up
 
-function HuntInProgress({ stream, evidence, candidates, query, activePhase, progress, seamLabel, pool }) {
+function HuntInProgress({ stream, evidence, candidates, query, activePhase, progress, seamLabel, pool, runId }) {
   const streamRef = React.useRef(null);
 
   React.useEffect(() => {
@@ -37,7 +37,7 @@ function HuntInProgress({ stream, evidence, candidates, query, activePhase, prog
               <span className="sq-pulse" style={{ width: 6, height: 6, borderRadius: 999, background: "#A6BB87" }} />
               Hunt in progress
             </span>
-            <span style={{ color: "var(--sq-slate-taupe)" }}>· run_{Date.now().toString(36).slice(-6)}</span>
+            <span style={{ color: "var(--sq-slate-taupe)" }}>· {runId || "awaiting run ID"}</span>
           </div>
           <h2 style={{
             margin: 0, fontFamily: "var(--sq-font-serif)", fontSize: 30, fontWeight: 500,

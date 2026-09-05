@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 from .budget import Budget, BudgetExceeded, BudgetTracker, StopReason
@@ -67,7 +68,7 @@ from ..modes.contracts import (
 from ..modes.qwen_router import QwenModeRouter, QwenModeRouterError
 from ..modes.router import ModeRouter, RoutePlan
 from ..observability.metrics import CostMeter, Metrics
-from ..observability.tracing import Tracer
+from ..observability.tracing import TraceEvent, Tracer
 from ..ranking.contact_ranker import ContactRanker
 from ..ranking.geo_strategy import SEA_COUNTRIES, GeoStrategy, build_query_templates
 from ..ranking.product_ranker import ProductRanker
@@ -148,8 +149,10 @@ class Controller:
         persist: bool = True,
         require_review: bool | None = None,
         offline: bool = False,
+        trace_callback: Callable[[TraceEvent], None] | None = None,
     ) -> None:
         self.policy = policy or load_policy()
+        self.trace_callback = trace_callback
         # offline=True is a guarantee, not a hint: NO live client is ever
         # constructed here -- search/fetch providers included -- even when
         # policy/env flags enable one and an API key is present. Injected
@@ -371,7 +374,7 @@ class Controller:
                                 reliability_priors=self.policy.source_reliability())
         tracker = BudgetTracker(budget)
         working = WorkingMemory(run_id=run_id, query=query, mode=chosen.value)
-        tracer = Tracer(run_id, chosen.value, self.state_dir)
+        tracer = Tracer(run_id, chosen.value, self.state_dir, on_record=self.trace_callback)
         audit = AuditLog(run_id, self.state_dir)
         review_store = ReviewStore(self.state_dir) if self.persist and self.policy.hitl_enabled() else None
         metrics = Metrics()
@@ -405,7 +408,8 @@ class Controller:
             reserve_search_calls=1 if budget.max_search_calls > 1 else 0, pages_out=sea_pages,
             queries_out=initial_queries,
         )
-        candidates, _sea_merges = dedupe_candidates(candidates)
+        candidates, sea_merges = dedupe_candidates(candidates)
+        self._record_consolidation(tracer, len(candidates) + sea_merges, candidates, sea_merges)
         candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
         candidates = self._apply_consolidation_safety(candidates)
         ranker = self._rankers[route.ranker]
@@ -450,7 +454,10 @@ class Controller:
                 more = await self._gather(
                     ctx, route, query, search, fetch, region="global", target_country=target_country
                 )
-            candidates, _fb_merges = dedupe_candidates(candidates + more)
+            candidates, fallback_merges = dedupe_candidates(candidates + more)
+            self._record_consolidation(
+                tracer, len(candidates) + fallback_merges, candidates, fallback_merges,
+            )
             candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
             candidates = self._apply_consolidation_safety(candidates)
             ranked = ranker.rank(candidates)
@@ -497,7 +504,10 @@ class Controller:
                     ctx, route, replan_queries, search, fetch,
                     location=None, target_country=target_country, pages_out=sea_pages,
                 )
-                candidates, _rp_merges = dedupe_candidates(candidates + more)
+                candidates, replan_merges = dedupe_candidates(candidates + more)
+                self._record_consolidation(
+                    tracer, len(candidates) + replan_merges, candidates, replan_merges,
+                )
                 candidates = self._apply_memory_recalls(ctx, candidates, memory_recalls)
                 candidates = self._apply_consolidation_safety(candidates)
                 ranked = ranker.rank(candidates)
@@ -694,6 +704,13 @@ class Controller:
             budget=tracker.snapshot(),
         )
 
+        readiness_by_id = {v["supplier_id"]: v["readiness"] for v in result.trust_verdicts}
+        for candidate in result.validated_candidates:
+            candidate["readiness"] = readiness_by_id[candidate["supplier_id"]]
+        for candidate in result.withheld_candidates:
+            candidate["readiness"] = {
+                "stage": "discovered", "reasons": ["unresolved_conflicts"], "approval": "not_recorded",
+            }
         self._persist_run(ctx, audit, result, validated, review_store)
         return result
 
@@ -715,7 +732,7 @@ class Controller:
         route = self.router.route(chosen)
         run_id = new_run_id()
         ledger = EvidenceLedger(run_id, self.state_dir, reliability_priors=self.policy.source_reliability())
-        tracer = Tracer(run_id, chosen.value, self.state_dir)
+        tracer = Tracer(run_id, chosen.value, self.state_dir, on_record=self.trace_callback)
         if target_country is None:
             target_country = self._detect_target_country(query)
         rbudget = ReasoningBudget()
@@ -740,7 +757,8 @@ class Controller:
             cands = await self._gather_queries(
                 ctx, route, traj.queries, search, fetch, location=None, target_country=target_country,
             )
-            cands, _trajectory_merges = dedupe_candidates(cands)
+            cands, trajectory_merges = dedupe_candidates(cands)
+            self._record_consolidation(tracer, len(cands) + trajectory_merges, cands, trajectory_merges)
             cands = self._apply_consolidation_safety(cands)
             ranked = ranker.rank(cands)
             metrics, refs, disputed, conflict, qualified_count = self._bundle_metrics(
@@ -1023,7 +1041,10 @@ class Controller:
                 stats["qwen_scorer_moved"] = merged_moved
             stats["gathers"] = prev.get("gathers", 1) + 1
         ctx.metadata["frontier"] = stats
-        deduped, _frontier_merges = dedupe_candidates(candidates)
+        deduped, frontier_merges = dedupe_candidates(candidates)
+        self._record_consolidation(
+            ctx.tracer, len(candidates), deduped, frontier_merges,
+        )
         return deduped
 
     def _qwen_rescore_frontier(self, ctx: ExecutionContext, frontier: Frontier) -> int:
@@ -1346,6 +1367,23 @@ class Controller:
         return candidates
 
     @staticmethod
+    def _record_consolidation(
+        tracer: Tracer,
+        input_count: int,
+        candidates: list,
+        merge_count: int,
+    ) -> None:
+        """Trace the real supplier identity pass without exposing supplier data."""
+        tracer.record(
+            step="supplier_consolidation",
+            tool="supplier_identity",
+            status="success",
+            input_count=input_count,
+            output_count=len(candidates),
+            detail={"merged_candidates": merge_count},
+        )
+
+    @staticmethod
     def _has_finalization_conflict(candidate) -> bool:
         """A true consolidated conflict is withheld from finalized output.
 
@@ -1662,7 +1700,7 @@ class Controller:
             }
             if tracer is not None:
                 tracer.record(step="verify_claims", tool="minicheck_verifier", status="success",
-                              input_count=len(cv.claims), output_count=len(cv.claims),
+                              input_count=len(cv.claims), output_count=sum(c.verified for c in cv.claims),
                               detail={"vendor": cv.vendor_name, "verifier_score": cv.verifier_score,
                                       "decision": cv.decision, "grade": cv.grade})
             kept.append(cand)
@@ -1912,6 +1950,7 @@ class Controller:
         """
         assessments = verification_metrics.get("verification_assessments") or {}
         conformal_meta = verification_metrics.get("conformal")
+        from ..verification.readiness import candidate_readiness
         verdicts: list[dict] = []
         for cand in validated:
             name = getattr(cand, "vendor_name", "") or ""
@@ -1953,6 +1992,11 @@ class Controller:
                 "supplier_id": getattr(cand, "supplier_id", "") or None,
                 "vendor_name": name,
                 "verification_enabled": self.verify_claims,
+                "readiness": candidate_readiness(
+                    cand, assessment, verification_enabled=self.verify_claims,
+                    offline=self.offline, grade_floor=self.policy.rfq_grade_floor,
+                    disputed=bool(disputed),
+                ),
                 "claims_verified": assessment.get("claims_verified"),
                 "claims_unsupported": assessment.get("claims_unsupported"),
                 "verifier_score": assessment.get("verifier_score"),

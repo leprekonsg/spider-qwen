@@ -140,14 +140,17 @@
             const events = Array.isArray(response) ? response : response.events || [];
             if (events.length) {
               after = Math.max(after, ...events.map(e => e.id || e.event_id || 0));
-              setStream(prev => [...prev, ...events.map(e => ({
-                phase: e.phase || e.kind || e.type || e.status || "run",
-                t: Date.now() - started,
-                text: e.message || e.detail || e.kind || e.type || e.status || "Run updated",
-              }))]);
+              const lines = events.map(e => window.SQMAP.runEventLine(e, Date.parse(run.created_at) || started));
+              setStream(prev => [...prev, ...lines]);
+              const phase = [...lines].reverse().find(line => line.phase !== "run");
+              if (phase) setActivePhase(phase.phase);
             }
             const state = status.status.toLowerCase();
             if (state === "completed") {
+              if (events.length === 100) {
+                timeoutsRef.current.push(setTimeout(poll, 0));
+                return;
+              }
               const result = await window.SQAPI.result(run.run_id);
               if (generation !== generationRef.current) return;
               activeRunRef.current = null;
@@ -299,6 +302,7 @@
               )}
               {screen === "hunting" && (
                 <HuntInProgress stream={stream} evidence={evidence}
+                  runId={activeRunRef.current}
                   candidates={Math.min(5, Math.floor(progress * 6))} query={query}
                   activePhase={activePhase} progress={progress}
                   seamLabel={resultRef.current ? resultRef.current.qwen.label : "pipeline · running"}

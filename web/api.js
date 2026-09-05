@@ -144,6 +144,9 @@
 
   function deriveTags(c, kind) {
     const tags = [];
+    const stage = c.readiness && c.readiness.stage;
+    const stageLabels = { discovered: "Discovered", evidence_checked: "Evidence-checked", review_ready: "Review-ready" };
+    if (stageLabels[stage]) tags.push({ t: stageLabels[stage], kind: stage === "discovered" ? "plain" : "ok" });
     const country = c.country || "Global";
     tags.push({ t: SEA.includes(country) ? country + " · SEA" : country, kind: "plain" });
     const comp = c.evidence_completeness || 0;
@@ -258,7 +261,19 @@
     draft: "Drafting RFQs for human review…",
     persist: "Committing evidence to append-only ledger…",
   };
-  const PHASE_ORDER = ["classify", "budget", "search", "fetch", "extract", "rank", "draft", "persist"];
+  const PHASE_ORDER = ["classify", "budget", "search", "fetch", "extract", "consolidate", "rank", "verify", "draft", "persist"];
+
+  function runEventLine(event, startedAt) {
+    const detail = event.detail || {};
+    const phases = { discovery: "search", retrieval: "fetch", extraction: "extract",
+      verification: "verify", consolidation: "consolidate", ranking: "rank", rfq: "draft" };
+    const sourcePhase = event.phase || detail.phase;
+    const phase = phases[sourcePhase] || (PHASE_ORDER.includes(sourcePhase) ? sourcePhase : "run");
+    const timestamp = Date.parse(event.created_at);
+    return { phase,
+      t: Number.isFinite(timestamp) ? Math.max(0, timestamp - startedAt) : 0,
+      text: typeof event.message === "string" ? event.message : event.kind || "Run updated" };
+  }
 
   function reasoningLine(phase, result) {
     if (!result) return PHASE_PLACEHOLDER[phase];
@@ -414,6 +429,6 @@
   const PIPELINE_STEPS = PHASE_ORDER.map((k) => ({ k, label: k }));
 
   window.SQAPI = SQAPI;
-  window.SQMAP = { mapResult, reasoningLine, traceLines, toSignals, toLedger, toVendor, qwenSummary };
+  window.SQMAP = { mapResult, reasoningLine, traceLines, toSignals, toLedger, toVendor, qwenSummary, runEventLine };
   window.SQDATA = { PIPELINE_STEPS, PHASE_ORDER, PHASE_PLACEHOLDER, recentRuns, pushRecentRun };
 })();

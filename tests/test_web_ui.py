@@ -28,7 +28,7 @@ pw_sync = pytest.importorskip("playwright.sync_api")
 pytest.importorskip("fastapi")
 uvicorn = pytest.importorskip("uvicorn")
 
-HUNT_TIMEOUT_MS = 30_000  # offline run + ~3s UI theatre window
+HUNT_TIMEOUT_MS = 30_000  # real offline worker and lifecycle polling
 
 
 class _ServerURL(str):
@@ -131,6 +131,8 @@ def test_hunt_renders_results_from_real_run(page, server_url):
     # Shortlist rendered real validated candidates from /run.
     _expect(page.get_by_role("heading", level=3, name="Example Vendor 1 Pte Ltd").first)
     _expect(page.get_by_text("score · /100").first)
+    _expect(page.get_by_text("Discovered", exact=True).first)
+    assert page.get_by_text("Review-ready", exact=True).count() == 0
     assert page.errors == []
 
 
@@ -194,6 +196,8 @@ def test_webmcp_reads_completed_run_and_unregisters_on_reset(page, server_url):
     assert actual["evidence"]["evidence_refs"] == actual["listed"]["candidates"][0]["evidence_refs"]
     assert actual["draft"]["submission_status"] == "unsent"
     assert actual["readOnly"] is True
+    assert actual["listed"]["candidates"][0]["readiness"]["stage"] == "discovered"
+    assert actual["evidence"]["readiness"] == actual["listed"]["candidates"][0]["readiness"]
     assert set(actual["names"]) == {"get_current_run", "list_candidates", "get_candidate_evidence", "compare_candidates", "get_rfq_draft"}
     page.evaluate("window.SQWebMCP.clear()")
     assert page.evaluate("Object.keys(window.registeredTools).length") == 0
@@ -242,6 +246,46 @@ def test_halt_waits_for_real_worker_cancellation(page, server_url, monkeypatch):
     assert not any(e["kind"] == "completed" for e in events)
     assert page.get_by_text("stop ·").count() == 0
     assert page.errors == []
+
+
+def test_running_ui_displays_persisted_worker_events(page, server_url, monkeypatch):
+    import httpx
+
+    builder = server_url.service.controller_builder
+    release = threading.Event()
+
+    def held_builder(**kwargs):
+        controller = builder(**kwargs)
+
+        class HeldController:
+            async def run(self, *args, **options):
+                result = await controller.run(*args, **options)
+                while not release.is_set():
+                    await asyncio.sleep(0.05)
+                return result
+
+        return HeldController()
+
+    monkeypatch.setattr(server_url.service, "controller_builder", held_builder)
+    try:
+        page.goto(server_url)
+        with page.expect_response(lambda r: r.url.endswith("/runs") and r.request.method == "POST") as started:
+            page.get_by_role("button", name="Begin hunt").click()
+        run_id = started.value.json()["run_id"]
+        _expect(page.get_by_text("consolidation: supplier consolidation (success)").first,
+                timeout=HUNT_TIMEOUT_MS)
+        _expect(page.get_by_text(f"· {run_id}", exact=True))
+        assert httpx.get(f"{server_url}/runs/{run_id}").json()["status"] == "running"
+        events = httpx.get(f"{server_url}/runs/{run_id}/events").json()["events"]
+        traces = [e for e in events if e["kind"] == "trace"]
+        assert {"discovery", "retrieval", "consolidation"} <= {e["phase"] for e in traces}
+        for event in traces:
+            assert page.get_by_text(event["message"], exact=True).count() >= 1
+        assert page.get_by_text("stop ·").count() == 0
+        assert page.errors == []
+    finally:
+        release.set()
+    _expect(page.get_by_text("stop ·"), timeout=HUNT_TIMEOUT_MS)
 
 
 def test_insights_shows_reasoning_and_telemetry_cards(page, server_url):

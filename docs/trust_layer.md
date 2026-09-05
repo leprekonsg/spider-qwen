@@ -79,23 +79,24 @@ named test does not belong here.
   (boundary-preserving normalization: currency marks stripped, digit-group
   commas removed, whitespace collapsed but never deleted), and vendor-scoped
   relation claims (price, MOQ, quote channel, contacts) additionally require
-  the value and vendor in the same sentence. Token-overlap fallback requires
+  the value and vendor in the same or preceding sentence. Token-overlap fallback requires
   distinctive-token coverage AND overall coverage (min of the two ratios);
   values with only generic legal tokens need every token present. Relation
   claims with no concrete value fail closed (`no_value`). The optional Qwen
   NLI seam (`QWEN_NLI_ENABLED`) is clamped and re-gated: the model cannot
   bypass the co-location guard, crash the path, or verify an empty value.
+  Explicit negation, historical-only scope, exact-vs-starting prices, attached
+  currency/unit mismatches, and explicitly restricted non-quotation endpoints
+  produce rejection reasons. Price qualifiers must match one numeric occurrence.
+  Learned NLI and SAFE use the same hard guards.
 - **Guarantee:** a fabricated value cannot verify against its own extraction
   snippet (grounding always runs against the parent page text); a critical
   claim that fails both the cited span and SAFE corpus re-verification blocks
   the candidate.
-- **Not guaranteed:** semantic entailment. Known blind spots of the lexical
-  gate: negation ("does not exceed $500"), unit/currency conversion,
-  aggregation across sentences, temporal qualifiers (stale prices), and
-  wrong-predicate matches beyond keyword co-location. If these matter, add
-  deterministic grade-degraders (negation-cue window, unit canonicalization,
-  predicate-anchor lexicon, temporal guard, hedge detection) rather than
-  weakening the gate.
+- **Not guaranteed:** general semantic entailment, product/entity binding,
+  unit/currency conversion, date-based freshness, or predicate matching beyond
+  the explicit guards. Clause co-location remains a heuristic; ambiguous
+  qualifiers and a bare `$` do not establish currency or scope.
 - **Pinned by:** `test_price_grounds_next_to_quantity_column`,
   `test_short_value_does_not_ground_across_token_boundaries`,
   `test_vendor_name_cannot_verify_on_legal_boilerplate`,

@@ -52,6 +52,7 @@ class CompletedRunQueries:
                     "evidence_refs": deepcopy(selected.get("evidence_refs", [])),
                     "field_claims": deepcopy(selected.get("field_claims", {})),
                     "conflicting_fields": deepcopy(selected.get("conflicting_fields", [])),
+                    "readiness": deepcopy(selected.get("readiness")),
                     "observations": self._evidence(run_id, owner=owner, ledger_ids=ids) if self._evidence else [],
                     "citation_proofs": deepcopy([p for p in result.get("citation_proofs", [])
                                                  if p.get("ledger_id") in ids])}

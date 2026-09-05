@@ -14,7 +14,7 @@ import logging
 from typing import Callable
 
 from .atomic import AtomicClaim
-from .minicheck import MiniCheck, MiniCheckResult
+from .minicheck import HARD_REJECTION_METHODS, MiniCheck, MiniCheckResult
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +38,13 @@ class SafeReverifier:
         for span in spans:
             result = self.minicheck.check(
                 claim=claim.predicate, value=claim.object_value, evidence_span=span,
-                field=claim.field, subject=claim.subject,
+                field=claim.field, subject=claim.subject, currency=claim.currency,
+                unit=claim.unit, pricing_status=claim.pricing_status,
+                channel_type=claim.channel_type,
             )
-            if result.score > best.score:
+            if result.score > best.score or (
+                best.method == "safe_no_grounding" and result.method in HARD_REJECTION_METHODS
+            ):
                 # winning_span lets the spine re-point a complementary claim's
                 # citation to the span that actually grounded it.
                 best = result.model_copy(

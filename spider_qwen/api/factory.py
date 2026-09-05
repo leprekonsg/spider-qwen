@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import os
 from copy import deepcopy
+from typing import Callable
 
 from ..agent.controller import Controller
+from ..observability.tracing import TraceEvent
 
 
 def build_controller(
@@ -21,6 +23,7 @@ def build_controller(
     require_review: bool | None = None,
     rfq_grade_floor: str | None = None,
     expected_config_fingerprint: str | None = None,
+    trace_callback: Callable[[TraceEvent], None] | None = None,
 ) -> Controller:
     """Construct the Controller the same way for the CLI and the HTTP server.
 
@@ -60,6 +63,7 @@ def build_controller(
         verify=verify,
         require_review=require_review,
         offline=offline,
+        trace_callback=trace_callback,
     )
 
 

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 from spider_qwen.evidence.ledger import EvidenceLedger
 from spider_qwen.evidence.verifier import VerificationSpine
-from spider_qwen.modes.contracts import PricingStatus
+from spider_qwen.modes.contracts import PricingStatus, QuoteChannelType
 from spider_qwen.verification.atomic import decompose
 from spider_qwen.verification.minicheck import MiniCheck
 from spider_qwen.verification.safe import SafeReverifier
@@ -201,6 +201,192 @@ def test_safe_search_fn_failure_is_logged(caplog):
 
     assert not res.supported
     assert "search unavailable" in caplog.text
+
+
+# --- deterministic semantic scope guards ----------------------------------
+
+def _verify_price_text(page_text, *, price=129.0, currency="SGD", unit="unit", model=None):
+    ledger = EvidenceLedger("run_scope", None)
+    page_ref, claim_ref = _record_page_and_claim(
+        ledger, page_text=page_text, claim_value=str(int(price)), grounded=False,
+    )
+    candidate = SimpleNamespace(
+        vendor_name="Acme Pte Ltd", price=price, currency=currency, unit=unit,
+        moq=None, pricing_status=PricingStatus.EXACT_PRICE,
+        evidence_refs=[page_ref, claim_ref],
+    )
+    spine = VerificationSpine(ledger, minicheck=MiniCheck(model=model))
+    result = spine.verify_candidate(candidate)
+    return result, next(c for c in result.claims if c.field == "price")
+
+
+def test_spine_rejects_negated_price_but_not_unrelated_negation():
+    rejected, price = _verify_price_text(
+        "Acme Pte Ltd does not list SGD 129 per unit; current price is SGD 149 per unit."
+    )
+    assert rejected.verified is False
+    assert price.rationale == "the value-bearing clause explicitly negates the claimed fact"
+
+    accepted, price = _verify_price_text(
+        "Acme Pte Ltd does not charge a setup fee and current price is SGD 129 per unit."
+    )
+    assert accepted.verified is True
+    assert price.verified is True
+
+    additive, price = _verify_price_text(
+        "Acme Pte Ltd not only lists SGD 129 per unit but also includes delivery."
+    )
+    assert additive.verified is True
+    assert price.verified is True
+
+
+def test_spine_rejects_historical_price_and_accepts_current_price():
+    rejected, price = _verify_price_text(
+        "Acme Pte Ltd old price was SGD 129 per unit. Current price is SGD 149 per unit."
+    )
+    assert rejected.verified is False
+    assert "historical or inactive" in price.rationale
+
+    accepted, price = _verify_price_text(
+        "Acme Pte Ltd previously listed SGD 99 per unit. Current price is SGD 129 per unit."
+    )
+    assert accepted.verified is True
+    assert price.verified is True
+
+    repeated, price = _verify_price_text(
+        "Acme Pte Ltd previously listed SGD 129 per unit. Current price is SGD 129 per unit."
+    )
+    assert repeated.verified is True
+    assert price.verified is True
+
+
+def test_spine_rejects_explicit_currency_and_unit_mismatches():
+    wrong_currency, currency_claim = _verify_price_text(
+        "Acme Pte Ltd current price is USD 129 per unit."
+    )
+    assert wrong_currency.verified is False
+    assert "denominated in USD, not SGD" in currency_claim.rationale
+
+    wrong_us_symbol, currency_claim = _verify_price_text(
+        "Acme Pte Ltd current price is US$129 per unit."
+    )
+    assert wrong_us_symbol.verified is False
+    assert "denominated in USD, not SGD" in currency_claim.rationale
+
+    wrong_unit, unit_claim = _verify_price_text(
+        "Acme Pte Ltd current price is SGD 129 per month."
+    )
+    assert wrong_unit.verified is False
+    assert "per month, not per unit" in unit_claim.rationale
+
+    accepted, price = _verify_price_text(
+        "Acme Pte Ltd current price is SGD 129 per piece."
+    )
+    assert accepted.verified is True
+    assert price.verified is True  # piece and unit are equivalent product units
+
+    unspecified, price = _verify_price_text("Acme Pte Ltd current price is 129.")
+    assert unspecified.verified is True
+    assert price.verified is True  # absent scope is unknown, not an explicit mismatch
+
+
+def test_spine_does_not_combine_qualifiers_across_price_occurrences():
+    rejected, price = _verify_price_text(
+        "Acme Pte Ltd offers USD 129 per month or SGD 129 per year.",
+        unit="month",
+    )
+    assert rejected.verified is False
+    assert price.rationale == (
+        "no occurrence of value '129' has both currency SGD and unit month"
+    )
+
+    accepted, price = _verify_price_text(
+        "Acme Pte Ltd offers USD 129 per year or SGD 129 per month.",
+        unit="month",
+    )
+    assert accepted.verified is True
+    assert price.verified is True
+
+
+def test_spine_rejects_non_exact_evidence_for_exact_price_claim():
+    rejected, price = _verify_price_text(
+        "Acme Pte Ltd prices start from SGD 129 per unit."
+    )
+    assert rejected.verified is False
+    assert price.rationale == "the evidence explicitly qualifies the value as non-exact"
+
+    ranged, price = _verify_price_text(
+        "Acme Pte Ltd lists a range of SGD 129-199 per unit."
+    )
+    assert ranged.verified is False
+    assert price.rationale == "the evidence explicitly qualifies the value as non-exact"
+
+
+def _verify_quote_text(page_text):
+    ledger = EvidenceLedger("run_quote_scope", None)
+    page_ref = ledger.record(
+        source_tool="tinyfish_fetch", url="https://acme.sg/contact",
+        snippet=page_text, text=page_text, metadata={},
+    )
+    quote_ref = ledger.record(
+        source_tool="tinyfish_fetch", url="https://acme.sg/contact",
+        snippet="sales@acme.sg", text=None,
+        metadata={"field": "quote_channel", "claim_id": "quote_scope",
+                  "parent_ledger_id": page_ref.ledger_id},
+    )
+    channel = SimpleNamespace(
+        type=QuoteChannelType.CONTACT_EMAIL,
+        value="sales@acme.sg", evidence_ref=quote_ref,
+    )
+    candidate = SimpleNamespace(
+        vendor_name="Acme Pte Ltd", quote_channel=channel,
+        evidence_refs=[page_ref, quote_ref],
+    )
+    result = VerificationSpine(ledger).verify_candidate(candidate)
+    return result, next(c for c in result.claims if c.field == "quote_channel")
+
+
+def test_spine_requires_endpoint_not_be_explicitly_limited_to_another_purpose():
+    rejected, quote = _verify_quote_text(
+        "Acme Pte Ltd uses sales@acme.sg for purchase orders only."
+    )
+    assert rejected.verified is False
+    assert "non-quotation purpose" in quote.rationale
+
+    accepted, quote = _verify_quote_text(
+        "Acme Pte Ltd uses sales@acme.sg for sales and quotations."
+    )
+    assert accepted.verified is True
+    assert quote.verified is True
+
+
+def test_spine_accepts_generic_sales_email_as_quote_channel_when_not_excluded():
+    accepted, quote = _verify_quote_text(
+        "Acme Pte Ltd can be reached at sales@acme.sg."
+    )
+    assert accepted.verified is True
+    assert quote.verified is True
+
+
+def test_model_and_safe_cannot_override_hard_scope_rejection():
+    optimistic_model = lambda claim, premise: {"score": 1.0, "rationale": "entails"}
+    result, price = _verify_price_text(
+        "Acme Pte Ltd old price was SGD 129 per unit.", model=optimistic_model,
+    )
+    assert result.verified is False
+    assert price.verifier_score == 0.0
+    assert "historical or inactive" in price.rationale
+
+    claim = decompose(SimpleNamespace(
+        vendor_name="Acme Pte Ltd", price=129.0, currency="SGD", unit="unit",
+        pricing_status=PricingStatus.EXACT_PRICE, evidence_refs=[],
+    ))[1]
+    safe = SafeReverifier(MiniCheck(model=optimistic_model)).reverify(
+        claim, corpus=["Acme Pte Ltd old price was SGD 129 per unit."],
+    )
+    assert safe.supported is False
+    assert safe.method == "safe_historical_scope"
+    assert "historical or inactive" in safe.rationale
 
 
 # --- spine over a ledger ---------------------------------------------------

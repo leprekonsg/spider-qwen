@@ -14,7 +14,6 @@ function Pipeline({ activePhase, progress, running, budget = null }) {
       <div className="sq-overline" style={{ marginRight: 22, color: "var(--sq-slate-taupe)" }}>Pipeline</div>
       {steps.map((s, i) => {
         const state = !running && progress >= 1 ? "done"
-                    : i < activeIdx ? "done"
                     : i === activeIdx && running ? "active"
                     : "idle";
         const colors = {

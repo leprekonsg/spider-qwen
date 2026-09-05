@@ -301,6 +301,88 @@ def test_http_real_offline_controller_lifecycle(tmp_path, monkeypatch, no_networ
         service.close()
 
 
+def test_real_controller_emits_safe_durable_trace_events_before_completion(tmp_path, no_network):
+    from spider_qwen.api.factory import build_run_service
+    from spider_qwen.observability.tracing import TraceEvent
+
+    service = build_run_service(state_dir=str(tmp_path), max_concurrency=1, max_queued=0)
+    try:
+        started = service.start(
+            {"query": "office cleaning Singapore trace-secret", "profile": "offline_demo"},
+            owner="alice",
+        )
+        run_id = started["run_id"]
+        final = _wait_for(service, run_id, owner="alice", timeout=5)
+        assert final["status"] == "completed"
+
+        events = service.events(run_id, owner="alice")
+        trace_events = [event for event in events if event["kind"] == "trace"]
+        assert trace_events
+        assert {event["detail"]["step"] for event in trace_events} >= {
+            "search", "fetch", "supplier_consolidation",
+        }
+        assert all(event["phase"] == event["detail"]["phase"] for event in trace_events)
+        assert all(event["event_id"] < events[-1]["event_id"] for event in trace_events)
+        assert events[-1]["kind"] == "completed"
+        assert "trace-secret" not in str(trace_events)
+        assert all("error" not in event["detail"] for event in trace_events)
+
+        event_count = len(events)
+        service._record_trace_event(run_id, TraceEvent(
+            run_id=run_id, mode="service_quote_required", step="search", error="secret",
+            detail={"query": "trace-secret"},
+        ))
+        assert len(service.events(run_id, owner="alice")) == event_count
+        with pytest.raises(RunNotFound):
+            service.events(run_id, owner="bob")
+    finally:
+        service.close()
+
+
+def test_trace_sink_failure_fails_run_without_exposing_the_sink_error(tmp_path):
+    from spider_qwen.observability.tracing import TraceEvent
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def builder(*, trace_callback=None, **_config):
+        class Controller:
+            async def run(self, _query, *, mode, run_id, **_kwargs):
+                entered.set()
+                while not release.is_set():
+                    await asyncio.sleep(0.01)
+                try:
+                    trace_callback(TraceEvent(
+                        run_id=run_id, mode=mode, step="search", tool="mock",
+                        error="provider secret should never reach the event feed",
+                    ))
+                except Exception:
+                    pass
+                return {"run_id": run_id, "validated_candidates": [], "rfq_drafts": []}
+
+        return Controller()
+
+    service = RunService(state_dir=tmp_path, controller_builder=builder)
+    try:
+        started = service.start({"query": "safe callback", "profile": "offline_demo"}, owner="local")
+        assert entered.wait(timeout=2)
+
+        def fail_sink(_event):
+            raise RuntimeError("provider secret should never reach the event feed")
+
+        service._safe_trace_detail = fail_sink
+        release.set()
+        final = _wait_for(service, started["run_id"])
+        assert final["status"] == "failed"
+        assert final["error"] == "RunServiceError: Unable to persist run progress event."
+        events = service.events(started["run_id"], owner="local")
+        assert [event["kind"] for event in events][-1] == "failed"
+        assert "provider secret" not in str(events)
+    finally:
+        release.set()
+        service.close()
+
+
 def test_operator_reviewed_profile_cannot_be_downgraded(tmp_path, monkeypatch):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient

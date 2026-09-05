@@ -409,6 +409,16 @@ The UI uses durable runs: `POST /runs`, `GET /runs/{id}`, `/result`, `/events`,
 and `POST /runs/{id}/cancel`. Stop waits for worker acknowledgement. SQLite
 persists results and events; interrupted runs are marked on restart. Run one
 server process per state directory. Memory and evidence are isolated by owner.
+The events feed includes persisted discovery, retrieval, extraction, verification,
+and consolidation summaries; the UI polls these actual worker events.
+
+Candidates expose `readiness.stage`: `discovered`, `evidence_checked`, or
+`review_ready`. Review-ready means the recorded claims passed enabled checks,
+the evidence and required RFQ inputs are complete, and the evidence grade meets
+the configured floor. It does not record human approval. Offline fixtures cannot
+be review-ready. Verification rejects explicit negation, historical-only claims,
+attached currency/unit mismatches, and contacts explicitly restricted to other
+purposes; it is not general semantic entailment or a freshness guarantee.
 
 `SPIDER_QWEN_DEFAULT_PROFILE` selects `offline_demo` (default), `live_research`,
 or `reviewed_procurement`. Live profiles require `SPIDER_QWEN_ALLOW_LIVE=1` and

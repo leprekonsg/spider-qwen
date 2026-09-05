@@ -10,7 +10,7 @@ import json
 import time
 from pathlib import Path
 
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
@@ -31,11 +31,18 @@ class TraceEvent(BaseModel):
 
 
 class Tracer:
-    def __init__(self, run_id: str, mode: str, state_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        mode: str,
+        state_dir: str | Path | None = None,
+        on_record: Callable[[TraceEvent], None] | None = None,
+    ) -> None:
         self.run_id = run_id
         self.mode = mode
         self.events: list[TraceEvent] = []
         self._state_dir = Path(state_dir) if state_dir else None
+        self._on_record = on_record
 
     def record(
         self,
@@ -49,13 +56,17 @@ class Tracer:
         error: str | None = None,
         detail: dict[str, Any] | None = None,
     ) -> None:
-        self.events.append(
-            TraceEvent(
-                run_id=self.run_id, mode=self.mode, step=step, tool=tool,
-                input_count=input_count, output_count=output_count,
-                latency_ms=latency_ms, status=status, error=error, detail=detail,
-            )
+        event = TraceEvent(
+            run_id=self.run_id, mode=self.mode, step=step, tool=tool,
+            input_count=input_count, output_count=output_count,
+            latency_ms=latency_ms, status=status, error=error, detail=detail,
         )
+        self.events.append(event)
+        if self._on_record is not None:
+            # Durable consumers treat a trace event as part of the run contract.
+            # Do not swallow sink failures: the controller must fail visibly rather
+            # than complete with a silently incomplete event stream.
+            self._on_record(event)
 
     def persist(self) -> Path | None:
         if not self._state_dir:

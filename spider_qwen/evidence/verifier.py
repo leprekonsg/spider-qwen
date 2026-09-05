@@ -18,7 +18,7 @@ from .models import sha256_hex
 from ..verification.atomic import AtomicClaim, decompose
 from ..verification.grade import grade_claim, worst_grade
 from ..verification.grounding import classify_grounding, worst_decision
-from ..verification.minicheck import MiniCheck
+from ..verification.minicheck import HARD_REJECTION_METHODS, MiniCheck
 from ..verification.safe import SafeReverifier
 
 
@@ -170,7 +170,9 @@ class VerificationSpine:
         subject = self._minicheck_subject(claim)
         result = self.minicheck.check(
             claim=claim.predicate, value=claim.object_value, evidence_span=premise,
-            field=claim.field, subject=subject,
+            field=claim.field, subject=subject, currency=claim.currency,
+            unit=claim.unit, pricing_status=claim.pricing_status,
+            channel_type=claim.channel_type,
         )
         cited_supported = result.supported
         stage = "minicheck"
@@ -178,7 +180,10 @@ class VerificationSpine:
         if not result.supported:
             corpus_entries = self._corpus_entries(exclude=premise)
             reverified = self.safe.reverify(claim, corpus=[s for _, s in corpus_entries])
-            if reverified.score > result.score:
+            if reverified.score > result.score or (
+                result.method == "no_evidence"
+                and reverified.method.removeprefix("safe_") in HARD_REJECTION_METHODS
+            ):
                 result = reverified
             stage = "minicheck+safe"
         grounding = classify_grounding(
@@ -308,7 +313,9 @@ class VerificationSpine:
                 continue
             check = self.minicheck.check(
                 claim=claim.predicate, value=claim.object_value, evidence_span=span,
-                field=claim.field, subject=subject,
+                field=claim.field, subject=subject, currency=claim.currency,
+                unit=claim.unit, pricing_status=claim.pricing_status,
+                channel_type=claim.channel_type,
             )
             if check.supported:
                 count += 1

@@ -31,6 +31,13 @@ class AtomicClaim(BaseModel):
     object_value: str = ""  # the concrete value to ground (price/email/phone/...)
     critical: bool = False  # a failed critical claim blocks the whole candidate
     evidence_ref: Any = None  # optional, most-specific EvidenceRef on a sub-object
+    # Structured qualifiers carried by the candidate schema.  MiniCheck uses
+    # these only for explicit scope contradictions; absent qualifiers stay
+    # unknown rather than being guessed from the predicate text.
+    currency: str = ""
+    unit: str = ""
+    pricing_status: str = ""
+    channel_type: str = ""
 
 
 def _claim_id(subject: str, field: str, value: str) -> str:
@@ -72,6 +79,7 @@ def decompose(candidate: Any) -> list[AtomicClaim]:
             claim_id=_claim_id(subject, "price", value), field="price",
             subject=subject, predicate=predicate, object_value=value,
             critical=status not in _NON_PRICED,
+            currency=str(currency), unit=str(unit), pricing_status=status,
         ))
 
     moq = getattr(candidate, "moq", None)
@@ -85,11 +93,13 @@ def decompose(candidate: Any) -> list[AtomicClaim]:
     quote_channel = getattr(candidate, "quote_channel", None)
     if quote_channel is not None:
         value = getattr(quote_channel, "value", "") or ""
+        channel_type = _status_str(getattr(quote_channel, "type", None))
         claims.append(AtomicClaim(
             claim_id=_claim_id(subject, "quote_channel", value), field="quote_channel",
             subject=subject, predicate=f"{subject} accepts quote requests via {value}.",
             object_value=value, critical=True,
             evidence_ref=getattr(quote_channel, "evidence_ref", None),
+            channel_type=channel_type,
         ))
 
     for contact in getattr(candidate, "contacts", None) or []:

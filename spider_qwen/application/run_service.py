@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -16,10 +18,46 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .profiles import PIPELINE_VERSION, OperatorProfile, get_profile
+from ..observability.tracing import TraceEvent
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out", "interrupted"}
 ACTIVE_STATUSES = {"queued", "running", "cancelling"}
+_SAFE_TRACE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+_TRACE_STEPS = {
+    "search", "query_expand", "crag_evaluate", "crag_corrective", "geo_fallback",
+    "verification_replan", "compiler_execute", "frontier_drain", "frontier_score",
+    "frontier_rescore", "reasoning_trajectory", "fetch", "fetch_fallback", "wayback_recover",
+    "page_judge", "page_role_gate", "qwen_json_extract", "pricing_subject_gate",
+    "verify_claims", "conformal_gate", "memory_credit_verify", "supplier_consolidation",
+    "memory_recall",
+}
+_TRACE_TOOLS = {
+    "mcp_search", "mock", "tinyfish_search", "tinyfish_fetch", "page_judge",
+    "qwen_web_extractor", "wayback_cdx", "qwen_corrective", "search", "llm_compiler",
+    "frontier", "qwen_frontier_scorer", "semantic_memory", "url_heuristic",
+    "qwen_json_extractor", "minicheck_verifier", "conformal_abstainer", "supplier_identity",
+    "query_rewrite",
+}
+_TRACE_STATUSES = {"success", "error", "blocked", "rejected"}
+
+
+def _trace_phase(step: str) -> str:
+    if step in {"search", "query_expand", "crag_evaluate", "crag_corrective", "geo_fallback",
+                "verification_replan", "compiler_execute", "frontier_drain", "frontier_score",
+                "frontier_rescore", "reasoning_trajectory"}:
+        return "discovery"
+    if step in {"fetch", "fetch_fallback", "wayback_recover", "page_judge", "page_role_gate"}:
+        return "retrieval"
+    if step in {"qwen_json_extract", "pricing_subject_gate"}:
+        return "extraction"
+    if step in {"verify_claims", "conformal_gate", "memory_credit_verify"}:
+        return "verification"
+    if step == "supplier_consolidation":
+        return "consolidation"
+    if step == "memory_recall":
+        return "memory"
+    return "processing"
 
 
 class RunServiceError(RuntimeError):
@@ -223,6 +261,78 @@ class RunService:
             (run_id, _iso(), kind, _json(detail)),
         )
 
+    def _builder_accepts_trace_callback(self) -> bool:
+        """Keep injected controller builders compatible with the old contract."""
+        try:
+            parameters = inspect.signature(self.controller_builder).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            parameter.name == "trace_callback"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+
+    @staticmethod
+    def _safe_trace_identifier(value: object, *, fallback: str) -> str:
+        text = str(value or "")
+        return text if _SAFE_TRACE_IDENTIFIER.fullmatch(text) else fallback
+
+    @staticmethod
+    def _bounded_trace_count(value: object, *, maximum: int = 1_000_000) -> int:
+        try:
+            return max(0, min(int(value), maximum))
+        except (TypeError, ValueError):
+            return 0
+
+    def _safe_trace_detail(self, event: TraceEvent) -> dict[str, Any]:
+        """Make a durable progress event from trace metadata, never trace payloads."""
+        raw_step = self._safe_trace_identifier(event.step, fallback="custom")
+        raw_tool = self._safe_trace_identifier(event.tool, fallback="custom")
+        raw_status = self._safe_trace_identifier(event.status, fallback="unknown")
+        step = raw_step if raw_step in _TRACE_STEPS else "custom"
+        status = raw_status if raw_status in _TRACE_STATUSES else "unknown"
+        phase = _trace_phase(step)
+        detail: dict[str, Any] = {
+            "phase": phase,
+            "step": step,
+            "tool": raw_tool if raw_tool in _TRACE_TOOLS else "custom",
+            "status": status,
+            "input_count": self._bounded_trace_count(event.input_count),
+            "output_count": self._bounded_trace_count(event.output_count),
+            "latency_ms": self._bounded_trace_count(event.latency_ms, maximum=3_600_000),
+            "message": f"{phase}: {step.replace('_', ' ')} ({status})",
+        }
+        source = event.detail if isinstance(event.detail, dict) else {}
+        counters = {
+            key: self._bounded_trace_count(source[key])
+            for key in ("cache_hits", "merged_candidates", "pages")
+            if isinstance(source.get(key), int) and not isinstance(source.get(key), bool)
+        }
+        if counters:
+            detail["counters"] = counters
+        return detail
+
+    def _record_trace_event(self, run_id: str, event: TraceEvent) -> None:
+        """Append one trace event while its run is active.
+
+        A write failure deliberately propagates through ``Tracer.record`` and
+        fails the run. Skipping a callback after a terminal transition is the
+        only intentional omission: terminal event ordering is immutable.
+        """
+        try:
+            detail = self._safe_trace_detail(event)
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT status FROM runs WHERE run_id=?", (run_id,)).fetchone()
+                if row is None or row["status"] in TERMINAL_STATUSES:
+                    conn.rollback()
+                    return
+                self._insert_event(conn, run_id, "trace", detail)
+                conn.commit()
+        except Exception as exc:
+            raise RunServiceError("Unable to persist run progress event.") from exc
+
     @staticmethod
     def _validate_owner(owner: str) -> str:
         owner = owner.strip()
@@ -374,17 +484,34 @@ class RunService:
         row = self._row_for_worker(run_id)
         effective_config = json.loads(row["effective_config_json"])
         configured_seconds = int(effective_config["deadline_seconds"])
+        trace_failures: list[RunServiceError] = []
+
+        def record_trace(event: TraceEvent, *, rid: str = run_id) -> None:
+            if trace_failures:
+                raise trace_failures[0]
+            try:
+                self._record_trace_event(rid, event)
+            except RunServiceError as exc:
+                # Some optional controller seams catch Exception and continue.
+                # Keep this failure sticky so a run cannot complete with a lost
+                # durable trace event even when the immediate exception is caught.
+                trace_failures.append(exc)
+                raise
+
         try:
             scoped_state_dir = owner_state_dir(self.state_dir, row["owner"])
-            controller = self.controller_builder(
-                offline=profile.offline,
-                state_dir=str(scoped_state_dir),
-                qwen_json=profile.qwen_json,
-                verify=profile.verify,
-                require_review=profile.require_review,
-                rfq_grade_floor=profile.rfq_grade_floor,
-                expected_config_fingerprint=effective_config["config_fingerprint"],
-            )
+            builder_config = {
+                "offline": profile.offline,
+                "state_dir": str(scoped_state_dir),
+                "qwen_json": profile.qwen_json,
+                "verify": profile.verify,
+                "require_review": profile.require_review,
+                "rfq_grade_floor": profile.rfq_grade_floor,
+                "expected_config_fingerprint": effective_config["config_fingerprint"],
+            }
+            if self._builder_accepts_trace_callback():
+                builder_config["trace_callback"] = record_trace
+            controller = self.controller_builder(**builder_config)
             row = self._row_for_worker(run_id)
             deadline = datetime.fromisoformat(row["deadline_at"].replace("Z", "+00:00"))
             remaining = (deadline - _utc_now()).total_seconds()
@@ -406,6 +533,8 @@ class RunService:
             if latest["cancel_requested"] or self._closed:
                 task.cancel()
             result = loop.run_until_complete(asyncio.wait_for(task, timeout=remaining))
+            if trace_failures:
+                raise trace_failures[0]
             payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
             self._complete(run_id, payload)
         except asyncio.CancelledError:
@@ -553,18 +682,20 @@ class RunService:
                 "WHERE run_id=? AND event_id>? ORDER BY event_id LIMIT ?",
                 (run_id, after_id, limit),
             ).fetchall()
-        return [
-            {
+        events = []
+        for row in rows:
+            detail = json.loads(row["detail_json"])
+            events.append({
                 "id": row["event_id"],
                 "event_id": row["event_id"],
                 "run_id": run_id,
                 "created_at": row["created_at"],
                 "kind": row["kind"],
-                "detail": json.loads(row["detail_json"]),
-                "message": json.loads(row["detail_json"]).get("message", row["kind"]),
-            }
-            for row in rows
-        ]
+                "phase": detail.get("phase"),
+                "detail": detail,
+                "message": detail.get("message", row["kind"]),
+            })
+        return events
 
     def cancel(self, run_id: str, *, owner: str) -> dict:
         row = self._owned_row(run_id, owner)
