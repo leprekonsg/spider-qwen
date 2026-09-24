@@ -57,7 +57,12 @@ class QwenQueryRewriter(RecordsTokenUsage):
             raise QwenQueryRewriterError(
                 "openai package not installed. Install with: pip install 'spider-qwen[qwen]'"
             ) from exc
-        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        from ..tools.qwen_timeouts import MAX_RETRIES, qwen_timeout_seconds
+
+        self._client = OpenAI(
+            api_key=self.api_key, base_url=self.base_url,
+            timeout=qwen_timeout_seconds(), max_retries=MAX_RETRIES,
+        )
         return self._client
 
     def __call__(self, prompt: str) -> str:

@@ -67,22 +67,41 @@ def test_emission_gate_rejects_legacy_or_changed_pipeline_calibration(tmp_path, 
     from spider_qwen.verification.conformal import gate_from_env
 
     path = tmp_path / "pipeline-calibration.json"
-    payload = {"examples": [{"verifier_score": 0.9, "prediction_correct": True}] * 50}
+    payload: dict = {"examples": [{"verifier_score": 0.9, "prediction_correct": True}] * 50}
     monkeypatch.setenv("SPIDER_QWEN_CONFORMAL_CALIBRATION", str(path))
+    payload["config_fingerprint"] = "current"
     for version in (None, "older-pipeline", "active-pipeline"):
         if version:
             payload["pipeline_version"] = version
         path.write_text(json.dumps(payload), encoding="utf-8")
-        gate = gate_from_env(expected_pipeline_version="active-pipeline")
+        gate = gate_from_env(expected_pipeline_version="active-pipeline",
+                             expected_config_fingerprint="current")
         assert (gate.threshold is not None) == (version == "active-pipeline")
         if version != "active-pipeline":
             assert "pipeline_version" in gate.reasons[0]
     assert gate_from_env(expected_pipeline_version="active-pipeline",
-                         expected_config_fingerprint="current").threshold is None
-    payload["config_fingerprint"] = "current"
+                         expected_config_fingerprint="changed").threshold is None
+    del payload["config_fingerprint"]
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert gate_from_env(expected_pipeline_version="active-pipeline",
-                         expected_config_fingerprint="current").threshold is not None
+                         expected_config_fingerprint="current").threshold is None
+
+
+def test_emission_gate_fails_closed_without_run_fingerprint(tmp_path, monkeypatch):
+    # A plain run has no config fingerprint: even a file matching the pipeline
+    # and carrying a fingerprint must not calibrate the gate.
+    from spider_qwen.verification.conformal import gate_from_env
+
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps({
+        "pipeline_version": "active-pipeline", "config_fingerprint": "current",
+        "examples": [{"verifier_score": 0.9, "prediction_correct": True}] * 50,
+    }), encoding="utf-8")
+    monkeypatch.setenv("SPIDER_QWEN_CONFORMAL_CALIBRATION", str(path))
+    gate = gate_from_env(expected_pipeline_version="active-pipeline")
+    assert gate.threshold is None
+    assert "config_fingerprint" in gate.reasons[0]
+    assert gate.decide(0.99).calibrated is False  # never gates emission
 
 
 def test_abstainer_from_env_loads_calibration_file(tmp_path, monkeypatch):

@@ -57,7 +57,12 @@ class QwenWebExtractor:
             raise QwenWebExtractorError(
                 "openai package not installed. Install with: pip install 'spider-qwen[qwen]'"
             ) from exc
-        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        from .qwen_timeouts import MAX_RETRIES, qwen_timeout_seconds
+
+        self._client = OpenAI(
+            api_key=self.api_key, base_url=self.base_url,
+            timeout=qwen_timeout_seconds("web_extractor"), max_retries=MAX_RETRIES,
+        )
         return self._client
 
     def extract_url_sync(self, url: str) -> ExtractedPage:

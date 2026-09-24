@@ -182,7 +182,9 @@ class SearchService:
     ) -> SearchResultSet:
         from ..agent.tool_registry import ToolRegistry
 
-        ToolRegistry.require_allowed("search")
+        ToolRegistry.require_allowed(
+            "search", getattr(self.provider, "search_source_tool", "mcp_search"),
+        )
         if self.tracker is not None:
             self.tracker.consume_search()
         source_tool = getattr(self.provider, "search_source_tool", "mcp_search")

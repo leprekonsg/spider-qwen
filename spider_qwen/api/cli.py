@@ -118,7 +118,9 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
         print("usage: spider-qwen evidence [show|verify|graph|prove] <run_id>", file=sys.stderr)
         return 2
     try:
-        ledger = EvidenceLedger.load(args.run_id, _state_dir())
+        ledger = EvidenceLedger.load(
+            args.run_id, _state_dir(), verify_integrity=args.evidence_command != "verify",
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -468,57 +470,63 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
             print("usage: spider-qwen calibrate template <run_id> [...] --out <file>",
                   file=sys.stderr)
             return 2
+        # One example per candidate that reached the emission gate, scored as
+        # the gate scores it (weakest critical claim). Per-claim rows would
+        # calibrate a different decision than the one being gated.
         examples: list[dict] = []
         runs_seen = 0
+        seen_keys: set[tuple[str, str]] = set()
         for run_id in args.run_ids:
+            trace_path = Path(_state_dir()) / "traces" / f"{run_id}.trace.json"
             try:
-                ledger = EvidenceLedger.load(run_id, _state_dir())
-            except ValueError as exc:
-                print(str(exc), file=sys.stderr)
-                return 2
-            if len(ledger) == 0:
-                print(f"No evidence found for run '{run_id}' under {_state_dir()}",
-                      file=sys.stderr)
+                events = json.loads(trace_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                print(f"No readable trace for run '{run_id}' at {trace_path}", file=sys.stderr)
                 continue
             runs_seen += 1
-            for item in ledger.items():
-                meta = item.metadata
-                if "claim_id" not in meta or "verifier_score" not in meta:
-                    continue  # only verifier-annotated claim rows are gradable
+            for event in events:
+                detail = event.get("detail") or {}
+                if event.get("step") != "emission_gate_input" or "verifier_score" not in detail:
+                    continue
+                # A replan round can re-gate the same candidate; count it once.
+                key = (run_id, json.dumps(sorted(detail.get("evidence_ledger_ids") or [])))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
                 examples.append({
-                    "verifier_score": meta["verifier_score"],
-                    # Grade by hand: true if the verifier's verdict was right
-                    # for this claim, false if it was wrong. Left null, `check`
-                    # and run startup both refuse the file loudly.
+                    "verifier_score": detail["verifier_score"],
+                    # Grade by hand: true if every critical claim of this
+                    # candidate is correct on its cited page (emitting it would
+                    # be right), false otherwise. Left null, `check` and run
+                    # startup both refuse the file loudly.
                     "prediction_correct": None,
-                    "claim": {
+                    "candidate": {
                         "run_id": run_id,
-                        "ledger_id": item.ledger_id,
-                        "field": meta.get("field"),
-                        "value": item.snippet,
-                        "url": item.url,
-                        "verifier_verdict": meta.get("verified"),
-                        "grounding": meta.get("grounding"),
-                        "grade": meta.get("grade"),
-                        "stage": meta.get("verifier_stage"),
+                        "vendor": detail.get("vendor"),
+                        "critical_claims": detail.get("critical_claims") or [],
+                        "evidence_ledger_ids": detail.get("evidence_ledger_ids") or [],
                     },
                 })
         if not examples:
             print(
-                "No verifier-annotated claim rows found in the given runs. "
-                "Calibration needs runs executed with the verification spine on: "
-                "SPIDER_QWEN_VERIFICATION_ENABLED=1 or --judged-demo.",
+                "No emission-gate candidates found in the given runs' traces. "
+                "Calibration needs runs executed with the verification spine on "
+                "(SPIDER_QWEN_VERIFICATION_ENABLED=1 or --judged-demo) and a state "
+                "directory, so traces are persisted.",
                 file=sys.stderr,
             )
             return 1
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({"alpha": args.alpha, "examples": examples}, indent=2),
-                       encoding="utf-8")
+        out.write_text(json.dumps({
+            "alpha": args.alpha,
+            "label": "prediction_correct: every critical claim of the emitted candidate is correct",
+            "examples": examples,
+        }, indent=2), encoding="utf-8")
         print(json.dumps({
             "out": str(out),
             "runs": runs_seen,
-            "claims": len(examples),
+            "candidates": len(examples),
             "next": (
                 f"Hand-grade every prediction_correct in {out} (true/false), then "
                 f"run: spider-qwen calibrate check {out}"

@@ -219,8 +219,20 @@ class Controller:
         if self.page_judge is None and self.policy.qwen_page_judge_enabled():
             self.page_judge = PageJudge()
         # T-2.2: verification spine. Opt-in (off by default) so the offline
-        # pipeline is unchanged unless enabled here or via policy.
+        # pipeline is unchanged unless enabled here or via policy. Qwen proposes,
+        # deterministic code verifies: any path that lets model output become a
+        # candidate value or page text forces the spine on, whatever was asked.
         self.verify_claims = self.policy.verification_enabled() if verify is None else verify
+        self.verification_forced_by = [
+            name for name, active in (
+                ("qwen_structured_extraction", self.qwen_json_extractor is not None),
+                ("qwen_fetch_fallback", self.fetch_fallback is not None),
+                ("qwen_fetch_provider",
+                 getattr(self.fetch_provider, "provider_name", "") == "qwen_web_extractor"),
+            ) if active
+        ]
+        if self.verification_forced_by:
+            self.verify_claims = True
         self.minicheck = minicheck
         if self.minicheck is None and self.policy.qwen_nli_enabled() and not self.offline:
             # Qwen scores (claim, span) entailment through MiniCheck's model
@@ -1513,7 +1525,18 @@ class Controller:
 
     def _product_candidate(self, ctx, query, page, meta, refs, geo_score, page_url, qwen: QwenPageExtraction | None):
         pricing = self._extractors["pricing"].extract(page.text, page_url=page_url)
-        if qwen and qwen.pricing.status != PricingStatus.NOT_FOUND:
+        # Untrusted model output: a Qwen price replaces the deterministic one
+        # only when its quoted text is located on the page and states the
+        # reported price.
+        if (
+            qwen
+            and qwen.pricing.status != PricingStatus.NOT_FOUND
+            and _located_on_page(page.text, qwen.pricing.matched_text)
+            and (
+                qwen.pricing.price is None
+                or value_grounded(str(qwen.pricing.price), qwen.pricing.matched_text or "")
+            )
+        ):
             pricing = PricingResult(
                 status=qwen.pricing.status,
                 price=qwen.pricing.price,
@@ -1579,10 +1602,12 @@ class Controller:
         if qwen:
             # Untrusted model output: an empty-valued channel must not enter the
             # pool -- the deterministic extractor enforces the same guard, and a
-            # critical claim with no concrete value can never verify.
+            # critical claim with no concrete value can never verify. A value
+            # not located on the page would have no evidence of its own.
             qc_matches.extend(
                 QuoteChannelMatch(type=q.type, value=q.value, matched_text=q.matched_text or q.value)
-                for q in qwen.quote_channels if (q.value or "").strip()
+                for q in qwen.quote_channels
+                if (q.value or "").strip() and _located_on_page(page.text, q.value)
             )
         best = self._extractors["quote_channel"].best(qc_matches)
         if self.verify_claims:
@@ -1643,6 +1668,8 @@ class Controller:
                     privacy_class=c.privacy_class,
                 )
                 for c in qwen.contacts
+                # Untrusted model output: only values located on the page.
+                if _located_on_page(page.text, c.value)
             )
         ref = refs[0] if refs else None
         site_domain = _registrable(meta.website)
@@ -1754,6 +1781,24 @@ class Controller:
             # candidate (its critical-claim verifier score falls below the LTT
             # selective-risk threshold). Uncalibrated decisions never gate --
             # no guarantee exists -- and the rationale surfaces in metrics below.
+            if tracer is not None:
+                # The emission gate's unit of decision: one candidate, scored by
+                # its weakest critical claim. `calibrate template` harvests these
+                # so calibration examples match what the gate decides on.
+                tracer.record(step="emission_gate_input", tool="conformal_abstainer",
+                              input_count=len(cv.claims), output_count=1,
+                              detail={
+                                  "vendor": cv.vendor_name,
+                                  "verifier_score": cv.verifier_score,
+                                  "critical_claims": [
+                                      {"field": c.field, "predicate": c.predicate,
+                                       "verifier_score": c.verifier_score}
+                                      for c in cv.claims if c.critical
+                                  ],
+                                  "evidence_ledger_ids": [
+                                      ref.ledger_id for ref in getattr(cand, "evidence_refs", []) or []
+                                  ],
+                              })
             if self.conformal is not None:
                 decision = self.conformal.decide(cv.verifier_score)
                 if decision.calibrated and decision.abstain:
@@ -1779,6 +1824,7 @@ class Controller:
         metrics = {"claims_verified": verified_claims, "claims_unsupported": unsupported_claims,
                    "candidates_blocked_unverified": blocked,
                    "verification_assessments": assessments,
+                   "verification_forced_by": list(self.verification_forced_by),
                    "replan_recommended": replan_recommended}
         if self.conformal is not None:
             calibrated = self.conformal.threshold is not None
@@ -2194,27 +2240,33 @@ class Controller:
         if page.evidence_ref is None:
             return None
         snippet, start_char, end_char, span = _span_for_match(page.text, matched_text, fallback_terms)
-        if not snippet:
+        located = bool(snippet) and 0 <= start_char < end_char
+        link = (matched_text or "").strip()
+        # No located span or page link, no evidence row: an unlocated value
+        # would otherwise become its own snippet and cite itself.
+        if not located and not (link and link in (page.links or [])):
             return None
         source_tool = getattr(page, "source_tool", "tinyfish_fetch")
         if source_tool not in _EVIDENCE_SOURCE_TOOLS:
             source_tool = "tinyfish_fetch"
-        claim_id = f"claim_{sha256_hex(f'{page.evidence_ref.ledger_id}:{extraction}:{start_char}:{end_char}:{span}')[:12]}"
         metadata = {
             "extraction": extraction,
             "field": extraction,
             "matched_text": matched_text,
-            "claim_id": claim_id,
             "parent_ledger_id": page.evidence_ref.ledger_id,
         }
-        if start_char >= 0 and end_char >= start_char:
+        if located:
             metadata.update(
-                {
-                    "start_char": start_char,
-                    "end_char": end_char,
-                    "span_hash": sha256_hex(span),
-                }
+                {"start_char": start_char, "end_char": end_char, "span_hash": sha256_hex(span)}
             )
+        else:
+            # Located in the page's outbound links, which verify_ledger checks
+            # against the parent row's recorded links.
+            snippet = span = link
+            metadata["located_in"] = "links"
+        metadata["claim_id"] = (
+            f"claim_{sha256_hex(f'{page.evidence_ref.ledger_id}:{extraction}:{start_char}:{end_char}:{span}')[:12]}"
+        )
         return ctx.ledger.record(
             source_tool=source_tool,
             url=page.url,
@@ -2258,7 +2310,7 @@ class Controller:
             )
         )
         if self.persist:
-            self._persist_semantic(validated, result.run_id, review_store)
+            self._persist_semantic(validated, result.run_id, review_store, ctx.ledger)
             ctx.ledger.persist()
             # Judge-verifiable citations: every final evidence ref ships its
             # inclusion proof against the commitment that persist() just
@@ -2324,12 +2376,22 @@ class Controller:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(render_supplier_graph(ledger), encoding="utf-8")
 
-    def _persist_semantic(self, validated, run_id: str, review_store: ReviewStore | None) -> None:
+    def _persist_semantic(
+        self, validated, run_id: str, review_store: ReviewStore | None, ledger: EvidenceLedger,
+    ) -> None:
         if self.state_dir is None:
             return
         memory = self._semantic_memory()
         if memory is None:
             return
+
+        def from_page(ref) -> bool:
+            # A value recalled from memory and attached to this run's candidate
+            # is not new evidence; re-promoting it would reinforce memory with
+            # itself and defeat decay.
+            item = ledger.get(getattr(ref, "ledger_id", "") or "")
+            return item is not None and item.source_tool != "semantic_memory"
+
         for cand in validated:
             if isinstance(cand, ContactCandidate):
                 domain_match = bool(cand.validation_signals.get("domain_match"))
@@ -2337,7 +2399,7 @@ class Controller:
                     # v1 promotion is per extracted contact. Cross-source promotion
                     # becomes active when candidate construction aggregates same-value
                     # contacts across multiple fetched pages.
-                    if not should_promote_contact(
+                    if not from_page(contact.evidence_ref) or not should_promote_contact(
                         evidence_refs=[contact.evidence_ref],
                         confidence=contact.confidence,
                         domain_match=domain_match,
@@ -2357,6 +2419,15 @@ class Controller:
                     )
                     self._maybe_review_disputed_fact(run_id, review_store, stored)
             if isinstance(cand, ServiceCandidate) and cand.quote_channel is not None:
+                ref = cand.quote_channel.evidence_ref
+                # Same promotion rule as contacts. The ownership signal is that
+                # the channel was found on the vendor's own site.
+                if not from_page(ref) or not should_promote_contact(
+                    evidence_refs=[ref], confidence=0.85,
+                    domain_match=bool(cand.website)
+                    and _registrable(ref.url) == _registrable(cand.website),
+                ):
+                    continue
                 stored = memory.upsert(
                     SemanticFact(
                         entity_type="vendor",
@@ -2405,6 +2476,11 @@ def _merge_refs(*groups) -> list:
             seen.add(ref.ledger_id)
             out.append(ref)
     return out
+
+
+def _located_on_page(text: str, value: str | None) -> bool:
+    """Would ``_record_extraction_ref`` find a span for this value?"""
+    return _span_for_match(text, value or "")[1] >= 0
 
 
 def _span_for_match(text: str, matched_text: str, fallback_terms: list[str] | None = None) -> tuple[str, int, int, str]:

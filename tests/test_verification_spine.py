@@ -73,8 +73,26 @@ def test_minicheck_model_seam_is_clamped_and_typechecked():
         return {"score": 99.0}  # out of range -> clamped to 1.0
 
     r = MiniCheck(model=junk_model).check(claim="x", value="zzz",
-                                          evidence_span="unrelated text")
+                                          evidence_span="text with zzz in it")
     assert r.method == "model" and 0.0 <= r.score <= 1.0
+
+
+def test_minicheck_model_cannot_vouch_for_value_absent_from_evidence():
+    def optimistic(claim, premise):
+        return {"score": 0.99}
+
+    r = MiniCheck(model=optimistic).check(claim="x", value="zzz", evidence_span="unrelated text")
+    assert r.supported is False
+    assert r.method == "value_ungrounded"
+
+
+def test_minicheck_model_nan_score_falls_back_to_heuristic():
+    def nan_model(claim, premise):
+        return {"score": float("nan")}
+
+    r = MiniCheck(model=nan_model).check(claim="x", value="zzz", evidence_span="unrelated text")
+    assert r.supported is False
+    assert r.method != "model"
 
 
 def test_minicheck_numeric_value_requires_whole_number_match():
@@ -596,7 +614,13 @@ class _InjectingQwen:
         return QwenPageExtraction()  # grounded path -> deterministic extraction used
 
 
-def _product_controller(verify):
+# A sentence on Shadow's page that prices another vendor's stock. A Qwen claim
+# quoting it passes the extraction gate (located on the page, states the price)
+# and only the spine's vendor co-location check can reject it.
+_CROSS_VENDOR_SENTENCE = " Acme Chairs also lists S$999 per unit."
+
+
+def _product_controller(verify, *, shadow_extra=""):
     from spider_qwen.agent.controller import Controller
     good = "https://acme-chairs.sg/ergonomic"
     bad = "https://shadow-supply.sg/ergonomic"
@@ -604,7 +628,8 @@ def _product_controller(verify):
         good: {"title": "Acme Chairs", "text": "Acme supplies ergonomic office chairs in "
                "Singapore. Public pricing S$129 per unit. MOQ 50 units. Email sales@acme-chairs.sg."},
         bad: {"title": "Shadow Supply", "text": "Shadow Supply offers ergonomic office chairs "
-              "in Singapore. Public pricing S$129 per unit. MOQ 50 units. Email sales@shadow-supply.sg."},
+              "in Singapore. Public pricing S$129 per unit. MOQ 50 units. Email sales@shadow-supply.sg."
+              + shadow_extra},
     }
     controller = Controller(
         search_provider=_FixedSearch([good, bad]),
@@ -616,7 +641,7 @@ def _product_controller(verify):
 
 
 def test_controller_blocks_injected_unsupported_claim_from_output():
-    controller, good, bad = _product_controller(verify=True)
+    controller, good, bad = _product_controller(verify=True, shadow_extra=_CROSS_VENDOR_SENTENCE)
     result = asyncio.run(controller.run("ergonomic office chairs Singapore",
                                         mode="product_exact_price"))
     assert result.metrics.get("candidates_blocked_unverified", 0) >= 1
@@ -637,7 +662,8 @@ def test_controller_blocks_when_safe_would_cross_verify_via_other_vendor():
         good: {"title": "Acme Chairs", "text": "Acme supplies ergonomic office chairs in "
                "Singapore. Public pricing S$999 per unit. MOQ 50 units. Email sales@acme-chairs.sg."},
         bad: {"title": "Shadow Supply", "text": "Shadow Supply offers ergonomic office chairs "
-              "in Singapore. Public pricing S$129 per unit. MOQ 50 units. Email sales@shadow-supply.sg."},
+              "in Singapore. Public pricing S$129 per unit. MOQ 50 units. Email sales@shadow-supply.sg."
+              + _CROSS_VENDOR_SENTENCE},
     }
     controller = Controller(
         search_provider=_FixedSearch([good, bad]),
@@ -656,14 +682,69 @@ def test_controller_blocks_when_safe_would_cross_verify_via_other_vendor():
             assert cand.get("price") == 999.0
 
 
-def test_controller_without_verification_keeps_injected_claim():
+def test_controller_drops_unlocated_qwen_price_without_verification():
+    # The Qwen price is quoted from text that is not on the page. It must not
+    # reach output even with the spine off: no located span, no evidence row.
     controller, good, bad = _product_controller(verify=False)
     result = asyncio.run(controller.run("ergonomic office chairs Singapore",
                                         mode="product_exact_price"))
-    assert result.metrics.get("candidates_blocked_unverified", 0) == 0
     prices = [c.get("price") for c in result.validated_candidates]
-    assert 999.0 in prices  # unverified -> fabricated price reaches output
-    assert 129.0 in prices  # the grounded candidate also survives (asymmetry guard)
+    assert 999.0 not in prices
+    assert prices and all(price == 129.0 for price in prices)
+
+
+def test_qwen_extraction_forces_verification_even_when_disabled():
+    # A located, self-consistent quote that belongs to another vendor is caught
+    # only by the spine, so a Qwen extraction seam must switch the spine on.
+    controller, good, bad = _product_controller(verify=False, shadow_extra=_CROSS_VENDOR_SENTENCE)
+    assert controller.verify_claims is True
+    assert controller.verification_forced_by == ["qwen_structured_extraction"]
+    result = asyncio.run(controller.run("ergonomic office chairs Singapore",
+                                        mode="product_exact_price"))
+    assert result.metrics.get("candidates_blocked_unverified", 0) >= 1
+    assert result.metrics.get("verification_forced_by") == ["qwen_structured_extraction"]
+    prices = [c.get("price") for c in result.validated_candidates]
+    assert 999.0 not in prices
+    assert 129.0 in prices
+
+
+def test_verification_stays_optional_without_qwen_extraction():
+    from spider_qwen.agent.controller import Controller
+
+    controller = Controller(offline=True, verify=False, state_dir=None, persist=False)
+    assert controller.verify_claims is False
+    assert controller.verification_forced_by == []
+
+
+def test_spine_blocks_candidate_with_only_noncritical_claims():
+    ledger = EvidenceLedger("run_test", None)
+    page_ref = ledger.record(source_tool="tinyfish_fetch", url="https://acme.sg",
+                             snippet="Acme Pte Ltd", text="Acme Pte Ltd cleans offices.", metadata={})
+    cand = SimpleNamespace(vendor_name="Acme Pte Ltd", pricing_status=PricingStatus.QUOTE_REQUIRED,
+                           price=None, moq=None, evidence_refs=[page_ref])
+    cv = VerificationSpine(ledger).verify_candidate(cand)
+    assert all(not c.critical for c in cv.claims)
+    assert cv.verified is False
+    assert cv.unsupported_critical == ["no_critical_claims"]
+
+
+def test_spine_never_grounds_claims_in_model_written_page_text():
+    # Qwen web_extractor output is the model's rendering of a page. A price
+    # "found" in it is model output checked against model output.
+    ledger = EvidenceLedger("run_test", None)
+    text = "Shadow Supply sells ergonomic chairs. Price S$999 per unit."
+    page_ref = ledger.record(source_tool="qwen_web_extractor", url="https://shadow-supply.sg",
+                             snippet=text, text=text, metadata={})
+    claim_ref = ledger.record(source_tool="qwen_web_extractor", url="https://shadow-supply.sg",
+                              snippet="S$999 per unit", text=None,
+                              metadata={"field": "pricing", "claim_id": "claim_model_999",
+                                        "parent_ledger_id": page_ref.ledger_id})
+    cand = SimpleNamespace(vendor_name="Shadow Supply", price=999.0, currency="SGD", unit="unit",
+                           moq=None, pricing_status=PricingStatus.EXACT_PRICE,
+                           evidence_refs=[page_ref, claim_ref])
+    cv = VerificationSpine(ledger).verify_candidate(cand)
+    assert next(c for c in cv.claims if c.field == "price").verified is False
+    assert cv.verified is False
 
 
 # --- sentence boundaries vs dotted values ----------------------------------

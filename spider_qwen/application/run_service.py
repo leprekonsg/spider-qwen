@@ -30,7 +30,8 @@ _TRACE_STEPS = {
     "verification_replan", "compiler_execute", "frontier_drain", "frontier_score",
     "frontier_rescore", "reasoning_trajectory", "fetch", "fetch_fallback", "wayback_recover",
     "page_judge", "page_role_gate", "qwen_json_extract", "pricing_subject_gate",
-    "verify_claims", "conformal_gate", "memory_credit_verify", "supplier_consolidation",
+    "verify_claims", "emission_gate_input", "conformal_gate", "memory_credit_verify",
+    "supplier_consolidation",
     "memory_recall",
     "retrieval_recipe_shadow",
 }
@@ -55,7 +56,7 @@ def _trace_phase(step: str) -> str:
         return "retrieval"
     if step in {"qwen_json_extract", "pricing_subject_gate"}:
         return "extraction"
-    if step in {"verify_claims", "conformal_gate", "memory_credit_verify"}:
+    if step in {"verify_claims", "emission_gate_input", "conformal_gate", "memory_credit_verify"}:
         return "verification"
     if step == "supplier_consolidation":
         return "consolidation"

@@ -28,20 +28,26 @@ def judged_run(capsys, tmp_path, monkeypatch) -> tuple[str, object]:
     return result["run_id"], tmp_path
 
 
-def test_template_harvests_verifier_scored_claims(capsys, judged_run):
+def test_template_harvests_one_example_per_gated_candidate(capsys, judged_run):
     run_id, tmp_path = judged_run
     out_file = tmp_path / "calibration.json"
     summary = _run_cli(capsys, ["calibrate", "template", run_id, "--out", str(out_file)])
-    assert summary["claims"] >= 1
+    assert summary["candidates"] >= 1
     assert "calibrate check" in summary["next"]
 
     payload = json.loads(out_file.read_text(encoding="utf-8"))
     assert payload["alpha"] == 0.1
+    assert "emitted candidate" in payload["label"]
+    trace = json.loads((tmp_path / "traces" / f"{run_id}.trace.json").read_text(encoding="utf-8"))
+    gate_scores = [e["detail"]["verifier_score"] for e in trace if e["step"] == "emission_gate_input"]
+    # The gate's unit: one row per candidate at its weakest critical claim.
+    assert sorted(ex["verifier_score"] for ex in payload["examples"]) == sorted(gate_scores)
     for example in payload["examples"]:
         assert isinstance(example["verifier_score"], float)
         assert example["prediction_correct"] is None  # graded by a human, never auto-filled
-        assert example["claim"]["run_id"] == run_id
-        assert example["claim"]["ledger_id"].startswith("ev_")
+        assert example["candidate"]["run_id"] == run_id
+        assert example["candidate"]["critical_claims"]
+        assert all(i.startswith("ev_") for i in example["candidate"]["evidence_ledger_ids"])
 
 
 def test_check_refuses_ungraded_template(capsys, judged_run):

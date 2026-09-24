@@ -42,17 +42,24 @@ class Revalidator:
         new_refs: list[EvidenceRef],
     ) -> SemanticFact:
         def mutation(current: SemanticFact) -> None:
+            # Only refs the fact does not already cite are new evidence. Re-citing
+            # the old refs neither re-verifies the value nor supports a new one.
+            known = {ref.ledger_id for ref in current.evidence_refs}
+            fresh = [ref for ref in new_refs if ref.ledger_id not in known]
             if new_value is None or not new_refs:
                 current.status = "stale"
+            elif not fresh:
+                if new_value != current.value:
+                    current.status = "disputed"
             elif new_value == current.value:
                 current.confidence = max(current.confidence, new_confidence)
                 current.last_verified_at = utc_now_iso()
                 current.status = "active"
-                current.evidence_refs = SemanticMemory._merge_refs(current.evidence_refs, new_refs)
+                current.evidence_refs = SemanticMemory._merge_refs(current.evidence_refs, fresh)
             elif new_confidence > current.confidence + 0.1:
                 current.value = new_value
                 current.confidence = new_confidence
-                current.evidence_refs = new_refs
+                current.evidence_refs = fresh
                 current.last_verified_at = utc_now_iso()
                 current.status = "active"
             else:

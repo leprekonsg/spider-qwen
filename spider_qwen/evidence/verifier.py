@@ -45,7 +45,7 @@ def verify_ledger(ledger: EvidenceLedger) -> EvidenceVerificationResult:
         start = item.metadata.get("start_char")
         end = item.metadata.get("end_char")
         span_hash = item.metadata.get("span_hash")
-        if start is None and end is None:
+        if start is None and end is None and not parent_id:
             continue
         result.checked_claims += 1
         if not parent_id:
@@ -54,6 +54,15 @@ def verify_ledger(ledger: EvidenceLedger) -> EvidenceVerificationResult:
         parent = ledger.get(parent_id)
         if parent is None:
             result.issues.append(_issue(item.ledger_id, f"missing parent evidence {parent_id}"))
+            continue
+        if start is None and end is None:
+            # An extraction row must be located in its parent: in the page text
+            # (offsets) or in the page's recorded outbound links.
+            links = parent.metadata.get("links") or []
+            if item.metadata.get("located_in") == "links" and item.snippet.strip() in links:
+                result.valid_claims += 1
+            else:
+                result.issues.append(_issue(item.ledger_id, "extraction row is not located in its parent"))
             continue
         if parent.text is None:
             result.issues.append(_issue(item.ledger_id, f"parent evidence {parent_id} has no stored text"))
@@ -153,6 +162,10 @@ class VerificationSpine:
             )
         unsupported_critical = [r.claim_id for r in results if r.critical and not r.verified]
         critical = [r for r in results if r.critical]
+        if not critical:
+            # Only non-critical atoms (vendor name, MOQ): nothing procurement-
+            # relevant was verified, so the candidate must not pass as verified.
+            unsupported_critical = ["no_critical_claims"]
         score = round(min(r.verifier_score for r in (critical or results)), 4)
         verified_grades = [r.grade for r in results if r.verified and r.grade]
         self._repoint_citations(candidate, results)
@@ -360,10 +373,12 @@ class VerificationSpine:
         parent_id = item.metadata.get("parent_ledger_id")
         if parent_id:
             parent = self.ledger.get(parent_id)
+            if parent is not None and _model_written(parent):
+                return ""
             if parent is not None and parent.text:
                 # The genuine source page (title + body), not a self-referential snippet.
                 return _join(parent.title, parent.text)
-        if item.text:
+        if item.text and not _model_written(item):
             return _join(item.title, item.text)
         return ""  # no genuine page text -> ungrounded; never fall back to the snippet
 
@@ -372,7 +387,7 @@ class VerificationSpine:
         traced back to the row that produced it (re-pointing, host dedupe)."""
         entries: list[tuple[Any, str]] = []
         for item in self.ledger.items():
-            if not item.text:
+            if not item.text or _model_written(item):
                 continue
             span = _join(item.title, item.text)
             if span and span != exclude:
@@ -397,6 +412,15 @@ class VerificationSpine:
             # did not ground the claim; the row named here did.
             updates["repointed_to"] = verification.repointed_ledger_id
         self.ledger.annotate(item.ledger_id, updates)
+
+
+def _model_written(item: Any) -> bool:
+    """Page text written by a model, not fetched verbatim.
+
+    The Qwen web_extractor returns the model's rendering of a page, so grounding
+    a claim in it would check model output against model output.
+    """
+    return item.source_tool == "qwen_web_extractor"
 
 
 def _join(title: str | None, text: str) -> str:

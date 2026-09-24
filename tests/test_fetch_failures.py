@@ -225,3 +225,27 @@ def test_fallback_failure_leaves_original_outcome():
     assert rs.results == []
     assert service.fallback_recovered == 0
     assert service.fetch_outcomes == {ERROR_TRANSPORT: 1}
+
+
+def test_fallback_retry_spends_fetch_budget():
+    from spider_qwen.agent.budget import Budget, BudgetTracker
+
+    url = "https://flaky.sg/office-cleaning"
+    fallback = _RecordingFallback()
+    service, _ = _fallback_service({url: {"status": 500}}, fallback)
+    service.tracker = BudgetTracker(Budget(mode="service_quote_required", max_fetch_urls=2))
+    asyncio.run(service.fetch([url]))
+    assert fallback.calls == [[url]]
+    assert service.tracker.fetch_urls == 2  # the first attempt and the retry
+
+
+def test_fallback_retry_skipped_when_fetch_budget_is_spent():
+    from spider_qwen.agent.budget import Budget, BudgetTracker
+
+    url = "https://flaky.sg/office-cleaning"
+    fallback = _RecordingFallback()
+    service, _ = _fallback_service({url: {"status": 500}}, fallback)
+    service.tracker = BudgetTracker(Budget(mode="service_quote_required", max_fetch_urls=1))
+    asyncio.run(service.fetch([url]))
+    assert fallback.calls == []
+    assert service.tracker.stop_reason is None

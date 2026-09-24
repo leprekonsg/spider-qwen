@@ -98,7 +98,7 @@ class SelectiveRiskGate(BaseModel):
         (or at least enough error-free emitted mass): with zero observed
         errors, certifying alpha/delta over a 3-point grid requires
         m >= ln(delta/3)/ln(1-alpha) emitted calibration points
-        (33 at 0.1/0.1, 84 at 0.05/0.05).
+        (33 at 0.1/0.1, 80 at 0.05/0.05).
         """
         a = min(0.5, max(0.01, float(alpha)))
         d = min(0.5, max(0.01, float(delta)))
@@ -270,7 +270,16 @@ def gate_from_env(*, expected_pipeline_version: str | None = None,
             f"collect and hand-grade new evaluations for {expected_pipeline_version}. "
             "Selective-risk guarantee unavailable."
         ])
-    if expected_config_fingerprint is not None and payload.get("config_fingerprint") != expected_config_fingerprint:
+    if expected_config_fingerprint is None:
+        # Fail closed: without this run's fingerprint there is no way to show
+        # the file was graded under the same providers, models and policy.
+        return SelectiveRiskGate(reasons=[
+            "This run has no config_fingerprint (plain `spider-qwen run`), so the "
+            "calibration file cannot be matched to its providers, models and policy; "
+            "use an operator profile run (run service or `benchmark --profile`). "
+            "Selective-risk guarantee unavailable."
+        ])
+    if payload.get("config_fingerprint") != expected_config_fingerprint:
         return SelectiveRiskGate(reasons=[
             "Calibration config_fingerprint is missing or differs from this run's configuration; "
             "collect and hand-grade evaluations with the same providers, models and policy. "

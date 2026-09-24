@@ -20,6 +20,7 @@ instruction follower.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Callable
 
@@ -530,12 +531,19 @@ class MiniCheck:
         if not isinstance(out, dict):
             return base
         score = out.get("score")
-        if not isinstance(score, (int, float)) or isinstance(score, bool):
+        if not isinstance(score, (int, float)) or isinstance(score, bool) or not math.isfinite(score):
+            # NaN would survive the clamp: min(1.0, nan) is 1.0.
             return base
         score = round(max(0.0, min(1.0, float(score))), 4)
         rationale = out.get("rationale")
         supported = score >= self.threshold
         norm_value = _norm(value)
+        if supported and norm_value and not _value_grounded(norm_value, premise):
+            # The model may not vouch for a concrete value absent from the page.
+            return MiniCheckResult(
+                supported=False, score=0.0, method="value_ungrounded",
+                rationale=f"model score {score} rejected: value '{value}' not in evidence",
+            )
         if supported and (subject or "").strip() and norm_value:
             if not _relation_grounded(subject, norm_value, premise):
                 if _value_grounded(norm_value, premise):

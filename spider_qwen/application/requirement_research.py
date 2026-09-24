@@ -109,6 +109,11 @@ class RequirementResearchHandler:
                 # operation makes exactly one provider request for one URL.
                 client.max_retries = 0
                 provider = TinyFishFetchProvider(client=client)
+            # This path calls the provider directly (one metered request per
+            # URL), so it applies the v1 allowlist itself.
+            from ..agent.tool_registry import ToolRegistry
+
+            ToolRegistry.require_allowed("fetch", provider.fetch_source_tool)
             try:
                 for url in payload.urls:
                     result = await context.acquire_async(

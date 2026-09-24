@@ -84,15 +84,23 @@ named test does not belong here.
   values with only generic legal tokens need every token present. Relation
   claims with no concrete value fail closed (`no_value`). The optional Qwen
   NLI seam (`QWEN_NLI_ENABLED`) is clamped and re-gated: the model cannot
-  bypass the co-location guard, crash the path, or verify an empty value.
+  bypass the co-location guard, crash the path, verify an empty value, or
+  vouch for a concrete value absent from the page (`value_ungrounded`); a
+  non-finite score falls back to the heuristic.
   Explicit negation, historical-only scope, exact-vs-starting prices, attached
   currency/unit mismatches, and explicitly restricted non-quotation endpoints
   produce rejection reasons. Price qualifiers must match one numeric occurrence.
   Learned NLI and SAFE use the same hard guards.
+- **When it runs:** off by default (`SPIDER_QWEN_VERIFICATION_ENABLED`), but
+  forced on whenever model output can become a candidate value or page text:
+  Qwen structured extraction, the Qwen fetch fallback, or a Qwen fetch
+  provider. `RunResult.metrics.verification_forced_by` names the cause.
 - **Guarantee:** a fabricated value cannot verify against its own extraction
-  snippet (grounding always runs against the parent page text); a critical
-  claim that fails both the cited span and SAFE corpus re-verification blocks
-  the candidate.
+  snippet (grounding always runs against the parent page text); page text
+  written by a model (`qwen_web_extractor` rows) never serves as a premise or
+  SAFE corpus span; a critical claim that fails both the cited span and SAFE
+  corpus re-verification blocks the candidate; a candidate with no critical
+  claim at all is not verified (`no_critical_claims`).
 - **Not guaranteed:** general semantic entailment, product/entity binding,
   unit/currency conversion, date-based freshness, or predicate matching beyond
   the explicit guards. Clause co-location remains a heuristic; ambiguous
@@ -194,7 +202,11 @@ named test does not belong here.
 - **Mechanism (the gate):** exact binomial tail p-values
   `BinomCDF(k; m, alpha)` over the fixed threshold grid (0.5, 0.75, 0.9)
   under Bonferroni at `delta/3`; the smallest certified threshold deploys.
-  The gate reads the CRITICAL-claim verifier score only. A fixed grid is
+  The gate reads the minimum CRITICAL-claim verifier score (a candidate
+  without critical claims never reaches it). `calibrate template` harvests
+  exactly that unit: one example per candidate that reached the gate (trace
+  step `emission_gate_input`), labelled true when every critical claim of the
+  emitted candidate is correct. A fixed grid is
   deliberate: a fixed-sequence walk from the strictest threshold has one
   emitted example at the top and can never reject; from the loosest it dies
   on its first failure.
@@ -211,7 +223,7 @@ named test does not belong here.
   "wrong"); grading stays human.
 - **Floors:** zero-error certification needs
   `ceil(ln(delta/3) / ln(1-alpha))` emitted calibration examples: 33 at
-  alpha=delta=0.1, 84 at 0.05/0.05. Undersized calibration is useless, not
+  alpha=delta=0.1, 80 at 0.05/0.05. Undersized calibration is useless, not
   unsafe.
 - **Coverage advisory:** the split-conformal `ConformalAbstainer` (calibrated
   on correct examples, threshold at the `ceil((n+1)(1-alpha))` quantile of
@@ -220,8 +232,13 @@ named test does not belong here.
   confident-but-wrong candidates.
 - **Config:** `SPIDER_QWEN_CONFORMAL_CALIBRATION` -> JSON
   `{"alpha": 0.1, "delta": 0.1, "examples": [{"verifier_score": 0.9,
-  "prediction_correct": true}, ...]}`. Malformed files fail loud at
-  controller construction. Metrics: `RunResult.metrics.conformal`
+  "prediction_correct": true}, ...]}`, plus `pipeline_version` and
+  `config_fingerprint`. Malformed files fail loud at controller construction.
+  The gate calibrates only when both match the run; a run without a
+  fingerprint (plain `spider-qwen run`) fails closed: the gate never blocks
+  and the metrics state that no guarantee is available. Only operator
+  profile runs (run service, `benchmark --profile`) carry a fingerprint.
+  Metrics: `RunResult.metrics.conformal`
   (`risk_bound`, `confidence`, `candidates_abstained`).
 - **Pinned by:** `test_selective_gate_refuses_below_ltt_floor`,
   `test_selective_gate_certifies_with_enough_error_free_mass`,

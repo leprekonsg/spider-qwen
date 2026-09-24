@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from ..evidence.models import EvidenceRef
 
 HIGH_CONFIDENCE = 0.8
@@ -28,13 +30,20 @@ def _norm_value(value: str) -> str:
     return "".join(c for c in (value or "").lower() if c.isalnum())
 
 
+def _source_host(url: str) -> str:
+    host = (urlparse(url).netloc or url or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
 def should_promote_contact(
     *,
     evidence_refs: list[EvidenceRef],
     confidence: float,
     domain_match: bool,
 ) -> bool:
-    independent_sources = len({r.ledger_id for r in evidence_refs})
+    # Independence is per source host: two rows from one page (or one site)
+    # are one source, not two.
+    independent_sources = len({_source_host(r.url) for r in evidence_refs})
     if independent_sources >= 2:
         return True
     if independent_sources >= 1 and confidence >= HIGH_CONFIDENCE and domain_match:

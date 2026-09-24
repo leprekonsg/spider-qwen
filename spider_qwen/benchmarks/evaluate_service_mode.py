@@ -16,8 +16,15 @@ from typing import Any
 
 from ..api.factory import build_controller
 from ..application.profiles import OperatorProfile, get_profile
+from ..evidence.ledger import EvidenceLedger
+from ..evidence.verifier import verify_ledger
 from ..modes.classifier import ModeClassifier
 from .manifest import evaluation_manifest
+
+# Adversarial tags the offline mock providers actually simulate. The mock
+# dispatches on phrases in the URL slug (tools/fetch_service.py MockFetchProvider);
+# every other tag labels the case but changes nothing the controller sees.
+_MOCK_EXERCISED_ADVERSARIAL = frozenset({"missing_price", "conflicting_price", "rate_card"})
 
 
 def _profile_for(offline: bool, profile: str | None) -> OperatorProfile:
@@ -67,6 +74,7 @@ def _must_find_observations(result: Any) -> dict[str, Any]:
 
 def _evaluate_must_find(case: dict[str, Any], result: Any) -> dict[str, dict[str, Any]]:
     observations = _must_find_observations(result)
+    emitted = bool(result.validated_candidates)
     outcomes: dict[str, dict[str, Any]] = {}
     for key, expected in (case.get("must_find") or {}).items():
         # Fixture difficulty tags describe the case; they are not output claims.
@@ -79,6 +87,10 @@ def _evaluate_must_find(case: dict[str, Any], result: Any) -> dict[str, dict[str
         elif actual is None:
             outcomes[key] = {"expected": expected, "status": "unavailable",
                              "reason": "The controller does not expose this outcome yet."}
+        elif expected is False and not emitted:
+            # "Must not find X" is vacuously true when nothing was emitted.
+            outcomes[key] = {"expected": expected, "actual": actual, "status": "unavailable",
+                             "reason": "No validated candidates; a negative expectation is vacuous."}
         elif key == "rfq_draft_status":
             outcomes[key] = {"expected": expected, "actual": sorted(actual),
                              "status": "passed" if expected in actual else "failed"}
@@ -86,6 +98,27 @@ def _evaluate_must_find(case: dict[str, Any], result: Any) -> dict[str, dict[str
             outcomes[key] = {"expected": expected, "actual": actual,
                              "status": "passed" if actual == expected else "failed"}
     return outcomes
+
+
+def _evidence_validity(candidates: list[dict[str, Any]], run_id: Any, state_dir: Any) -> dict[str, Any]:
+    """Do the cited ledger rows exist, and does the run's ledger verify?"""
+    if not candidates:
+        return {"status": "unavailable", "reason": "No candidates."}
+    if not state_dir or not isinstance(run_id, str):
+        return {"status": "unavailable", "reason": "No persisted ledger for this run."}
+    ledger = EvidenceLedger.load(run_id, state_dir)
+    unresolved = sorted({
+        str(ref.get("ledger_id")) for candidate in candidates
+        for ref in candidate.get("evidence_refs") or []
+        if ledger.get(ref.get("ledger_id") or "") is None
+    })
+    verification = verify_ledger(ledger)
+    return {
+        "status": "available",
+        "valid": not unresolved and verification.ok,
+        "unresolved_ledger_ids": unresolved,
+        "ledger_issues": [issue.reason for issue in verification.issues],
+    }
 
 
 async def _run_case(controller: Any, case: dict[str, Any]) -> dict[str, Any]:
@@ -119,6 +152,10 @@ async def _run_case(controller: Any, case: dict[str, Any]) -> dict[str, Any]:
                 assessments_by_claim[key] = assessment
     assessments = list(assessments_by_claim.values())
     must_find = _evaluate_must_find(case, result)
+    evidence_validity = _evidence_validity(
+        evaluation_candidates, getattr(result, "run_id", None), getattr(controller, "state_dir", None),
+    )
+    adversarial = (case.get("must_find") or {}).get("adversarial")
     return {
         "case_id": case["case_id"],
         "expected_mode": case["expected_mode"],
@@ -131,6 +168,9 @@ async def _run_case(controller: Any, case: dict[str, Any]) -> dict[str, Any]:
         "candidate_evidence_present": all(
             candidate.get("evidence_refs") for candidate in evaluation_candidates
         ) if evaluation_candidates else None,
+        "candidate_evidence_valid": evidence_validity.get("valid"),
+        "evidence_validity": evidence_validity,
+        "adversarial": adversarial,
         "required_claims": len(required_claims),
         "required_claim_expected_assessments": len(required_claims) * len(evaluation_candidates),
         "required_claim_assessed": len(assessments),
@@ -180,6 +220,17 @@ def _must_find_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _adversarial_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    tags = [row["adversarial"] for row in rows if row.get("adversarial")]
+    exercised = [tag for tag in tags if tag in _MOCK_EXERCISED_ADVERSARIAL]
+    return {
+        "tagged": len(tags),
+        "exercised_by_offline_mock": len(exercised),
+        "unexercised_tags": sorted({tag for tag in tags if tag not in _MOCK_EXERCISED_ADVERSARIAL}),
+        "note": "Unexercised tags are labels only; offline scores say nothing about them.",
+    }
+
+
 def run_gold_set(
     path: str | Path,
     offline: bool = True,
@@ -212,6 +263,8 @@ def run_gold_set(
         mode_rows = [row for row in rows if row["expected_mode"] == mode]
         per_mode[mode] = {
             "cases": len(mode_cases),
+            # Routing accuracy alone reads 1.0 for a mode that never emits.
+            "emitted_run_rate": _rate(sum(row["validated"] > 0 for row in mode_rows), len(mode_rows)),
             "end_to_end_routing_accuracy": _rate(
                 sum(row["mode_match"] for row in mode_rows), len(mode_rows)
             ),
@@ -233,6 +286,11 @@ def run_gold_set(
         "candidate_evidence_presence_rate": _rate(
             sum(row["candidate_evidence_present"] is True for row in emitted_rows), len(emitted_rows)
         ),
+        "candidate_evidence_validity_rate": _rate(
+            sum(row["candidate_evidence_valid"] is True for row in emitted_rows),
+            sum(row["candidate_evidence_valid"] is not None for row in emitted_rows),
+        ),
+        "adversarial_cases": _adversarial_summary(rows),
         "required_claim_assessment_coverage": _rate(
             assessed_required_claims, expected_required_claim_assessments
         ),

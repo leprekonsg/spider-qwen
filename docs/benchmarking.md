@@ -33,16 +33,26 @@ Add `--live` to use live providers instead of the deterministic mock.
 
 ## Metrics
 
-- `mode_classification_accuracy`
-- `quote_channel_precision`, `rfq_draft_completeness` (service)
-- `pricing_status_accuracy` (product — `evaluate_product_mode.py`)
-- `evidence_coverage` — of runs that validated a candidate, the fraction whose
-  candidates are evidence-backed (the core invariant; should be 1.0)
+- `end_to_end_routing_accuracy` (alias `mode_classification_accuracy`)
+- `quote_channel_yield`, `rfq_draft_yield` (service)
+- `candidate_evidence_presence_rate` (alias `evidence_coverage`) — of runs that
+  emitted candidates, the fraction whose candidates carry evidence refs
+- `candidate_evidence_validity_rate` — of those runs, the fraction whose cited
+  ledger rows exist and whose ledger passes `verify_ledger` (should be 1.0)
+- `must_find` — expectation outcomes. A negative expectation (`false`) is
+  `unavailable` when nothing was emitted, not `passed`.
+- `adversarial_cases` — how many tagged cases the offline mock actually simulates
 - `runtime_seconds`
-- `per_mode` — case count and mode accuracy per procurement mode.
+- `per_mode` — case count, `emitted_run_rate` and routing accuracy per mode.
 
-Offline note: the mock fetcher is deterministic and now includes product pricing,
-missing-price, conflicting-price, and rate-card cases. Report offline and live
-numbers separately; never present fixture-backed scores as live-web validity.
-Mode classification accuracy is a deterministic classifier regression unless it
-comes from `live_validation_set.json`.
+`pricing_status_accuracy` is always null: an aggregate status is not an
+offering label. Offering correctness needs `expected_offerings` records
+(`evaluate_product_mode.py`).
+
+Offline note: the mock search provider synthesizes results from the query
+string and the mock fetcher synthesizes page text from the URL slug, so offline
+quote-channel and RFQ yields are true by construction. Only the `missing_price`,
+`conflicting_price` and `rate_card` adversarial tags change mock behaviour; the
+rest are labels. Offline scores are a regression check on routing, contracts
+and evidence integrity, not a quality measure. Report offline and live numbers
+separately; never present fixture-backed scores as live-web validity.

@@ -14,6 +14,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .. import SCHEMA_VERSION
 from .dedupe import dedupe_items
 from .models import EvidenceItem, EvidenceRef, SourceTool, sha256_hex
 
@@ -236,6 +237,8 @@ class EvidenceLedger:
         wal.parent.mkdir(parents=True, exist_ok=True)
         with wal.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(item.model_dump(mode="json")) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
     def persist(self) -> Path | None:
         target = self.path()
@@ -244,6 +247,7 @@ class EvidenceLedger:
         self._seal_chain()
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "schema_version": SCHEMA_VERSION,
             "run_id": self.run_id,
             "items": [item.model_dump() for item in self._items.values()],
         }
@@ -270,7 +274,14 @@ class EvidenceLedger:
             if signed is not None:
                 payload["signed_tree_head"] = signed
             self._loaded_signed_tree_head = signed
-        target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # Atomic replace: a crash mid-write leaves the previous canonical file
+        # (or none) plus the WAL, never a torn canonical file.
+        tmp = target.with_name(target.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
         wal = self.wal_path()
         if wal is not None:
             # The canonical file now holds everything (including annotations);
@@ -318,11 +329,30 @@ class EvidenceLedger:
         return bundles
 
     @classmethod
-    def load(cls, run_id: str, state_dir: str | Path) -> "EvidenceLedger":
+    def load(
+        cls, run_id: str, state_dir: str | Path, *, verify_integrity: bool = True,
+    ) -> "EvidenceLedger":
+        """Load a persisted ledger, refusing one whose rows were edited.
+
+        ``verify_integrity=False`` is only for the integrity report itself
+        (``evidence verify``), which must load a tampered file to list its issues.
+        """
         ledger = cls(run_id, state_dir)
         target = ledger.path()
         wal = ledger.wal_path()
-        if target and not target.exists() and wal and wal.exists():
+        payload: dict[str, Any] | None = None
+        if target and target.exists():
+            try:
+                payload = json.loads(target.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                if not (wal and wal.exists()):
+                    raise ValueError(
+                        f"Evidence ledger {target} is not valid JSON and no write-ahead "
+                        "log exists to recover it. Restore the file from backup."
+                    ) from exc
+                # Unreadable canonical file (e.g. torn by a pre-atomic persist):
+                # the WAL is the surviving record.
+        if payload is None and wal and wal.exists():
             # Crash recovery: the run never reached persist(), so rebuild from
             # the write-ahead log. A truncated final line (crash mid-append)
             # ends the replay; everything before it is intact.
@@ -343,8 +373,7 @@ class EvidenceLedger:
             ledger._chain_stale = bool(ledger._items)
             ledger._seal_chain()
             return ledger
-        if target and target.exists():
-            payload = json.loads(target.read_text(encoding="utf-8"))
+        if payload is not None:
             for raw in payload.get("items", []):
                 item = EvidenceItem.model_validate(raw)
                 ledger._items[item.ledger_id] = item
@@ -364,6 +393,19 @@ class EvidenceLedger:
                         "tree_head commitment: the file was modified after the "
                         "commitment was written. Re-run `spider-qwen evidence "
                         "verify` or restore the file from backup."
+                    )
+            if verify_integrity and any(item.chain_hash for item in ledger._items.values()):
+                # Recompute every row's hash from its content: the stored
+                # chain_hash values (which the tree head covers) cannot reveal
+                # an edited row whose hash was left in place.
+                chain = ledger.verify_chain()
+                if chain.issues:
+                    raise ValueError(
+                        f"Evidence ledger {target} failed its hash-chain check "
+                        f"({chain.issues[0].ledger_id}: {chain.issues[0].reason}): the "
+                        "file was modified after it was written. Run `spider-qwen "
+                        f"evidence verify {run_id}` to list every altered row, then "
+                        "restore the file from backup."
                     )
             ledger._loaded_tree_head = head
             ledger._loaded_signed_tree_head = payload.get("signed_tree_head")

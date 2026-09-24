@@ -99,11 +99,15 @@ def test_benchmark_service_harness():
     assert summary["per_mode"]["contact_enrichment_only"]["cases"] == 20
     assert summary["per_mode"]["revalidation"]["cases"] == 20
     assert summary["per_mode"]["electronics_substitution"]["cases"] == 20  # T-8.1 obsolete-part S1/S2/S3
-    assert summary["end_to_end_routing_accuracy"] >= 0.8
-    assert summary["quote_channel_yield"] >= 0.9
-    assert summary["rfq_draft_yield"] >= 0.9
-    assert summary["candidate_evidence_presence_rate"] >= 0.9
+    # The offline set is deterministic: floors sit at the current values so a
+    # single regressed case fails, and the evidence invariant is exact.
+    assert summary["end_to_end_routing_accuracy"] >= 0.96
+    assert summary["quote_channel_yield"] == 1.0
+    assert summary["rfq_draft_yield"] == 1.0
+    assert summary["candidate_evidence_presence_rate"] == 1.0
+    assert summary["candidate_evidence_validity_rate"] == 1.0
     assert summary["must_find"]["failed"] == 0
+    assert summary["adversarial_cases"]["exercised_by_offline_mock"] < summary["adversarial_cases"]["tagged"]
     assert summary["evaluation_manifest"]["memory_condition"] == "cold_start_then_shared_state"
 
 
@@ -397,6 +401,10 @@ def test_judged_demo_env_zero_disables_verification(tmp_path, monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
 
+    # Qwen structured extraction forces the spine on, so it must be off too for
+    # the verification env var to be the deciding input.
+    monkeypatch.setenv("QWEN_STRUCTURED_EXTRACTION_ENABLED", "0")
+
     args = argparse.Namespace(offline=True, judged_demo=True, qwen_json=False,
                               serendipity=False, require_review=None)
     prior = _apply_judged_demo_profile(args)
@@ -407,6 +415,27 @@ def test_judged_demo_env_zero_disables_verification(tmp_path, monkeypatch):
 
     # env var explicitly set to 0 -> verify=None -> controller.verify_claims is False/None
     assert not controller.verify_claims
+    assert controller.verification_forced_by == []
+
+
+def test_judged_demo_qwen_extraction_overrides_verification_env_zero(tmp_path, monkeypatch):
+    import argparse
+
+    from spider_qwen.api.cli import _apply_judged_demo_profile, _build_controller, _restore_env
+
+    monkeypatch.setenv("SPIDER_QWEN_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("SPIDER_QWEN_VERIFICATION_ENABLED", "0")
+    monkeypatch.delenv("QWEN_STRUCTURED_EXTRACTION_ENABLED", raising=False)
+    args = argparse.Namespace(offline=True, judged_demo=True, qwen_json=False,
+                              serendipity=False, require_review=None)
+    prior = _apply_judged_demo_profile(args)
+    try:
+        controller = _build_controller(args)
+    finally:
+        _restore_env(prior)
+
+    assert controller.verify_claims is True
+    assert controller.verification_forced_by == ["qwen_structured_extraction"]
 
 
 def test_judged_demo_unset_env_enables_both_surfaces(tmp_path, monkeypatch):
@@ -524,3 +553,15 @@ def test_server_run_is_offline_only_by_default(tmp_path, monkeypatch):
         "offline": True,
     })
     assert invalid_mode.status_code == 422
+
+
+def test_negative_must_find_is_vacuous_when_nothing_emitted():
+    from spider_qwen.benchmarks.evaluate_service_mode import _evaluate_must_find
+
+    empty = SimpleNamespace(validated_candidates=[], rfq_drafts=[])
+    outcome = _evaluate_must_find({"must_find": {"quote_channel": False}}, empty)
+    assert outcome["quote_channel"]["status"] == "unavailable"
+
+    emitted = SimpleNamespace(validated_candidates=[{"quote_channel": None}], rfq_drafts=[])
+    outcome = _evaluate_must_find({"must_find": {"quote_channel": False}}, emitted)
+    assert outcome["quote_channel"]["status"] == "passed"

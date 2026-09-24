@@ -17,11 +17,15 @@ Appended to `<state_dir>/memory/episodic.jsonl`:
 `fact_id, entity_type, entity_name, field, value, confidence, privacy_class,
 evidence_refs, created_at, last_verified_at, status` (`active | stale | disputed`).
 
-**Promotion requires evidence** (`memory/promotion.py`): 2+ independent sources,
-or 1 high-confidence source + domain-ownership signal.
+**Promotion requires evidence** (`memory/promotion.py`): 2+ independent sources
+(distinct source hosts, not ledger rows), or 1 high-confidence source +
+domain-ownership signal. The rule applies to contacts and quote channels; for a
+quote channel the ownership signal is that it was found on the vendor's own
+site. A value recalled from memory into the current run is never re-promoted.
 
 **Conflict policy** (`SemanticMemory.upsert`): same value → boost confidence +
-merge refs; clearly higher-confidence new value → replace; otherwise → `disputed`.
+merge refs; any contradicting value → `disputed`, with every side kept in
+`disputed_alternatives` and the highest-confidence side as the primary value.
 **Disputed facts are excluded from RFQ enrichment in code.**
 
 ## Decay (`memory/decay.py`)
@@ -39,11 +43,18 @@ current run ledger as `semantic_memory` evidence.
 
 ## Revalidation (`memory/revalidation.py`)
 `spider-qwen memory revalidate <fact_id>` refreshes one fact against new
-evidence; contradiction → `disputed`, no fresh evidence → `stale`.
+evidence. Only refs the fact does not already cite count as new evidence:
+
+- no value observed → `stale`
+- same value, new ref → `active`, `last_verified_at` refreshed, ref merged
+- different value, new ref, confidence > stored + 0.1 → value replaced
+- different value otherwise (including no new ref) → `disputed`
+- same value, no new ref → unchanged (re-citing old evidence is not a check)
 
 ## CLI
 
 ```bash
 spider-qwen memory show
-spider-qwen memory revalidate <fact_id> --value sales@example.sg --confidence 0.9
+spider-qwen memory revalidate <fact_id> --value sales@example.sg --confidence 0.9 \
+  --ledger-id ev_... --url https://example.sg/contact --snippet-hash <sha256>
 ```

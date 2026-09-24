@@ -13,12 +13,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .. import SCHEMA_VERSION
+
 
 class PolicyViolation(Exception):
     pass
 
 
 class AuditEvent(BaseModel):
+    schema_version: str = SCHEMA_VERSION
     run_id: str
     action: str
     detail: dict[str, Any] = Field(default_factory=dict)

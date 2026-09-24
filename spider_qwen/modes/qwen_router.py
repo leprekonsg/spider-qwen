@@ -46,7 +46,12 @@ class QwenModeRouter(RecordsTokenUsage):
             raise QwenModeRouterError(
                 "openai package not installed. Install with: pip install 'spider-qwen[qwen]'"
             ) from exc
-        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        from ..tools.qwen_timeouts import MAX_RETRIES, qwen_timeout_seconds
+
+        self._client = OpenAI(
+            api_key=self.api_key, base_url=self.base_url,
+            timeout=qwen_timeout_seconds(), max_retries=MAX_RETRIES,
+        )
         return self._client
 
     def classify(self, query: str) -> ClassificationResult:
@@ -111,12 +116,19 @@ def _tool_arguments(response: Any) -> dict[str, Any]:
         raise QwenModeRouterError("Qwen router response had no choices")
     message = getattr(choices[0], "message", None)
     tool_calls = getattr(message, "tool_calls", None) or []
+    raw = None
     if tool_calls:
         fn = getattr(tool_calls[0], "function", None)
         raw = getattr(fn, "arguments", None)
-        if raw:
-            return json.loads(raw)
-    content = getattr(message, "content", None)
-    if content:
-        return json.loads(content)
-    raise QwenModeRouterError("Qwen router response had no tool call or JSON content")
+    raw = raw or getattr(message, "content", None)
+    if not raw:
+        raise QwenModeRouterError("Qwen router response had no tool call or JSON content")
+    # Malformed model output must surface as a router error so the controller
+    # falls back to the deterministic classifier instead of crashing the run.
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise QwenModeRouterError(f"Qwen router returned malformed JSON: {raw!r:.200}") from exc
+    if not isinstance(data, dict):
+        raise QwenModeRouterError(f"Qwen router returned non-object JSON: {raw!r:.200}")
+    return data

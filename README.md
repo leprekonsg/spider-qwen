@@ -129,6 +129,11 @@ spider-qwen calibrate check calibration.json                          # fitted t
 SPIDER_QWEN_CONFORMAL_CALIBRATION=calibration.json spider-qwen run ...
 ```
 
+The gate calibrates only for operator profile runs: the file needs the run's
+`pipeline_version` and `config_fingerprint` (from the profile's effective
+config). Plain `spider-qwen run` has no fingerprint, so it fails closed and
+reports "guarantee unavailable".
+
 Opt-in modes (default `run` output is unchanged):
 
 ```bash
@@ -503,7 +508,8 @@ sets `X-Spider-Qwen-Owner`; block direct access to that backend.
 eight queued runs, one active live run and 20 admitted live runs per UTC day.
 The daily limit counts runs, not currency. Completed results include the
 effective policy fingerprint; calibration must match both `pipeline_version`
-and `config_fingerprint` for verified profile runs. Re-evaluate changed pipelines.
+and `config_fingerprint`; runs without a fingerprint never use calibration.
+Re-evaluate changed pipelines.
 
 Supported browsers expose five read-only WebMCP tools over the displayed completed
 run: `get_current_run`, `list_candidates`, `get_candidate_evidence`,

@@ -192,7 +192,13 @@ class FetchService:
     ) -> FetchResultSet:
         from ..agent.tool_registry import ToolRegistry
 
-        ToolRegistry.require_allowed("fetch")
+        ToolRegistry.require_allowed(
+            "fetch", getattr(self.provider, "fetch_source_tool", "tinyfish_fetch"),
+        )
+        if self.fallback is not None:
+            ToolRegistry.require_allowed(
+                "fetch", getattr(self.fallback, "fetch_source_tool", "qwen_web_extractor"),
+            )
         urls = [u for u in urls if u]
         if not urls:
             return FetchResultSet(provider=getattr(self.provider, "provider_name", "fetch"))
@@ -310,6 +316,14 @@ class FetchService:
             and not err.get("recovered_via")
         ]
         retry_urls = (list(shell_index) + dead)[:_MAX_FALLBACK_URLS]
+        if self.tracker is not None and retry_urls:
+            # A fallback retry is a live fetch: it spends the same URL budget.
+            # Checked, not consumed-and-caught, so an exhausted budget does not
+            # rewrite the run's stop reason from inside a best-effort retry.
+            remaining = self.tracker.budget.max_fetch_urls - self.tracker.fetch_urls
+            if remaining <= 0 or self.tracker.runtime_exceeded():
+                return
+            retry_urls = retry_urls[:self.tracker.consume_fetch(min(len(retry_urls), remaining))]
         if not retry_urls:
             return
         try:

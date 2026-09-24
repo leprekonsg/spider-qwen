@@ -14,8 +14,11 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
+from .. import SCHEMA_VERSION
+
 
 class TraceEvent(BaseModel):
+    schema_version: str = SCHEMA_VERSION
     run_id: str
     mode: str
     step: str

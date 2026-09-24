@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from spider_qwen.evidence.ledger import EvidenceLedger
 from spider_qwen.governance.source_reliability import (
     DEFAULT_RELIABILITY,
@@ -107,7 +109,42 @@ def test_tampering_with_one_row_breaks_chain(tmp_path):
     payload["items"][0]["snippet"] = "ONE-TAMPERED"  # mutate content, leave chain_hash
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    reloaded = EvidenceLedger.load("run_tamper", tmp_path)
+    # load() recomputes the chain, so a tampered file is refused rather than
+    # served to readers that never call verify_chain().
+    with pytest.raises(ValueError, match=payload["items"][0]["ledger_id"]):
+        EvidenceLedger.load("run_tamper", tmp_path)
+
+    # The integrity report itself can still load it and list the altered row.
+    reloaded = EvidenceLedger.load("run_tamper", tmp_path, verify_integrity=False)
     result = reloaded.verify_chain()
     assert not result.ok
     assert any(issue.ledger_id == payload["items"][0]["ledger_id"] for issue in result.issues)
+
+
+def test_persist_is_atomic_and_versioned(tmp_path):
+    led = EvidenceLedger("run_atomic", tmp_path)
+    led.record(source_tool="mock", url="https://a", snippet="one", confidence=0.5)
+    path = led.persist()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"]
+    assert not path.with_name(path.name + ".tmp").exists()
+    assert not led.wal_path().exists()
+
+
+def test_torn_canonical_file_recovers_from_wal(tmp_path):
+    led = EvidenceLedger("run_torn", tmp_path)
+    led.record(source_tool="mock", url="https://a", snippet="one", confidence=0.5)
+    led.record(source_tool="mock", url="https://b", snippet="two", confidence=0.5)
+    # Crash during a non-atomic write: truncated canonical file, WAL intact.
+    led.path().write_text('{"run_id": "run_torn", "items": [', encoding="utf-8")
+    reloaded = EvidenceLedger.load("run_torn", tmp_path)
+    assert [item.snippet for item in reloaded.items()] == ["one", "two"]
+
+
+def test_torn_canonical_file_without_wal_fails_actionably(tmp_path):
+    led = EvidenceLedger("run_torn2", tmp_path)
+    led.record(source_tool="mock", url="https://a", snippet="one", confidence=0.5)
+    led.persist()
+    led.path().write_text('{"run_id": ', encoding="utf-8")
+    with pytest.raises(ValueError, match="Restore the file from backup"):
+        EvidenceLedger.load("run_torn2", tmp_path)

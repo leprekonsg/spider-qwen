@@ -43,5 +43,7 @@ def test_harness_reports_electronics_without_breaking_evidence_invariant():
     summary = run_gold_set(GOLD_SET, offline=True)
     assert summary["per_mode"]["electronics_substitution"]["cases"] == 20
     assert summary["per_mode"]["electronics_substitution"]["end_to_end_routing_accuracy"] >= 0.9
+    # Routing accuracy alone would hide a mode that never emits a candidate.
+    assert "emitted_run_rate" in summary["per_mode"]["electronics_substitution"]
     # Adding the new cases must not regress the cross-mode evidence invariant.
-    assert summary["candidate_evidence_presence_rate"] >= 0.9
+    assert summary["candidate_evidence_validity_rate"] == 1.0
